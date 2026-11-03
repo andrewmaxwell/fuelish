@@ -13,7 +13,8 @@ import java.util.TimeZone
  *
  *   recordings/<id>/recording.json            metadata, rewritten atomically
  *   recordings/<id>/chunk-000000.ndjson        chunk being written (or left by a crash)
- *   recordings/<id>/chunk-000000.ndjson.gz     finished chunk (immutable)
+ *   recordings/<id>/chunk-000000.ndjson.gz     finished chunk (immutable; deleted once uploaded if
+ *                                              deleteAfterUpload is on)
  *   recordings/<id>/chunk-000000.meta.json     stats + sha256 for the finished chunk
  *   recordings/<id>/chunk-000000.uploaded      marker: server acknowledged this chunk
  *   recordings/<id>/meta.uploaded              sha256 of the last recording.json the server accepted
@@ -39,16 +40,19 @@ class RecordingStore(val root: File) {
     fun pendingChunks(id: String): List<Int> =
         finishedChunks(id).filter { !File(dir(id), RecordingWriter.chunkName(it, ".uploaded")).exists() }
 
+    /** Every finished chunk, whether its data is still on the phone or already uploaded and deleted. */
     fun finishedChunks(id: String): List<Int> =
         dir(id).listFiles()?.mapNotNull { CHUNK_META.matchEntire(it.name)?.groupValues?.get(1)?.toInt() }
-            ?.filter { File(dir(id), RecordingWriter.chunkName(it, ".ndjson.gz")).exists() }
+            ?.filter { chunkFile(id, it).exists() || File(dir(id), RecordingWriter.chunkName(it, ".uploaded")).exists() }
             ?.sorted() ?: emptyList()
 
     fun chunkFile(id: String, seq: Int) = File(dir(id), RecordingWriter.chunkName(seq, ".ndjson.gz"))
     fun chunkMeta(id: String, seq: Int) = JSONObject(File(dir(id), RecordingWriter.chunkName(seq, ".meta.json")).readText())
 
-    fun markChunkUploaded(id: String, seq: Int) {
+    /** Call only after the server acknowledged the chunk. The marker is written before the data is deleted. */
+    fun markChunkUploaded(id: String, seq: Int, deleteData: Boolean = false) {
         File(dir(id), RecordingWriter.chunkName(seq, ".uploaded")).writeText("")
+        if (deleteData) chunkFile(id, seq).delete()
     }
 
     fun metaHash(id: String): String = sha256(File(dir(id), META).readBytes())
@@ -102,7 +106,8 @@ class RecordingStore(val root: File) {
                 meta.put("chunkCount", if (chunks.isEmpty()) 0 else chunks.last() + 1)
                 // Last write before the crash: the leftover raw chunk's mtime if there was one,
                 // otherwise the last finished chunk (not a file we just created while recovering).
-                val lastChunkMs = if (lastModified > 0) 0L else chunks.lastOrNull()?.let { chunkFile(id, it).lastModified() } ?: 0L
+                val lastChunkMs = if (lastModified > 0) 0L else
+                    chunks.lastOrNull()?.let { File(d, RecordingWriter.chunkName(it, ".meta.json")).lastModified() } ?: 0L
                 meta.put("endedWallMs", maxOf(lastModified, lastChunkMs, meta.optLong("startedWallMs")))
                 writeMeta(id, meta)
                 recovered += id

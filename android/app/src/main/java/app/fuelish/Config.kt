@@ -78,7 +78,8 @@ class Config(val json: JSONObject) {
           },
           "upload": {
             "enabled": true,
-            "unmeteredOnly": false
+            "unmeteredOnly": false,
+            "deleteAfterUpload": true
           },
           "auto": {
             "enabled": false,

@@ -20,7 +20,9 @@ docs/      data-format.md: every record type, clock and file
    and the recording is marked `interrupted`.
 3. WorkManager uploads finished chunks whenever there's network (during or after the drive), retrying with backoff.
    Uploads are idempotent: the server keys chunks by `(recording, seq)`, checks the sha256, and treats re-sends as duplicates.
-   A chunk is marked uploaded only after the server acknowledges it.
+   A chunk is marked uploaded only after the server acknowledges it (sha256 verified, stored in R2); its data is then
+   deleted from the phone, and a finished recording's folder is removed once the server has all of it
+   (`upload.deleteAfterUpload`, default on).
 4. The web page shows each recording's completeness (missing chunks), per-stream sample counts and actual intervals,
    dropped records, storage per hour, battery cost, a GPS preview, and raw downloads.
 

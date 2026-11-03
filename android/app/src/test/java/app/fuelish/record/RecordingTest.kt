@@ -57,6 +57,23 @@ class RecordingTest {
     }
 
     @Test
+    fun recoveryCountsChunksAlreadyUploadedAndDeleted() {
+        val store = RecordingStore(tmp.newFolder("root2"))
+        val id = "20261103T000000Z-beef"
+        store.writeMeta(id, JSONObject().put("id", id).put("status", "recording").put("startedWallMs", 1L))
+        val d = store.dir(id)
+        for (seq in 0..1) {
+            val raw = File(d, RecordingWriter.chunkName(seq, ".ndjson")).apply { writeText("{\"k\":\"a\"}\n") }
+            RecordingWriter.finalizeChunk(d, seq, raw, JSONObject())
+            store.markChunkUploaded(id, seq, deleteData = true) // uploaded mid-drive, then the app was killed
+        }
+        File(d, RecordingWriter.chunkName(2, ".ndjson")).writeText("{\"k\":\"b\"}\n")
+        store.recover { null }
+        assertEquals(3, store.readMeta(id).getInt("chunkCount"))
+        assertEquals(listOf(2), store.pendingChunks(id))
+    }
+
+    @Test
     fun recoveryFinishesCrashedRecording() {
         val store = RecordingStore(tmp.newFolder("root"))
         val id = "20261103T000000Z-abcd"
@@ -75,8 +92,9 @@ class RecordingTest {
         assertEquals(2, store.chunkMeta(id, 1).getInt("records"))
         assertEquals(listOf("{\"k\":\"b\"}", "{\"k\":\"c\"}"), gunzipLines(store.chunkFile(id, 1)))
 
-        store.markChunkUploaded(id, 0)
+        store.markChunkUploaded(id, 0, deleteData = true)
         assertEquals(listOf(1), store.pendingChunks(id))
+        assertEquals(listOf(0, 1), store.finishedChunks(id))
         // The active recording is never touched.
         store.writeMeta("active", JSONObject().put("id", "active").put("status", "recording"))
         assertEquals(emptyList<String>(), store.recover { "active" })

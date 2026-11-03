@@ -65,11 +65,14 @@ Sensor keys: `acc`, `acc_unc`, `gyro`, `gyro_unc`, `mag`, `mag_unc`, `gravity`,
 Android/data/app.fuelish/files/recordings/<id>/
   recording.json             metadata (rewritten atomically)
   chunk-000000.ndjson        chunk in progress (or left by a crash; recovered on next launch)
-  chunk-000000.ndjson.gz     finished chunk (immutable; uploaded as-is)
+  chunk-000000.ndjson.gz     finished chunk (immutable; uploaded as-is, then deleted from the phone)
   chunk-000000.meta.json     per-chunk stats: records, per-stream counts and min/max intervals, sha256, GPS preview
   chunk-000000.uploaded      server acknowledged this chunk
   meta.uploaded              sha256 of the last recording.json the server accepted
 ```
+
+With `upload.deleteAfterUpload` on (the default), a recording's whole folder is deleted once it
+is stopped and every chunk plus the final metadata has been acknowledged by the server.
 
 `recording.json` also has `trigger` (`manual`, `car_bluetooth`, `car_bluetooth_notification`) and, once
 stopped, `stopReason` (`manual`, `car_disconnected`, `engine_off`, `service_destroyed`).

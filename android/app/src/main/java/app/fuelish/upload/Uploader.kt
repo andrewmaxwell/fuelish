@@ -26,6 +26,8 @@ class Uploader(
     private val store: RecordingStore,
     private val baseUrl: String,
     private val token: String,
+    /** Delete each chunk once the server has it, and the whole recording once it is complete there. */
+    private val deleteAfterUpload: Boolean = false,
 ) {
     class Response(val code: Int, val body: String)
 
@@ -37,7 +39,10 @@ class Uploader(
         val conflicts = mutableListOf<String>()
         try {
             for (id in store.ids()) {
-                if (store.fullyUploaded(id)) continue
+                if (store.fullyUploaded(id)) {
+                    if (deleteAfterUpload) store.dir(id).deleteRecursively()
+                    continue
+                }
                 putMetaIfChanged(id)?.let { return it.withChunks(uploaded) }
                 for (seq in store.pendingChunks(id)) {
                     when (val r = putChunk(id, seq)) {
@@ -47,6 +52,7 @@ class Uploader(
                     }
                 }
                 putMetaIfChanged(id)?.let { return it.withChunks(uploaded) }
+                if (deleteAfterUpload && store.fullyUploaded(id)) store.dir(id).deleteRecursively()
             }
         } catch (e: IOException) {
             return UploadResult.Retry(e.toString(), uploaded)
@@ -90,7 +96,7 @@ class Uploader(
         val r = request("PUT", "$baseUrl/api/v1/recordings/$id/chunks/$seq", headers, null, store.chunkFile(id, seq))
         if (r.code == 409) return CONFLICT
         classify(r, "chunk $id/$seq")?.let { return it }
-        store.markChunkUploaded(id, seq)
+        store.markChunkUploaded(id, seq, deleteAfterUpload)
         return null
     }
 

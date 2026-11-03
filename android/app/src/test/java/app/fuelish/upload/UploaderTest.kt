@@ -116,6 +116,32 @@ class UploaderTest {
     }
 
     @Test
+    fun deleteAfterUploadFreesOnlyAcknowledgedData() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "done", 2)
+        makeRecording(store, "live", 2, status = "recording")
+        val up = Uploader(store, base, "tok", deleteAfterUpload = true)
+        assertEquals(UploadResult.Done(4), up.uploadAll())
+        // Finished and complete on the server: removed from the phone.
+        assertTrue(!store.dir("done").exists())
+        // Still recording: chunk data deleted, but folder, metadata and markers stay.
+        assertTrue(store.dir("live").exists())
+        assertEquals(listOf(0, 1), store.finishedChunks("live"))
+        assertTrue(!store.chunkFile("live", 0).exists())
+        assertEquals(emptyList<Int>(), store.pendingChunks("live"))
+
+        // A failed upload deletes nothing that wasn't acknowledged.
+        makeRecording(store, "flaky", 2)
+        failNextChunks = 1
+        assertTrue(up.uploadAll() is UploadResult.Retry)
+        assertEquals(listOf(0, 1), store.pendingChunks("flaky"))
+        assertTrue(store.chunkFile("flaky", 0).exists() && store.chunkFile("flaky", 1).exists())
+        assertEquals(UploadResult.Done(2), up.uploadAll())
+        assertTrue(!store.dir("flaky").exists())
+        assertEquals(6, chunks.size)
+    }
+
+    @Test
     fun badTokenIsFatal() {
         val store = RecordingStore(tmp.newFolder())
         makeRecording(store, "a", 1)

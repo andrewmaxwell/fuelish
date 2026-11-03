@@ -17,7 +17,8 @@ class FuelishApp : Application() {
             store.recover { RecorderService.activeId }
             RecorderState.upload.value = RecorderState.upload.value.copy(pending = store.pendingChunkCount())
             UploadWorker.schedulePeriodic(this)
-            if (store.pendingChunkCount() > 0) UploadWorker.enqueue(this)
+            // Also runs when nothing is pending, so already-uploaded recordings get cleaned up.
+            if (store.ids().isNotEmpty()) UploadWorker.enqueue(this)
         }
     }
 }
