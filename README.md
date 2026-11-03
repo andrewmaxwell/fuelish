@@ -83,6 +83,14 @@ npx wrangler deploy
 The deploy prints the URL (e.g. `https://fuelish.<account>.workers.dev`). Open it and sign in with `WEB_TOKEN`.
 The token is kept in that browser's localStorage. Downloads use signed links that expire after 15 minutes.
 
+After that, deploys are automatic: every push to `main` that touches `server/` or `web/` runs the typecheck and
+tests, applies D1 migrations, then deploys (`.github/workflows/deploy.yml`). It needs a Cloudflare API token with
+**Workers Scripts: Edit** and **D1: Edit** on the account, stored as the `CLOUDFLARE_API_TOKEN` repo secret:
+
+```bash
+gh secret set CLOUDFLARE_API_TOKEN
+```
+
 ## Install the Android app
 
 Requirements: Android Studio, or its bundled JDK, plus Android SDK platform 37.2. The SDK path goes in `android/local.properties`.
