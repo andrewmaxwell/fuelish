@@ -2,19 +2,20 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Fuelish</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header>
-    <a href="#/" class="brand">Fuelish</a>
-    <button id="logout" hidden>Sign out</button>
+  <header class="top">
+    <a href="#/" class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18c3-9 6-12 9-12s4 3 7 3" /><circle cx="4" cy="18" r="2.2" /><circle cx="20" cy="9" r="2.2" /></svg>Fuelish</a>
+    <button id="logout" class="ghost" hidden>Sign out</button>
   </header>
   <main id="app"></main>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <script src="route.js"></script>
+  <script src="charts.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

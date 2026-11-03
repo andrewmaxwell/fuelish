@@ -43,19 +43,24 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params)
     }
 
     companion object {
-        private fun constraints(c: Context): Constraints {
-            val unmetered = Prefs.config(c).upload.optBoolean("unmeteredOnly", false)
+        // Uploads wait for Wi-Fi (any unmetered network) unless the user taps "Upload now"
+        // or sets upload.allowCellular. Recordings are ~100 MB/hour, too much for mobile data by default.
+        private fun constraints(c: Context, cellular: Boolean = false): Constraints {
+            val anyNetwork = cellular || Prefs.config(c).upload.optBoolean("allowCellular", false)
             return Constraints.Builder()
-                .setRequiredNetworkType(if (unmetered) NetworkType.UNMETERED else NetworkType.CONNECTED)
+                .setRequiredNetworkType(if (anyNetwork) NetworkType.CONNECTED else NetworkType.UNMETERED)
                 .build()
         }
 
-        fun enqueue(c: Context) {
+        /** Queues an upload. [cellular] = the user asked for it now, so any network will do. */
+        fun enqueue(c: Context, cellular: Boolean = false) {
             val req = OneTimeWorkRequestBuilder<UploadWorker>()
-                .setConstraints(constraints(c))
+                .setConstraints(constraints(c, cellular))
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .build()
-            WorkManager.getInstance(c).enqueueUniqueWork("upload", ExistingWorkPolicy.KEEP, req)
+            // A manual request replaces one still waiting for Wi-Fi (uploads are idempotent, so
+            // interrupting a running one is harmless).
+            WorkManager.getInstance(c).enqueueUniqueWork("upload", if (cellular) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP, req)
         }
 
         fun schedulePeriodic(c: Context) {

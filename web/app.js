@@ -1,4 +1,4 @@
-// Fuelish web: list recordings, inspect collection quality, download raw data.
+// Fuelish web: the list of trips and, for each trip, its route map, speed timeline and friction circle.
 // Plain JS, no build step. The read token lives in localStorage on this browser only.
 
 const app = document.getElementById("app");
@@ -15,30 +15,52 @@ async function api(path, opts = {}) {
     ...opts,
     headers: { Authorization: "Bearer " + token(), ...(opts.headers || {}) },
   });
-  if (res.status === 401) { showLogin("Token rejected."); throw new Error("unauthorized"); }
+  if (res.status === 401) { showLogin("That token didn't work."); throw new Error("unauthorized"); }
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || res.statusText);
   return body;
 }
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const fmtBytes = (n) => n == null ? "–" : n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB";
-const fmtTime = (ms) => ms ? new Date(ms).toLocaleString() : "–";
 function fmtDur(ms) {
   if (ms == null || ms < 0) return "–";
   const s = Math.round(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-  return h ? `${h}h ${m}m` : m ? `${m}m ${s % 60}s` : `${s}s`;
+  return h ? `${h} h ${m} min` : m ? `${m} min` : `${s} s`;
 }
-const num = (x, d = 1) => x == null || !Number.isFinite(x) ? "–" : x.toFixed(d);
+const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const miles = (m) => (m / 1609.344 < 10 ? (m / 1609.344).toFixed(1) : Math.round(m / 1609.344)) + " mi";
+
+// "Monday evening", for a trip's title.
+function tripName(ms) {
+  const d = new Date(ms), h = d.getHours();
+  const part = h < 5 ? "night" : h < 12 ? "morning" : h < 17 ? "afternoon" : h < 21 ? "evening" : "night";
+  return `${d.toLocaleDateString([], { weekday: "long" })} ${part} drive`;
+}
+function dayLabel(ms) {
+  const d = new Date(ms), today = new Date();
+  const days = Math.round((new Date(today.toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return d.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric", year: d.getFullYear() === today.getFullYear() ? undefined : "numeric" });
+}
+const timeRange = (r) => `${clock(r.startedWallMs)} – ${clock(r.endedWallMs ?? r.updatedAtMs)}`;
+
+function statusPill(r) {
+  if (r.status === "recording") return `<span class="pill live"><i></i>Recording</span>`;
+  if (!r.complete) return `<span class="pill warn">Uploading ${r.chunksReceived}/${r.chunkCount ?? "?"}</span>`;
+  return "";
+}
 
 function showLogin(msg = "") {
+  document.body.classList.remove("page-trip");
   document.getElementById("logout").hidden = true;
   app.innerHTML = `
-    <form class="panel login" id="login">
-      <h2>Sign in</h2>
-      <p class="muted">Paste the web (read) token configured on the Worker as <code>WEB_TOKEN</code>.</p>
+    <form class="card login" id="login">
+      <h1>Sign in</h1>
+      <p class="muted">Paste the web token configured on the Worker as <code>WEB_TOKEN</code>. It stays in this browser.</p>
       <input type="password" id="tok" autocomplete="current-password" placeholder="Token" required>
-      <div class="row"><button class="primary">Sign in</button><span class="bad">${esc(msg)}</span></div>
+      <button class="primary">Sign in</button>
+      ${msg ? `<p class="bad">${esc(msg)}</p>` : ""}
     </form>`;
   document.getElementById("login").onsubmit = async (e) => {
     e.preventDefault();
@@ -56,151 +78,126 @@ async function route() {
   if (!token()) return showLogin();
   document.getElementById("logout").hidden = false;
   const m = location.hash.match(/^#\/r\/([A-Za-z0-9_-]+)/);
-  app.innerHTML = `<p class="muted">Loading…</p>`;
+  document.body.classList.toggle("page-trip", !!m);
+  window.scrollTo(0, 0);
+  app.innerHTML = `<p class="muted loading">Loading…</p>`;
   try {
-    if (m) await showRecording(m[1]);
+    if (m) await showTrip(m[1]);
     else await showList();
   } catch (e) {
-    if (e.message !== "unauthorized") app.innerHTML = `<p class="bad">${esc(e.message)}</p>`;
+    if (e.message !== "unauthorized") app.innerHTML = `<p class="bad loading">${esc(e.message)}</p>`;
   }
 }
 
-function statusCell(r) {
-  if (r.status === "recording") return `<span class="warn">recording</span>`;
-  if (r.complete) return `<span class="ok">complete</span>`;
-  return `<span class="bad">${esc(r.status)} · ${r.chunksReceived}/${r.chunkCount ?? "?"} chunks</span>`;
-}
+// ---------- trip list ----------
 
 async function showList() {
   const { recordings } = await api("/recordings");
   if (!recordings.length) {
-    app.innerHTML = `<div class="panel"><h2>No recordings yet</h2><p class="muted">Recordings appear here once the phone uploads its first chunk.</p></div>`;
+    app.innerHTML = `<div class="empty"><h1>No trips yet</h1><p class="muted">Trips show up here once the phone uploads them (on Wi-Fi, or when you tap Upload now).</p></div>`;
     return;
   }
-  app.innerHTML = `
-    <div class="panel scroll"><h2>Recordings</h2><table>
-      <thead><tr><th>Started</th><th>Duration</th><th>Status</th><th class="num">Size</th><th>OBD</th><th>Note</th></tr></thead>
-      <tbody>${recordings.map((r) => {
-        const s = r.meta.summary || {};
-        return `<tr>
-          <td><a href="#/r/${esc(r.id)}">${esc(fmtTime(r.startedWallMs))}</a></td>
-          <td>${fmtDur((r.endedWallMs ?? r.updatedAtMs) - r.startedWallMs)}</td>
-          <td>${statusCell(r)}</td>
-          <td class="num">${fmtBytes(r.bytes)}</td>
-          <td>${s.obd?.connected ? esc(s.obd.protocol || "yes") : `<span class="muted">none</span>`}</td>
-          <td>${esc(r.meta.note || "")}</td></tr>`;
-      }).join("")}</tbody></table></div>`;
-}
+  const weekAgo = Date.now() - 7 * 86400000;
+  const week = recordings.filter((r) => r.startedWallMs >= weekAgo && r.trip?.meters >= 100);
+  const weekMeters = week.reduce((n, r) => n + r.trip.meters, 0);
+  const weekMs = week.reduce((n, r) => n + r.trip.movingMs, 0);
 
-// Merge per-chunk stream stats into whole-recording stats.
-function aggregateStreams(chunks) {
-  const out = {};
-  for (const c of chunks) {
-    for (const [k, s] of Object.entries(c.meta.streams || {})) {
-      const a = (out[k] ||= { n: 0, firstNs: s.firstNs, lastNs: s.lastNs, minDtNs: Infinity, maxDtNs: 0, longGaps: 0 });
-      a.n += s.n;
-      a.firstNs = Math.min(a.firstNs, s.firstNs);
-      a.lastNs = Math.max(a.lastNs, s.lastNs);
-      if (s.minDtNs != null) a.minDtNs = Math.min(a.minDtNs, s.minDtNs);
-      if (s.maxDtNs != null) a.maxDtNs = Math.max(a.maxDtNs, s.maxDtNs);
-      a.longGaps += s.longGaps || 0;
-    }
+  const groups = [];
+  for (const r of recordings) {
+    const label = dayLabel(r.startedWallMs);
+    if (groups.at(-1)?.label !== label) groups.push({ label, items: [] });
+    groups.at(-1).items.push(r);
   }
-  return Object.entries(out).sort(([a], [b]) => a.localeCompare(b));
-}
 
-async function showRecording(id) {
-  const { recording: r, chunks, missing } = await api(`/recordings/${id}`);
-  const m = r.meta, s = m.summary || {};
-  const durMs = (r.endedWallMs ?? r.updatedAtMs) - r.startedWallMs;
-  const records = chunks.reduce((n, c) => n + (c.meta.records || 0), 0);
-  const raw = chunks.reduce((n, c) => n + (c.meta.rawBytes || 0), 0);
-  const drops = chunks.reduce((n, c) => n + (c.meta.drops || 0), 0);
-  const hours = durMs / 3600000;
-  const streams = aggregateStreams(chunks);
-  const hasTrack = chunks.some((c) => (c.meta.track || []).length);
-  const batt = s.battery || {};
-
-  const stat = (label, value, cls = "") => `<div class="stat"><div class="label">${label}</div><div class="value ${cls}">${value}</div></div>`;
   app.innerHTML = `
-    <p><a href="#/">← All recordings</a></p>
-    <div class="panel">
-      <h2>${esc(fmtTime(r.startedWallMs))} <span class="muted">${esc(r.id)}</span></h2>
-      <div class="grid">
-        ${stat("Status", statusCell(r))}
-        ${stat("Duration", fmtDur(durMs))}
-        ${stat("Chunks", `${chunks.length}${r.chunkCount != null ? " / " + r.chunkCount : ""}`, missing.length ? "bad" : "")}
-        ${stat("Records", records.toLocaleString())}
-        ${stat("Dropped records", drops.toLocaleString(), drops ? "bad" : "ok")}
-        ${stat("Compressed", fmtBytes(r.bytes))}
-        ${stat("Raw", fmtBytes(raw))}
-        ${stat("Compressed / hour", hours > 0.01 ? fmtBytes(r.bytes / hours) : "–")}
-        ${stat("Battery", batt.startPct != null ? `${batt.startPct}% → ${batt.endPct ?? "?"}%` : "–")}
-        ${stat("Battery / hour", batt.pctPerHour != null ? num(batt.pctPerHour) + "%" : "–")}
-        ${stat("Charging", batt.pluggedFraction != null ? Math.round(batt.pluggedFraction * 100) + "% of time" : "–")}
+    <div class="list-head">
+      <h1>Trips</h1>
+      <div class="week">
+        <div><b>${week.length}</b><span>trips this week</span></div>
+        <div><b>${miles(weekMeters)}</b><span>driven</span></div>
+        <div><b>${fmtDur(weekMs)}</b><span>behind the wheel</span></div>
       </div>
-      ${missing.length ? `<p class="bad">Missing chunks: ${missing.join(", ")}</p>` : ""}
-      ${m.note ? `<p>Note: ${esc(m.note)}</p>` : ""}
     </div>
-
-    ${hasTrack ? `<div class="panel"><h2>Route</h2>
-      <div class="row controls">
-        <label>Color by <select id="rt-color">${Object.entries(Route.METRICS).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join("")}</select></label>
-        <label>Line width by <select id="rt-width">${Object.entries(Route.WIDTHS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></label>
-      </div>
-      <div id="rt-legend"></div>
-      <div id="map"><p class="muted" id="rt-status">Loading route…</p></div>
-      <div id="rt-summary" class="muted"></div>
-      <p class="muted">Tap the route for details at that point.</p></div>` : ""}
-
-    <div class="panel"><h2>Downloads</h2>
-      <div class="row"><button class="primary" id="dl-all">Download whole recording (.ndjson.gz)</button>
-      <button id="dl-meta">Download metadata (.json)</button></div>
-      <p class="muted">Chunks are concatenated gzip members; <code>gunzip</code>, <code>zcat</code> and Python's <code>gzip</code> read the whole file.</p>
-      <details><summary>Individual chunks</summary><div id="chunk-links" class="row"></div></details>
-    </div>
-
-    <div class="panel scroll"><h2>Streams (actual sampling)</h2><table>
-      <thead><tr><th>Stream</th><th class="num">Samples</th><th class="num">Mean rate (Hz)</th>
-      <th class="num">Min interval (ms)</th><th class="num">Mean interval (ms)</th><th class="num">Max interval (ms)</th><th class="num">Gaps &gt;1s</th></tr></thead>
-      <tbody>${streams.map(([k, a]) => {
-        const span = (a.lastNs - a.firstNs) / 1e9;
-        const meanMs = a.n > 1 ? (a.lastNs - a.firstNs) / (a.n - 1) / 1e6 : null;
-        return `<tr><td>${esc(k)}</td><td class="num">${a.n.toLocaleString()}</td>
-          <td class="num">${a.n > 1 && span > 0 ? num((a.n - 1) / span) : "–"}</td>
-          <td class="num">${Number.isFinite(a.minDtNs) ? num(a.minDtNs / 1e6, 2) : "–"}</td>
-          <td class="num">${num(meanMs, 2)}</td>
-          <td class="num">${a.maxDtNs ? num(a.maxDtNs / 1e6, 0) : "–"}</td>
-          <td class="num ${a.longGaps && meanMs != null && meanMs < 500 ? "warn" : ""}">${a.longGaps}</td></tr>`;
-      }).join("")}</tbody></table>
-      <p class="muted">Stream rates combine all chunks and include pauses (e.g. OBD reconnects); see the gap columns.</p></div>
-
-    ${s.obd ? `<div class="panel"><h2>OBD adapter</h2><pre>${esc(JSON.stringify(s.obd, null, 2))}</pre></div>` : ""}
-    <div class="panel"><h2>Recording metadata</h2><pre>${esc(JSON.stringify(m, null, 2))}</pre></div>`;
-
-  document.getElementById("dl-meta").onclick = () => {
-    const blob = new Blob([JSON.stringify({ recording: r, chunks, missing }, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `${id}.json`;
-    a.click();
-  };
-  const links = await api(`/recordings/${id}/links`, { method: "POST" });
-  document.getElementById("dl-all").onclick = () => { location.href = links.all; };
-  document.getElementById("chunk-links").innerHTML = Object.entries(links.chunks)
-    .map(([seq, url]) => `<a href="${esc(url)}">#${esc(seq)}</a>`).join(" ");
-
-  if (hasTrack && window.L) await showRoute(id, chunks, links);
+    ${groups.map((g) => `
+      <section class="day">
+        <h2>${esc(g.label)}</h2>
+        <div class="cards">${g.items.map(tripCard).join("")}</div>
+      </section>`).join("")}`;
 }
 
-async function showRoute(id, chunks, links) {
+function tripCard(r) {
+  const t = r.trip;
+  const moved = t && t.meters >= 100;
+  const auto = r.meta.trigger?.startsWith("car_bluetooth");
+  return `
+    <a class="card trip-card" href="#/r/${esc(r.id)}">
+      <div class="thumb">${moved ? Charts.thumbnail(t.path) : `<span class="muted">${t ? "Didn't move" : "No GPS yet"}</span>`}</div>
+      <div class="trip-card-body">
+        <div class="trip-card-title"><b>${esc(timeRange(r))}</b>${statusPill(r)}</div>
+        <div class="muted">${esc(tripName(r.startedWallMs))}${auto ? " · auto-started" : ""}</div>
+        ${moved ? `<div class="trip-card-stats">
+          <span><b>${miles(t.meters)}</b></span>
+          <span><b>${fmtDur(t.movingMs)}</b> moving</span>
+          <span>top <b>${Math.round(t.maxMps * Route.MPH)}</b> mph</span>
+        </div>` : ""}
+        ${r.meta.note ? `<div class="note">${esc(r.meta.note)}</div>` : ""}
+      </div>
+    </a>`;
+}
+
+// ---------- one trip ----------
+
+async function showTrip(id) {
+  const { recording: r, chunks } = await api(`/recordings/${id}`);
+  const m = r.meta;
+  const auto = m.trigger?.startsWith("car_bluetooth");
+  const pills = [statusPill(r), auto ? `<span class="pill">Auto-started</span>` : "", m.vehicle ? `<span class="pill">${esc(m.vehicle)}</span>` : ""].join("");
+  const day = new Date(r.startedWallMs).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+  const seg = (key, options) => `<div class="seg" data-key="${key}" role="group">${Object.entries(options)
+    .map(([k, v]) => `<button type="button" data-v="${k}">${esc(typeof v === "string" ? v : v.label)}</button>`).join("")}</div>`;
+
+  app.innerHTML = `
+    <div class="trip">
+      <header class="trip-head">
+        <a href="#/" class="back">← Trips</a>
+        <h1>${esc(tripName(r.startedWallMs))}</h1>
+        <p class="muted">${esc(day)} · ${esc(timeRange(r))}</p>
+        <div class="pills">${pills}</div>
+        ${r.status === "recording" ? `<p class="hint">Still recording; the route fills in as parts upload.</p>`
+          : !r.complete ? `<p class="hint">${r.chunksReceived} of ${r.chunkCount ?? "?"} parts uploaded so far; the phone sends the rest on Wi-Fi.</p>` : ""}
+        ${m.note ? `<p class="note">${esc(m.note)}</p>` : ""}
+      </header>
+      <section class="trip-map">
+        <div id="map"></div>
+        <div class="readout" id="readout" hidden></div>
+        <div class="map-status" id="rt-status">Loading route…</div>
+      </section>
+      <section class="trip-time"><div id="timeline" class="chart-host"></div></section>
+      <aside class="trip-side">
+        <div class="stats" id="stats"></div>
+        <div class="card">
+          <h2>Route</h2>
+          <div class="control"><span>Color</span>${seg("color", Route.METRICS)}</div>
+          <div id="rt-legend"></div>
+          <div class="control"><span>Line width</span>${seg("width", Route.WIDTHS)}</div>
+          <div class="control"><span>Map</span>${seg("base", Route.BASES)}</div>
+        </div>
+        <div class="card">
+          <h2>Friction circle</h2>
+          <div id="friction" class="chart-host"></div>
+          <div id="peaks" class="peaks"></div>
+          <p class="hint">Each dot is one second of driving: how hard you were speeding up or braking, and turning. Smooth driving stays near the middle.</p>
+        </div>
+      </aside>
+    </div>`;
+
   const status = document.getElementById("rt-status");
   let pts = Route.fromChunks(chunks) || routeCache.get(id);
   if (!pts) {
     // Recorded before the phone summarized every GPS fix: rebuild from the raw chunks once.
-    const urls = chunks.map((c) => links.chunks[c.seq]);
-    pts = await Route.fromRaw(urls, (i, n) => {
-      if (status) status.textContent = `Building the detailed route from raw data… ${i}/${n} chunks`;
+    const links = await api(`/recordings/${id}/links`, { method: "POST" });
+    pts = await Route.fromRaw(chunks.map((c) => links.chunks[c.seq]), (i, n) => {
+      if (status) status.innerHTML = `Building the detailed route… <progress max="${n}" value="${i}"></progress>`;
     });
     routeCache.set(id, pts);
   }
@@ -209,27 +206,76 @@ async function showRoute(id, chunks, links) {
     status.textContent = "Not enough GPS fixes to draw a route.";
     return;
   }
-  let state = { color: "speed", width: "none", base: "Light" };
+  status.remove();
+  drawTrip(pts);
+}
+
+function drawTrip(pts) {
+  const sm = Route.summary(pts);
+  const stat = (label, value, unit = "") => `<div class="stat"><span>${label}</span><b>${value}<small>${unit}</small></b></div>`;
+  document.getElementById("stats").innerHTML =
+    stat("Distance", sm.miles.toFixed(sm.miles < 10 ? 1 : 0), "mi") +
+    stat("Moving time", fmtDur(sm.movingMs)) +
+    stat("Average", sm.avgMph != null ? sm.avgMph.toFixed(0) : "–", "mph") +
+    stat("Top speed", sm.maxMph != null ? sm.maxMph.toFixed(0) : "–", "mph") +
+    stat("Stops", sm.stops.length) +
+    stat("Hardest brake", Math.abs(sm.peak.brake).toFixed(2), "g");
+
+  let state = { color: "speed", width: "none", base: "muted" };
   try { state = { ...state, ...JSON.parse(localStorage.getItem(VIEW_KEY) || "{}") }; } catch {}
   if (!Route.METRICS[state.color]) state.color = "speed";
   if (!Route.WIDTHS[state.width]) state.width = "none";
-  const colorSel = document.getElementById("rt-color"), widthSel = document.getElementById("rt-width");
-  colorSel.value = state.color;
-  widthSel.value = state.width;
+  if (!Route.BASES[state.base]) state.base = "muted";
+
+  const readout = document.getElementById("readout");
+  const fmt = (x, d, u) => (x == null || !Number.isFinite(x) ? "–" : x.toFixed(d) + u);
+  let views = [];
+  const pick = (i) => {
+    for (const v of views) v.highlight(i);
+    if (i < 0) { readout.hidden = true; return; }
+    const p = pts[i];
+    readout.hidden = false;
+    readout.innerHTML = `
+      <div class="readout-time">${new Date(p.t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}</div>
+      <div class="readout-speed">${fmt(p.v != null ? p.v * Route.MPH : null, 0, "")}<small> mph</small></div>
+      <dl>
+        <dt>${p.a != null && p.a < 0 ? "Braking" : "Speeding up"}</dt><dd>${fmt(p.a != null ? Math.abs(p.a) / Route.G : null, 2, " g")}</dd>
+        <dt>Turning</dt><dd>${fmt(p.side != null ? Math.abs(p.side) / Route.G : null, 2, " g")}${p.side != null && Math.abs(p.side) / Route.G >= 0.03 ? (p.side > 0 ? " right" : " left") : ""}</dd>
+        <dt>Bumps</dt><dd>${fmt(p.jolt != null ? p.jolt / Route.G : null, 2, " g")}</dd>
+        <dt>GPS error</dt><dd>${fmt(p.acc, 0, " m")}</dd>
+      </dl>`;
+  };
+
   const mapEl = document.getElementById("map");
-  mapEl.innerHTML = "";
-  const view = Route.render(mapEl, pts, state);
+  const view = Route.render(mapEl, pts, state, pick);
+  const timeline = Charts.timeline(document.getElementById("timeline"), pts, pick);
+  const friction = Charts.frictionCircle(document.getElementById("friction"), pts, pick);
+  views = [{ highlight: (i) => view.mark(i) }, timeline, friction];
+
+  const pk = sm.peak;
+  document.getElementById("peaks").innerHTML = friction.count
+    ? `<div><span>Braking</span><b>${Math.abs(pk.brake).toFixed(2)} g</b></div><div><span>Speeding up</span><b>${pk.accel.toFixed(2)} g</b></div><div><span>Turning</span><b>${pk.corner.toFixed(2)} g</b></div>`
+    : `<p class="muted">Not enough moving GPS fixes for this one.</p>`;
+
   const legend = () => { document.getElementById("rt-legend").innerHTML = Route.legendHtml(state, pts); };
+  const recolor = () => { view.redraw(); legend(); timeline.recolor(Route.segmentColors(pts, state)); };
   const save = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify(state)); } catch {} };
-  legend();
-  colorSel.onchange = () => { state.color = colorSel.value; view.redraw(); legend(); save(); };
-  widthSel.onchange = () => { state.width = widthSel.value; view.redraw(); save(); };
-  mapEl._map.on("baselayerchange", save);
-  const sm = Route.summary(pts);
-  document.getElementById("rt-summary").textContent =
-    `${sm.miles.toFixed(2)} mi · top speed ${sm.maxMph != null ? sm.maxMph.toFixed(0) + " mph" : "–"}` +
-    (sm.hardestBrake != null ? ` · hardest braking ${Math.abs(sm.hardestBrake).toFixed(2)} g · hardest acceleration ${sm.hardestAccel.toFixed(2)} g` : "") +
-    ` · ${pts.length.toLocaleString()} GPS fixes`;
+  const syncButtons = () => document.querySelectorAll(".seg").forEach((g) =>
+    g.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(state[g.dataset.key] === b.dataset.v))));
+  document.querySelectorAll(".seg").forEach((g) => g.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    state[g.dataset.key] = b.dataset.v;
+    if (g.dataset.key === "base") view.setBase(state.base);
+    else recolor();
+    syncButtons();
+    save();
+  }));
+  syncButtons();
+  recolor();
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (document.getElementById("map")) recolor(); });
+  // The map's container changes size with the layout (e.g. rotating a phone).
+  new ResizeObserver(() => view.map.invalidateSize()).observe(mapEl);
 }
 
 window.addEventListener("hashchange", route);

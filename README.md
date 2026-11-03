@@ -18,13 +18,15 @@ docs/      data-format.md: every record type, clock and file
 2. Every source writes timestamped NDJSON records to one writer thread. Every 60 s (configurable) the chunk is
    gzipped, hashed, and written next to a stats sidecar. A crash loses at most about 1 s. Leftover chunks are finished on the next launch
    and the recording is marked `interrupted`.
-3. WorkManager uploads finished chunks whenever there's network (during or after the drive), retrying with backoff.
+3. WorkManager uploads finished chunks once the phone is on Wi-Fi (any unmetered network), retrying with backoff.
+   **Upload now** on the main screen sends them over mobile data too; `upload.allowCellular` makes that automatic.
    Uploads are idempotent: the server keys chunks by `(recording, seq)`, checks the sha256, and treats re-sends as duplicates.
    A chunk is marked uploaded only after the server acknowledges it (sha256 verified, stored in R2); its data is then
    deleted from the phone, and a finished recording's folder is removed once the server has all of it
    (`upload.deleteAfterUpload`, default on).
-4. The web page shows each recording's completeness (missing chunks), per-stream sample counts and actual intervals,
-   dropped records, storage per hour, battery cost, a GPS preview, and raw downloads.
+4. The web page lists trips by day (route outline, distance, moving time, top speed). Each trip opens on a full-size
+   map colored by speed, acceleration, bumpiness, GPS accuracy or time, with a speed timeline and a friction circle
+   (forward vs. sideways g from GPS speed and heading). Hovering any of the three highlights the same moment in the others.
 
 **OBD is read-only by construction:** `ElmAllowlist` lets through only AT/ST adapter setup, mode 01 (live data),
 03/07/0A (read stored, pending and permanent codes) and 09 (VIN/calibration). Anything else, including 04 (clear codes), throws
@@ -129,7 +131,7 @@ adb shell am broadcast -n app.fuelish/.auto.DebugCarReceiver --es address AA:BB:
 ```
 
 Everything else (sensor rates in Hz, GNSS raw measurements, chunk length, PID tiers and intervals, forced
-multi-PID batch size, unmetered-only uploads) is in the JSON box in Settings. Each recording embeds the
+multi-PID batch size, uploading over mobile data) is in the JSON box in Settings. Each recording embeds the
 exact config it ran with (token redacted).
 
 ## Run locally

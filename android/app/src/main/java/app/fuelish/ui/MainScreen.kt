@@ -4,6 +4,8 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.PowerManager
 import android.os.SystemClock
@@ -92,6 +94,10 @@ fun MainScreen(openSettings: () -> Unit) {
     val auto = cfg.auto
     val autoOn = auto.optBoolean("enabled") && auto.optString("carAddress").isNotBlank()
     val obdChosen = cfg.obd.optString("deviceAddress").isNotBlank()
+    val onWifi = remember(refresh) {
+        val cm = ctx.getSystemService(ConnectivityManager::class.java)
+        cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true
+    }
 
     Column(Modifier.safeDrawingPadding().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -143,7 +149,8 @@ fun MainScreen(openSettings: () -> Unit) {
                 when {
                     !waiting -> "Nothing waiting to upload"
                     !serverOk -> "${up.pending} chunk${if (up.pending == 1) "" else "s"} will upload once the server is set up"
-                    else -> "${up.pending} chunk${if (up.pending == 1) "" else "s"} waiting to upload"
+                    onWifi || cfg.upload.optBoolean("allowCellular") -> "${up.pending} chunk${if (up.pending == 1) "" else "s"} waiting to upload"
+                    else -> "${up.pending} chunk${if (up.pending == 1) "" else "s"} waiting for Wi-Fi"
                 },
                 style = MaterialTheme.typography.bodyLarge,
             )
@@ -153,7 +160,9 @@ fun MainScreen(openSettings: () -> Unit) {
             Muted("On this phone: ${mb(storage)}. Deleted once uploaded.")
             if (waiting && serverOk) {
                 Spacer(Modifier.height(4.dp))
-                OutlinedButton(onClick = { UploadWorker.enqueue(ctx) }) { Text("Upload now") }
+                OutlinedButton(onClick = { UploadWorker.enqueue(ctx, cellular = true) }) {
+                    Text(if (onWifi) "Upload now" else "Upload now over mobile data")
+                }
             }
         }
         Spacer(Modifier.height(24.dp))

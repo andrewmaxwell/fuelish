@@ -111,3 +111,22 @@ describe("upload pipeline", () => {
     expect(res.status).toBe(409);
   });
 });
+
+describe("trip summary", () => {
+  it("measures distance, top speed and moving time from chunk tracks, skipping gaps", async () => {
+    const { tripSummary } = await import("../src/index");
+    // ~111 m per 0.001° of latitude; the 60 s gap before the last fix isn't bridged.
+    const tracks = JSON.stringify([
+      [[0, 38.0, -90.0, 0, 3], [5000, 38.001, -90.0, 20, 3]],
+      [[10000, 38.002, -90.0, 25, 3], [70000, 38.5, -90.0, 10, 3]],
+      null,
+    ]);
+    const t = tripSummary(tracks)!;
+    expect(t.meters).toBeGreaterThan(215);
+    expect(t.meters).toBeLessThan(230);
+    expect(t.maxMps).toBe(25);
+    expect(t.movingMs).toBe(10000);
+    expect(t.path.length).toBe(4);
+    expect(tripSummary("[null]")).toBeNull();
+  });
+});

@@ -226,11 +226,43 @@ async function putChunk(req: Request, id: string, seq: number, env: Env): Promis
 async function listRecordings(env: Env): Promise<Response> {
   const { results } = await env.DB.prepare(
     `SELECT r.id, r.device_id, r.status, r.started_at_ms, r.ended_at_ms, r.chunk_count, r.meta_json, r.updated_at_ms,
-            COUNT(c.seq) AS chunks_received, COALESCE(SUM(c.bytes), 0) AS bytes
-     FROM recordings r LEFT JOIN chunks c ON c.recording_id = r.id
+            COUNT(c.seq) AS chunks_received, COALESCE(SUM(c.bytes), 0) AS bytes,
+            json_group_array(json_extract(c.meta_json, '$.track')) AS tracks
+     FROM recordings r LEFT JOIN (SELECT * FROM chunks ORDER BY seq) c ON c.recording_id = r.id
      GROUP BY r.id ORDER BY r.started_at_ms DESC LIMIT 500`,
   ).all<any>();
-  return json({ recordings: results.map(recordingRow) });
+  return json({ recordings: results.map((r) => ({ ...recordingRow(r), trip: tripSummary(r.tracks) })) });
+}
+
+// Distance, speeds and a small route outline for the list, from the GPS track every chunk's
+// stats carry ([wallMs, lat, lon, speedMps, hAccM, ...]; older chunks have a fix every 5 s).
+export function tripSummary(tracksJson: string) {
+  const fixes: number[][] = [];
+  for (const t of JSON.parse(tracksJson || "[]")) {
+    const arr = typeof t === "string" ? JSON.parse(t) : t;
+    if (Array.isArray(arr)) for (const p of arr) if (p?.[1] != null && p?.[2] != null) fixes.push(p);
+  }
+  if (fixes.length < 2) return null;
+  fixes.sort((a, b) => a[0] - b[0]);
+  let meters = 0, maxMps = 0, movingMs = 0;
+  for (let i = 1; i < fixes.length; i++) {
+    const [t0, la0, lo0, v0] = fixes[i - 1], [t1, la1, lo1, v1] = fixes[i];
+    if (t1 - t0 > 30_000) continue; // a gap in the track (tunnel, lost fix): don't bridge it
+    meters += haversine(la0, lo0, la1, lo1);
+    if ((v0 ?? 0) > 1 || (v1 ?? 0) > 1) movingMs += t1 - t0;
+  }
+  for (const p of fixes) if (p[3] != null) maxMps = Math.max(maxMps, p[3]);
+  const step = Math.max(1, Math.ceil(fixes.length / 80));
+  const path = fixes.filter((_, i) => i % step === 0 || i === fixes.length - 1).map((p) => [round5(p[1]), round5(p[2])]);
+  return { meters: Math.round(meters), maxMps, movingMs, path };
+}
+
+const round5 = (x: number) => Math.round(x * 1e5) / 1e5;
+
+function haversine(la1: number, lo1: number, la2: number, lo2: number): number {
+  const r = Math.PI / 180, dLa = (la2 - la1) * r, dLo = (lo2 - lo1) * r;
+  const a = Math.sin(dLa / 2) ** 2 + Math.cos(la1 * r) * Math.cos(la2 * r) * Math.sin(dLo / 2) ** 2;
+  return 2 * 6_371_000 * Math.asin(Math.sqrt(a));
 }
 
 function recordingRow(r: any) {
