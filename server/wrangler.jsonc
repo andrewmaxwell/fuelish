@@ -2,6 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "fuelish",
   "main": "src/index.ts",
+  "account_id": "d559eef7d175e4069c592f3ee26b14c7",
   "compatibility_date": "2026-10-01",
   "observability": { "enabled": true },
   // One Worker serves the API (/api/*) and the static web app (../web).
@@ -14,8 +15,7 @@
     {
       "binding": "DB",
       "database_name": "fuelish",
-      // Replace with the id printed by `wrangler d1 create fuelish`.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "8603f0bf-bf97-4b09-ad1e-369af287d3d6",
       "migrations_dir": "migrations"
     }
   ],
