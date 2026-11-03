@@ -143,6 +143,36 @@ main { max-width: 1160px; margin: 0 auto; padding: 24px 16px 48px; }
 .trip-card-stats { display: flex; gap: 14px; margin-top: 6px; color: var(--text-2); font-size: 14px; }
 .trip-card-stats b { color: var(--text); font-weight: 650; }
 
+.see-map, .day-head a { font-size: 14px; font-weight: 600; text-decoration: none; }
+.see-map { display: inline-block; margin-top: 6px; }
+.day-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.day .day-head h2 { margin-bottom: 0; }
+.day-head .muted { font-size: 14px; }
+.day-head a { margin-left: auto; }
+.thumb-stop { fill: var(--surface); stroke: var(--text-2); stroke-width: 2; }
+
+/* An outing: linked trips in one card, and the list of trips in the multi-trip views. */
+.outing-card a { color: inherit; text-decoration: none; }
+.outing-card .thumb { display: grid; }
+.legs { list-style: none; margin: 10px 0 0; padding: 0; display: grid; font-size: 14px; }
+.legs a {
+  display: flex; align-items: center; gap: 10px; padding: 6px 8px; margin: 0 -8px; border-radius: 8px;
+  color: inherit; text-decoration: none;
+}
+.legs a:hover, .legs a:focus-visible { background: var(--accent-soft); }
+.legs a b { font-weight: 650; font-variant-numeric: tabular-nums; }
+.legs a span { color: var(--text-2); }
+.legs .pill { margin-left: auto; }
+.leg-stop { position: relative; padding: 2px 0 2px 18px; color: var(--muted); font-size: 13px; }
+.leg-stop::before { content: ""; position: absolute; left: 4px; top: 0; bottom: 0; border-left: 2px dotted var(--axis); }
+.trip-rows { margin-top: 0; }
+.trip-rows a { display: grid; gap: 0; }
+.row-day { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.06em; margin: 12px 0 2px; }
+.row-day:first-child { margin-top: 0; }
+.outing-nav, .period-nav { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 12px; font-size: 14px; }
+.outing-nav span { color: var(--text-2); }
+.outing-nav a, .period-nav a { font-weight: 600; text-decoration: none; }
+
 /* ---------- one trip: map first ---------- */
 body.page-trip main { max-width: none; padding: 0; }
 .trip {

@@ -27,6 +27,9 @@ docs/      data-format.md: every record type, clock and file
 4. The web page lists trips by day (route outline, distance, moving time, top speed). Each trip opens on a full-size
    map colored by speed, acceleration, bumpiness, GPS accuracy or time, with a speed timeline and a friction circle
    (forward vs. sideways g from GPS speed and heading). Hovering any of the three highlights the same moment in the others.
+   Trips that start within 30 min of the last one ending, near where it ended (errands, a fuel stop), are linked into
+   one **outing**. A day, a week or an outing can be opened as one map of all its trips. An automatic stop waits a
+   couple of minutes after the car goes away; that wait (usually you walking off) isn't counted or drawn.
 
 **OBD is read-only by construction:** `ElmAllowlist` lets through only AT/ST adapter setup, mode 01 (live data),
 03/07/0A (read stored, pending and permanent codes) and 09 (VIN/calibration). Anything else, including 04 (clear codes), throws

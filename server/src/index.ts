@@ -231,16 +231,37 @@ async function listRecordings(env: Env): Promise<Response> {
      FROM recordings r LEFT JOIN (SELECT * FROM chunks ORDER BY seq) c ON c.recording_id = r.id
      GROUP BY r.id ORDER BY r.started_at_ms DESC LIMIT 500`,
   ).all<any>();
-  return json({ recordings: results.map((r) => ({ ...recordingRow(r), trip: tripSummary(r.tracks) })) });
+  return json({
+    recordings: results.map((r) => {
+      const row = recordingRow(r);
+      return { ...row, trip: tripSummary(r.tracks, row.driveEndWallMs) };
+    }),
+  });
+}
+
+// When the drive itself ended. An automatic stop waits a while after the car goes away
+// (Bluetooth disconnect, or the engine stops answering), and that wait isn't driving: it's
+// usually the walk away from the car. The phone stamps the stop when the wait runs out, so
+// the drive ended one wait earlier. Manual stops and recordings still going end when they end.
+export function driveEndMs(meta: any, endedAtMs: number | null): number | null {
+  if (endedAtMs == null) return null;
+  const auto = meta?.config?.auto ?? {};
+  const waitS =
+    meta?.stopReason === "car_disconnected" ? auto.stopAfterCarDisconnectS
+    : meta?.stopReason === "engine_off" ? auto.stopAfterEngineOffS
+    : 0;
+  const wait = Number.isFinite(waitS) && waitS > 0 ? waitS * 1000 : 0;
+  return Math.max(meta?.startedWallMs ?? 0, endedAtMs - wait);
 }
 
 // Distance, speeds and a small route outline for the list, from the GPS track every chunk's
 // stats carry ([wallMs, lat, lon, speedMps, hAccM, ...]; older chunks have a fix every 5 s).
-export function tripSummary(tracksJson: string) {
+// Fixes after endMs (the drive's end; see driveEndMs) are left out.
+export function tripSummary(tracksJson: string, endMs: number | null = null) {
   const fixes: number[][] = [];
   for (const t of JSON.parse(tracksJson || "[]")) {
     const arr = typeof t === "string" ? JSON.parse(t) : t;
-    if (Array.isArray(arr)) for (const p of arr) if (p?.[1] != null && p?.[2] != null) fixes.push(p);
+    if (Array.isArray(arr)) for (const p of arr) if (p?.[1] != null && p?.[2] != null && (endMs == null || p[0] <= endMs)) fixes.push(p);
   }
   if (fixes.length < 2) return null;
   fixes.sort((a, b) => a[0] - b[0]);
@@ -273,6 +294,7 @@ function recordingRow(r: any) {
     status: r.status,
     startedWallMs: r.started_at_ms,
     endedWallMs: r.ended_at_ms,
+    driveEndWallMs: driveEndMs(meta, r.ended_at_ms),
     chunkCount: r.chunk_count,
     chunksReceived: r.chunks_received,
     bytes: r.bytes,

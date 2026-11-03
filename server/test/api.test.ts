@@ -129,4 +129,23 @@ describe("trip summary", () => {
     expect(t.path.length).toBe(4);
     expect(tripSummary("[null]")).toBeNull();
   });
+
+  it("leaves out fixes after the drive ended", async () => {
+    const { tripSummary } = await import("../src/index");
+    const tracks = JSON.stringify([[[0, 38.0, -90.0, 5, 3], [5000, 38.001, -90.0, 5, 3], [9000, 38.002, -90.0, 1, 3]]]);
+    expect(tripSummary(tracks, 5000)!.path.length).toBe(2);
+  });
+});
+
+describe("drive end", () => {
+  it("takes the stop wait off automatic stops only", async () => {
+    const { driveEndMs } = await import("../src/index");
+    const config = { auto: { stopAfterCarDisconnectS: 120, stopAfterEngineOffS: 300 } };
+    expect(driveEndMs({ stopReason: "car_disconnected", config }, 1_000_000)).toBe(880_000);
+    expect(driveEndMs({ stopReason: "engine_off", config }, 1_000_000)).toBe(700_000);
+    expect(driveEndMs({ stopReason: "manual", config }, 1_000_000)).toBe(1_000_000);
+    expect(driveEndMs({ stopReason: "car_disconnected" }, 1_000_000)).toBe(1_000_000);
+    expect(driveEndMs({ stopReason: "car_disconnected", config, startedWallMs: 950_000 }, 1_000_000)).toBe(950_000);
+    expect(driveEndMs({ stopReason: "car_disconnected", config }, null)).toBeNull();
+  });
 });

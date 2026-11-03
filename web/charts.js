@@ -159,8 +159,12 @@ const Charts = (() => {
   }
 
   // Small route outline for the trip list, from [[lat, lon], ...].
-  function thumbnail(path, w = 320, h = 132) {
-    if (!path || path.length < 2) return "";
+  // One route outline ([[lat, lon], ...]) or several (an outing: [[[lat, lon], ...], ...]).
+  function thumbnail(paths, w = 320, h = 132) {
+    if (paths?.[0]?.[0] != null && typeof paths[0][0] === "number") paths = [paths];
+    paths = (paths || []).filter((p) => p && p.length >= 2);
+    if (!paths.length) return "";
+    const path = paths.flat();
     const k = Math.cos((path[0][0] * Math.PI) / 180);
     const xs = path.map((p) => p[1] * k), ys = path.map((p) => -p[0]);
     const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
@@ -168,10 +172,19 @@ const Charts = (() => {
     const s = Math.min((w - 2 * pad) / Math.max(x1 - x0, span * 0.05), (h - 2 * pad) / Math.max(y1 - y0, span * 0.05));
     const ox = (w - (x1 - x0) * s) / 2, oy = (h - (y1 - y0) * s) / 2;
     const P = path.map((_, i) => [ox + (xs[i] - x0) * s, oy + (ys[i] - y0) * s]);
-    const d = "M" + P.map(([a, b]) => `${a.toFixed(1)},${b.toFixed(1)}`).join("L");
+    let n = 0, d = "";
+    const ends = [];
+    for (const p of paths) {
+      const seg = P.slice(n, n + p.length);
+      n += p.length;
+      d += "M" + seg.map(([a, b]) => `${a.toFixed(1)},${b.toFixed(1)}`).join("L");
+      ends.push(seg[seg.length - 1]);
+    }
     const [sx, sy] = P[0], [ex, ey] = P[P.length - 1];
+    // Where an outing stopped between trips: small dots.
+    const mid = ends.slice(0, -1).map(([x, y]) => `<circle cx="${x}" cy="${y}" r="3.5" class="thumb-stop"/>`).join("");
     return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
-      <path d="${d}" class="thumb-casing"/><path d="${d}" class="thumb-line"/>
+      <path d="${d}" class="thumb-casing"/><path d="${d}" class="thumb-line"/>${mid}
       <circle cx="${sx}" cy="${sy}" r="5" class="thumb-start"/><circle cx="${ex}" cy="${ey}" r="5" class="thumb-end"/></svg>`;
   }
 

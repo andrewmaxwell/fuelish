@@ -83,18 +83,33 @@ const Route = (() => {
     return pts;
   }
 
-  // Stops in the middle of a drive: at least 5 s below 1 mph, not counting the start and end.
+  // Several trips can share one points array (day, week and outing views): each point then
+  // carries `trip`, its trip's index. Returns [first, last] index ranges, one per trip.
+  function tripRanges(pts) {
+    const out = [];
+    for (let i = 0; i < pts.length; i++) {
+      if (i === 0 || pts[i].trip !== pts[i - 1].trip) out.push([i, i]);
+      else out[out.length - 1][1] = i;
+    }
+    return out;
+  }
+
+  // Stops in the middle of a drive: at least 5 s below 1 mph, not counting each trip's start and end.
   function stops(pts) {
     const out = [];
-    let i0 = null;
     const slow = (p) => p.v != null && p.v < 0.45;
-    for (let i = 0; i <= pts.length; i++) {
-      if (i < pts.length && slow(pts[i])) { if (i0 == null) i0 = i; continue; }
-      if (i0 != null && pts[i - 1].t - pts[i0].t >= 5000) out.push({ i0, i1: i - 1, ms: pts[i - 1].t - pts[i0].t });
-      i0 = null;
+    for (const [a, b] of tripRanges(pts)) {
+      const mine = [];
+      let i0 = null;
+      for (let i = a; i <= b + 1; i++) {
+        if (i <= b && slow(pts[i])) { if (i0 == null) i0 = i; continue; }
+        if (i0 != null && pts[i - 1].t - pts[i0].t >= 5000) mine.push({ i0, i1: i - 1, ms: pts[i - 1].t - pts[i0].t });
+        i0 = null;
+      }
+      if (mine.length && mine[0].i0 === a) mine.shift();
+      if (mine.length && mine[mine.length - 1].i1 === b) mine.pop();
+      out.push(...mine);
     }
-    if (out.length && out[0].i0 === 0) out.shift();
-    if (out.length && out[out.length - 1].i1 === pts.length - 1) out.pop();
     return out;
   }
 
@@ -102,7 +117,7 @@ const Route = (() => {
     let dist = 0, moving = 0, peak = { brake: 0, accel: 0, corner: 0 };
     for (let i = 1; i < pts.length; i++) {
       const p = pts[i - 1], q = pts[i];
-      if (q.t - p.t > 5000) continue;
+      if (q.t - p.t > 5000 || q.trip !== p.trip) continue;
       dist += L.latLng(p.lat, p.lon).distanceTo([q.lat, q.lon]);
       if ((p.v ?? 0) > 0.45 || (q.v ?? 0) > 0.45) moving += q.t - p.t;
     }
@@ -216,7 +231,8 @@ const Route = (() => {
 
     const layer = L.layerGroup().addTo(map);
     const marks = L.layerGroup().addTo(map);
-    draw(layer, marks, pts, state);
+    let focus = null; // trip index to bring forward, or null for all
+    draw(layer, marks, pts, state, focus);
     const fit = () => map.fitBounds(L.latLngBounds(pts.map((p) => [p.lat, p.lon])), { padding: [36, 36] });
     fit();
 
@@ -243,7 +259,13 @@ const Route = (() => {
       map,
       fit,
       setBase,
-      redraw: () => draw(layer, marks, pts, state),
+      redraw: () => draw(layer, marks, pts, state, focus),
+      // Fade every trip but one (null shows them all evenly).
+      focus(k) {
+        if (k === focus) return;
+        focus = k;
+        draw(layer, marks, pts, state, focus);
+      },
       mark(i) {
         if (i < 0) { cursor.remove(); return; }
         cursor.setLatLng([pts[i].lat, pts[i].lon]).addTo(map);
@@ -251,7 +273,7 @@ const Route = (() => {
     };
   }
 
-  function draw(layer, marks, pts, state) {
+  function draw(layer, marks, pts, state, focus = null) {
     layer.clearLayers();
     marks.clearLayers();
     const color = METRICS[state.color];
@@ -268,20 +290,35 @@ const Route = (() => {
         const [lo, hi] = widthM.width;
         w = wv == null ? 3 : 2.5 + 11 * Math.min(1, Math.max(0, (wv - lo) / (hi - lo)));
       }
-      segs.push([[[p.lat, p.lon], [q.lat, q.lon]], colorOf(i), w]);
+      if (q.trip !== p.trip) continue; // never join one trip's end to the next one's start
+      segs.push([[[p.lat, p.lon], [q.lat, q.lon]], colorOf(i), w, focus == null || q.trip === focus]);
     }
     // Dark casing first, then the colors on top, so the route reads on any background.
-    for (const [ll, , w] of segs) L.polyline(ll, { color: "#0b0b0b", weight: w + 3, opacity: 0.6, lineCap: "round", interactive: false }).addTo(layer);
-    for (const [ll, c, w] of segs) L.polyline(ll, { color: c, weight: w, opacity: 1, lineCap: "round", interactive: false }).addTo(layer);
+    // The focused trip (if any) is drawn last, over the faded others.
+    segs.sort((x, y) => x[3] - y[3]);
+    // Faded trips are solid gray, not see-through: overlapping round caps would show as beads.
+    const faded = dark() ? "#4a4946" : "#c9c7bf";
+    for (const [ll, , w, on] of segs) if (on) L.polyline(ll, { color: "#0b0b0b", weight: w + 3, opacity: 0.6, lineCap: "round", interactive: false }).addTo(layer);
+    for (const [ll, c, w, on] of segs) L.polyline(ll, { color: on ? c : faded, weight: on ? w : Math.min(w, 4), opacity: 1, lineCap: "round", interactive: false }).addTo(layer);
 
+    const shown = (p) => focus == null || p.trip === focus;
     for (const s of stops(pts)) {
       const p = pts[s.i0];
+      if (!shown(p)) continue;
       L.circleMarker([p.lat, p.lon], { radius: 5, color: "#fff", weight: 2, fillColor: "#52514e", fillOpacity: 1 })
         .bindTooltip(`Stopped ${Math.round(s.ms / 1000)} s`, { direction: "top" }).addTo(marks);
     }
-    const first = pts[0], last = pts[pts.length - 1];
-    L.circleMarker([first.lat, first.lon], { radius: 8, color: "#fff", weight: 3, fillColor: "#0ca30c", fillOpacity: 1 }).bindTooltip("Start").addTo(marks);
-    L.marker([last.lat, last.lon], { icon: dotIcon("end-dot", 18), keyboard: false }).bindTooltip("End").addTo(marks);
+    const ranges = tripRanges(pts);
+    const at = (t) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    for (const [a, b] of ranges) {
+      const first = pts[a], last = pts[b];
+      if (!shown(first)) continue;
+      const many = ranges.length > 1;
+      L.circleMarker([first.lat, first.lon], { radius: many ? 6 : 8, color: "#fff", weight: many ? 2 : 3, fillColor: "#0ca30c", fillOpacity: 1 })
+        .bindTooltip(many ? `Start ${at(first.t)}` : "Start").addTo(marks);
+      L.marker([last.lat, last.lon], { icon: dotIcon("end-dot", many ? 14 : 18), keyboard: false })
+        .bindTooltip(many ? `End ${at(last.t)}` : "End").addTo(marks);
+    }
   }
 
   function dotIcon(className, size) {
@@ -313,5 +350,5 @@ const Route = (() => {
       (m.note ? `<p class="hint">${m.note}</p>` : "");
   }
 
-  return { fromChunks, fromRaw, render, legendHtml, summary, segmentColors, METRICS, WIDTHS, BASES, G, MPH };
+  return { fromChunks, fromRaw, render, tripRanges, legendHtml, summary, segmentColors, METRICS, WIDTHS, BASES, G, MPH };
 })();
