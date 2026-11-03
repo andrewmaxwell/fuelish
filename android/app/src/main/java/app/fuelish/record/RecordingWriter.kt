@@ -96,7 +96,6 @@ class RecordingWriter(
     private var reportedDrops = 0L
     private var stats = HashMap<String, StreamStat>()
     private var track = JSONArray()
-    private var lastTrackNs = Long.MIN_VALUE / 2
 
     fun start() {
         dir.mkdirs()
@@ -156,12 +155,9 @@ class RecordingWriter(
         chunkRecords++
         written.incrementAndGet()
         stats.getOrPut(r.stream) { StreamStat() }.add(r.tNs)
-        val t = r.track
-        // Track preview for the web map: at most one point every 5 s.
-        if (t != null && r.tNs - lastTrackNs >= 5_000_000_000L) {
-            lastTrackNs = r.tNs
-            track.put(JSONArray().apply { t.forEach { put(it) } })
-        }
+        // Every GPS fix goes into the chunk's track summary so the web map can draw the
+        // route without downloading raw data. Point layout: see TRACK_FORMAT.
+        r.track?.let { t -> track.put(JSONArray().apply { t.forEach { put(if (it.isFinite()) it else JSONObject.NULL) } }) }
     }
 
     private fun openChunk() {
@@ -201,6 +197,7 @@ class RecordingWriter(
             put("wallEndMs", wallMs())
             put("drops", chunkDrops)
             put("streams", JSONObject().apply { stats.forEach { (k, s) -> put(k, s.toJson()) } })
+            put("trackFormat", TRACK_FORMAT)
             put("track", track)
         }
         val info = finalizeChunk(dir, seq, chunkRaw!!, meta)
@@ -213,6 +210,9 @@ class RecordingWriter(
 
     companion object {
         const val FORMAT_VERSION = 1
+
+        /** 2 = every GPS fix as [wallMs, lat, lon, speedMps, hAccM, bearingDeg, joltMps2]; null = unknown. */
+        const val TRACK_FORMAT = 2
 
         fun chunkName(seq: Int, ext: String) = "chunk-%06d%s".format(seq, ext)
 

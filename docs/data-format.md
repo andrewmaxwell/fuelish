@@ -66,7 +66,11 @@ Android/data/app.fuelish/files/recordings/<id>/
   recording.json             metadata (rewritten atomically)
   chunk-000000.ndjson        chunk in progress (or left by a crash; recovered on next launch)
   chunk-000000.ndjson.gz     finished chunk (immutable; uploaded as-is, then deleted from the phone)
-  chunk-000000.meta.json     per-chunk stats: records, per-stream counts and min/max intervals, sha256, GPS preview
+  chunk-000000.meta.json     per-chunk stats: records, per-stream counts and min/max intervals, sha256, and
+                             `track` (trackFormat 2): every GPS fix as [wallMs, lat, lon, speedMps, hAccM,
+                             bearingDeg, joltMps2], where jolt = max |‖accel‖ − g| since the previous fix.
+                             Older chunks (no trackFormat) only have a point every 5 s; the web app rebuilds
+                             their route from the raw chunks instead.
   chunk-000000.uploaded      server acknowledged this chunk
   meta.uploaded              sha256 of the last recording.json the server accepted
 ```

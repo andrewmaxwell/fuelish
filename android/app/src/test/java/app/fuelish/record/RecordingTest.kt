@@ -45,7 +45,8 @@ class RecordingTest {
         assertEquals(n, closed.size)
         val all = (0 until n).flatMap { gunzipLines(File(dir, RecordingWriter.chunkName(it, ".ndjson.gz"))) }
         val trackPoints = closed.sumOf { it.meta.getJSONArray("track").length() }
-        assertTrue("track preview missing", trackPoints >= 1)
+        assertEquals("every GPS fix is in the track summary", 50, trackPoints)
+        assertEquals(RecordingWriter.TRACK_FORMAT, closed[0].meta.getInt("trackFormat"))
         val ids = all.map { JSONObject(it) }.filter { it.getString("k") == "s" }.map { it.getInt("i") }
         assertEquals((0 until 5000).toList(), ids)
         assertEquals(0L, w.dropped.get())

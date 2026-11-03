@@ -3,7 +3,8 @@
 
 const app = document.getElementById("app");
 const TOKEN_KEY = "fuelish.token";
-let map;
+const VIEW_KEY = "fuelish.routeView";
+const routeCache = new Map(); // recording id -> points rebuilt from raw data
 
 function token() {
   try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; }
@@ -117,7 +118,7 @@ async function showRecording(id) {
   const drops = chunks.reduce((n, c) => n + (c.meta.drops || 0), 0);
   const hours = durMs / 3600000;
   const streams = aggregateStreams(chunks);
-  const track = chunks.flatMap((c) => c.meta.track || []);
+  const hasTrack = chunks.some((c) => (c.meta.track || []).length);
   const batt = s.battery || {};
 
   const stat = (label, value, cls = "") => `<div class="stat"><div class="label">${label}</div><div class="value ${cls}">${value}</div></div>`;
@@ -142,15 +143,22 @@ async function showRecording(id) {
       ${m.note ? `<p>Note: ${esc(m.note)}</p>` : ""}
     </div>
 
+    ${hasTrack ? `<div class="panel"><h2>Route</h2>
+      <div class="row controls">
+        <label>Color by <select id="rt-color">${Object.entries(Route.METRICS).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join("")}</select></label>
+        <label>Line width by <select id="rt-width">${Object.entries(Route.WIDTHS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></label>
+      </div>
+      <div id="rt-legend"></div>
+      <div id="map"><p class="muted" id="rt-status">Loading route…</p></div>
+      <div id="rt-summary" class="muted"></div>
+      <p class="muted">Tap the route for details at that point.</p></div>` : ""}
+
     <div class="panel"><h2>Downloads</h2>
       <div class="row"><button class="primary" id="dl-all">Download whole recording (.ndjson.gz)</button>
       <button id="dl-meta">Download metadata (.json)</button></div>
       <p class="muted">Chunks are concatenated gzip members; <code>gunzip</code>, <code>zcat</code> and Python's <code>gzip</code> read the whole file.</p>
       <details><summary>Individual chunks</summary><div id="chunk-links" class="row"></div></details>
     </div>
-
-    ${track.length ? `<div class="panel"><h2>GPS track preview</h2><div id="map"></div>
-      <p class="muted">Preview only (one point every few seconds). Full-rate locations are in the raw data.</p></div>` : ""}
 
     <div class="panel scroll"><h2>Streams (actual sampling)</h2><table>
       <thead><tr><th>Stream</th><th class="num">Samples</th><th class="num">Mean rate (Hz)</th>
@@ -182,16 +190,46 @@ async function showRecording(id) {
   document.getElementById("chunk-links").innerHTML = Object.entries(links.chunks)
     .map(([seq, url]) => `<a href="${esc(url)}">#${esc(seq)}</a>`).join(" ");
 
-  if (track.length && window.L) {
-    if (map) map.remove();
-    map = L.map("map");
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: "&copy; OpenStreetMap contributors",
-    }).addTo(map);
-    const line = L.polyline(track.map((p) => [p[1], p[2]]), { color: "#1f6feb", weight: 4 }).addTo(map);
-    map.fitBounds(line.getBounds(), { padding: [20, 20] });
+  if (hasTrack && window.L) await showRoute(id, chunks, links);
+}
+
+async function showRoute(id, chunks, links) {
+  const status = document.getElementById("rt-status");
+  let pts = Route.fromChunks(chunks) || routeCache.get(id);
+  if (!pts) {
+    // Recorded before the phone summarized every GPS fix: rebuild from the raw chunks once.
+    const urls = chunks.map((c) => links.chunks[c.seq]);
+    pts = await Route.fromRaw(urls, (i, n) => {
+      if (status) status.textContent = `Building the detailed route from raw data… ${i}/${n} chunks`;
+    });
+    routeCache.set(id, pts);
   }
+  if (!document.getElementById("map")) return; // navigated away meanwhile
+  if (pts.length < 2) {
+    status.textContent = "Not enough GPS fixes to draw a route.";
+    return;
+  }
+  let state = { color: "speed", width: "none", base: "Light" };
+  try { state = { ...state, ...JSON.parse(localStorage.getItem(VIEW_KEY) || "{}") }; } catch {}
+  if (!Route.METRICS[state.color]) state.color = "speed";
+  if (!Route.WIDTHS[state.width]) state.width = "none";
+  const colorSel = document.getElementById("rt-color"), widthSel = document.getElementById("rt-width");
+  colorSel.value = state.color;
+  widthSel.value = state.width;
+  const mapEl = document.getElementById("map");
+  mapEl.innerHTML = "";
+  const view = Route.render(mapEl, pts, state);
+  const legend = () => { document.getElementById("rt-legend").innerHTML = Route.legendHtml(state, pts); };
+  const save = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify(state)); } catch {} };
+  legend();
+  colorSel.onchange = () => { state.color = colorSel.value; view.redraw(); legend(); save(); };
+  widthSel.onchange = () => { state.width = widthSel.value; view.redraw(); save(); };
+  mapEl._map.on("baselayerchange", save);
+  const sm = Route.summary(pts);
+  document.getElementById("rt-summary").textContent =
+    `${sm.miles.toFixed(2)} mi · top speed ${sm.maxMph != null ? sm.maxMph.toFixed(0) + " mph" : "–"}` +
+    (sm.hardestBrake != null ? ` · hardest braking ${Math.abs(sm.hardestBrake).toFixed(2)} g · hardest acceleration ${sm.hardestAccel.toFixed(2)} g` : "") +
+    ` · ${pts.length.toLocaleString()} GPS fixes`;
 }
 
 window.addEventListener("hashchange", route);

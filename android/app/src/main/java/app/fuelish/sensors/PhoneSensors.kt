@@ -52,6 +52,9 @@ class PhoneSensors(
         private set
     val problems = mutableListOf<String>()
 
+    /** Largest |‖a‖ − g| from the accelerometer since the last GPS fix (m/s²); NaN if none. */
+    private var joltSinceFix = Double.NaN
+
     private val listeners = mutableListOf<SensorEventListener>()
     private val locationListeners = mutableListOf<LocationListener>()
     private var gnssStatusCallback: GnssStatus.Callback? = null
@@ -121,6 +124,11 @@ class PhoneSensors(
             val listener = object : SensorEventListener {
                 override fun onSensorChanged(e: SensorEvent) {
                     val rx = now()
+                    if (type == Sensor.TYPE_ACCELEROMETER) {
+                        val v = e.values
+                        val dev = kotlin.math.abs(kotlin.math.sqrt((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).toDouble()) - SensorManager.GRAVITY_EARTH)
+                        if (joltSinceFix.isNaN() || dev > joltSinceFix) joltSinceFix = dev
+                    }
                     emit(stream, e.timestamp, JsonLine("s", 120).s("s", key).n("ts", e.timestamp).n("rx", rx).floats("v", e.values).n("a", e.accuracy).build())
                 }
 
@@ -161,9 +169,19 @@ class PhoneSensors(
             val stream = "loc:$provider"
             val listener = object : LocationListener {
                 override fun onLocationChanged(l: Location) {
-                    if (provider == LocationManager.GPS_PROVIDER) lastGps = l
-                    emit(stream, l.elapsedRealtimeNanos, locationLine(l, provider),
-                        if (provider == LocationManager.GPS_PROVIDER) doubleArrayOf(l.time.toDouble(), l.latitude, l.longitude, l.speed.toDouble(), l.accuracy.toDouble()) else null)
+                    var track: DoubleArray? = null
+                    if (provider == LocationManager.GPS_PROVIDER) {
+                        lastGps = l
+                        track = doubleArrayOf(
+                            l.time.toDouble(), round(l.latitude, 6), round(l.longitude, 6),
+                            if (l.hasSpeed()) round(l.speed.toDouble(), 2) else Double.NaN,
+                            if (l.hasAccuracy()) round(l.accuracy.toDouble(), 1) else Double.NaN,
+                            if (l.hasBearing()) round(l.bearing.toDouble(), 0) else Double.NaN,
+                            round(joltSinceFix, 2),
+                        )
+                        joltSinceFix = Double.NaN
+                    }
+                    emit(stream, l.elapsedRealtimeNanos, locationLine(l, provider), track)
                 }
 
                 override fun onProviderEnabled(p: String) = providerEvent(p, true)
@@ -212,6 +230,12 @@ class PhoneSensors(
             lm.addNmeaListener(executor, l)
             nmeaListener = l
         }
+    }
+
+    private fun round(x: Double, digits: Int): Double {
+        if (!x.isFinite()) return x
+        val f = Math.pow(10.0, digits.toDouble())
+        return Math.round(x * f) / f
     }
 
     private fun providerEvent(p: String, enabled: Boolean) {

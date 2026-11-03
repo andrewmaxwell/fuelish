@@ -84,7 +84,8 @@ class Uploader(
     private fun putChunk(id: String, seq: Int): UploadResult? {
         val meta = store.chunkMeta(id, seq)
         var metaJson = meta.toString()
-        if (metaJson.length > 12_000) {
+        // Headers up to 64 KB were verified against Cloudflare; a 60 s chunk's 1 Hz track is ~5 KB.
+        if (metaJson.length > 40_000) {
             meta.remove("track")
             metaJson = meta.toString()
         }
