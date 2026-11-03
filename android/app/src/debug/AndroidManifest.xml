@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:networkSecurityConfig="@xml/network_security_config">
+        <!-- Debug builds only: lets adb simulate the car's Bluetooth (see README, "Auto-record"). -->
+        <receiver android:name=".auto.DebugCarReceiver" android:exported="true" />
+    </application>
+</manifest>
