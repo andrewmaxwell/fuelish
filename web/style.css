@@ -81,8 +81,7 @@ button.ghost:hover { background: var(--accent-soft); color: var(--text); }
   border-bottom: 1px solid var(--border);
 }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 17px; color: var(--text); text-decoration: none; }
-.brand svg { width: 22px; height: 22px; fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round; }
-.brand svg circle { fill: var(--accent); stroke: none; }
+.brand img { width: 28px; height: 28px; }
 
 .card {
   background: var(--surface);

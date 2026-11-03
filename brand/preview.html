@@ -1,0 +1,52 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Fuelish logo preview</title>
+<style>
+  body { background: #21262d; color: #8b949e; font: 13px/1.4 system-ui, sans-serif; margin: 24px; }
+  h2 { color: #e6edf3; font-weight: 600; font-size: 14px; margin: 28px 0 10px; }
+  .row { display: flex; align-items: end; gap: 28px; flex-wrap: wrap; }
+  figure { margin: 0; text-align: center; }
+  figcaption { margin-top: 6px; }
+  .light { background: #f7f7f5; padding: 16px; border-radius: 8px; }
+  canvas { image-rendering: pixelated; width: 64px; height: 64px; }
+  .lockup { display: flex; align-items: center; gap: 14px; }
+  .lockup span { font: 600 40px/1 Manrope, Inter, system-ui, sans-serif; color: #e6edf3; letter-spacing: -0.02em; }
+</style>
+
+<h2>icon.svg</h2>
+<div class="row" data-src="icon.svg" data-sizes="512 192 96 48"></div>
+
+<h2>mark.svg / mark-flat.svg</h2>
+<div class="row" data-src="mark.svg" data-sizes="192 96 48"></div>
+<div class="row" data-src="mark-flat.svg" data-sizes="192 96 48"></div>
+
+<h2>Real pixels, magnified 4× (what a browser tab / notification actually gets)</h2>
+<div class="row" id="pixels"></div>
+
+<h2>Lockup</h2>
+<div class="lockup"><img src="mark.svg" width="56"><span>fuelish</span></div>
+
+<script>
+  for (const row of document.querySelectorAll("[data-src]")) {
+    for (const s of row.dataset.sizes.split(" ")) {
+      row.insertAdjacentHTML("beforeend",
+        `<figure><img src="${row.dataset.src}" width="${s}"><figcaption>${s}</figcaption></figure>`);
+    }
+  }
+  function pixelated(src, px) {
+    const c = document.createElement("canvas");
+    c.width = c.height = px;
+    c.style.width = c.style.height = px * 4 + "px";
+    const img = new Image();
+    img.onload = () => c.getContext("2d").drawImage(img, 0, 0, px, px);
+    img.src = src;
+    return c;
+  }
+  const pixels = document.getElementById("pixels");
+  for (const [src, px] of [["favicon.svg", 16], ["favicon.svg", 32], ["icon.svg", 16], ["mark-flat.svg", 24]]) {
+    const f = document.createElement("figure");
+    f.append(pixelated(src, px));
+    f.insertAdjacentHTML("beforeend", `<figcaption>${src} @ ${px}px</figcaption>`);
+    pixels.append(f);
+  }
+</script>
