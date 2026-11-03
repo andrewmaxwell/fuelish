@@ -238,7 +238,7 @@ const Route = (() => {
     map.on("mouseout", () => onPick(-1, "map"));
     map.on("click", (e) => onPick(nearest(e.latlng), "map"));
 
-    const cursor = L.circleMarker([0, 0], { radius: 8, color: "#fff", weight: 3, fillColor: "#0b0b0b", fillOpacity: 1, interactive: false });
+    const cursor = L.marker([0, 0], { icon: dotIcon("end-dot ring", 18), interactive: false, keyboard: false });
     return {
       map,
       fit,
@@ -281,7 +281,11 @@ const Route = (() => {
     }
     const first = pts[0], last = pts[pts.length - 1];
     L.circleMarker([first.lat, first.lon], { radius: 8, color: "#fff", weight: 3, fillColor: "#0ca30c", fillOpacity: 1 }).bindTooltip("Start").addTo(marks);
-    L.circleMarker([last.lat, last.lon], { radius: 8, color: "#fff", weight: 3, fillColor: "#0b0b0b", fillOpacity: 1 }).bindTooltip("End").addTo(marks);
+    L.marker([last.lat, last.lon], { icon: dotIcon("end-dot", 18), keyboard: false }).bindTooltip("End").addTo(marks);
+  }
+
+  function dotIcon(className, size) {
+    return L.divIcon({ className, iconSize: [size, size], html: "" });
   }
 
   // Color for the segment ending at point i, under the current color metric.

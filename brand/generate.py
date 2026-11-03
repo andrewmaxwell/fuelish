@@ -22,6 +22,9 @@ N = 8               # number of dashes
 START, SWEEP = 135.0, 270.0   # degrees, SVG convention (0 = right, clockwise)
 RAMP = ("#9c3a10", AMBER)     # colour of first and last dash; the dot is always AMBER
 GROW = 3.0                    # last dash body / first dash body (1 = all equal)
+# Deeper ramp and dot for transparent variants shown on light backgrounds (light
+# browser tabs, light-mode web page), where plain amber washes out.
+LIGHT_RAMP = ("#8a2c08", "#c47f06")
 
 OUT = os.path.dirname(os.path.abspath(__file__))
 
@@ -83,11 +86,11 @@ def shapes(ramp=True, scale=1.0, n=N, w=W, gap=GAP, dot=DOT):
 
 def mark(ramp=True, glow=True, scale=1.0, n=N, w=W, gap=GAP, dot=DOT):
     dashes, (cx, cy, r), (tx, ty, sc) = shapes(ramp, scale, n, w, gap, dot)
-    parts = [f'<path d="{d}" stroke="{c}"/>' for d, c in dashes]
+    parts = [f'<path class="d{i}" d="{d}" stroke="{c}"/>' for i, (d, c) in enumerate(dashes)]
     if glow:
-        parts.append(f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r}" fill="{AMBER}" '
+        parts.append(f'<circle class="glow" cx="{cx:.2f}" cy="{cy:.2f}" r="{r}" fill="{AMBER}" '
                      f'stroke="none" filter="url(#glow)" opacity="0.9"/>')
-    parts.append(f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r}" fill="{AMBER}" stroke="none"/>')
+    parts.append(f'<circle class="dot" cx="{cx:.2f}" cy="{cy:.2f}" r="{r}" fill="{AMBER}" stroke="none"/>')
     return (f'<g transform="translate({tx:.2f} {ty:.2f}) scale({sc})" fill="none" '
             f'stroke-width="{w}" stroke-linecap="round">{"".join(parts)}</g>')
 
@@ -99,6 +102,16 @@ GLOW_DEF = ('<defs><filter id="glow" x="-1" y="-1" width="3" height="3">'
 def svg(body, defs=True):
     return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
             f'{GLOW_DEF if defs else ""}{body}</svg>\n')
+
+
+def light_style(n=N):
+    """CSS that swaps in LIGHT_RAMP when the viewer prefers a light theme.
+
+    CSS beats SVG presentation attributes, so the dark colours stay as the default.
+    """
+    rules = "".join(f".d{i}{{stroke:{lerp_hex(*LIGHT_RAMP, i / (n - 1))}}}" for i in range(n))
+    return ("<style>@media (prefers-color-scheme: light){"
+            f"{rules}.dot{{fill:{LIGHT_RAMP[1]}}}.glow{{display:none}}}}</style>")
 
 
 def tile(radius=22):
@@ -141,14 +154,16 @@ VARIANTS = {
     "mark-flat.svg": svg(mark(ramp=False, glow=False, scale=1.25), defs=False),
     # App icon / large favicon on its own dark tile.
     "icon.svg": svg(tile() + mark(scale=1.0)),
-    # Tiny favicon: fewer, fatter dashes so it survives at 16 px.
-    "favicon.svg": svg(tile(18) + mark(glow=False, scale=1.15, **SMALL), defs=False),
+    # Favicon: fewer, fatter dashes so it survives at 16 px, filling the whole square on
+    # a transparent background so it works on light and dark browser tabs.
+    "favicon.svg": svg(light_style(SMALL["n"]) + mark(glow=False, scale=1.22, **SMALL),
+                       defs=False),
 }
 
 COPIES = {
     os.path.join(WEB, "favicon.svg"): VARIANTS["favicon.svg"],
-    # Header logo: shown at ~28px, so the mark fills more of its tile than the app icon.
-    os.path.join(WEB, "logo.svg"): svg(tile() + mark(scale=1.22)),
+    # Header logo: transparent, so it sits directly on the header in either theme.
+    os.path.join(WEB, "logo.svg"): svg(light_style() + mark(scale=1.25)),
     os.path.join(RES, "drawable", "ic_launcher_foreground.xml"):
         vector(108, scale=LAUNCHER_SCALE),
     os.path.join(RES, "drawable", "ic_launcher_monochrome.xml"):
