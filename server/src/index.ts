@@ -16,6 +16,7 @@ const SHA_RE = /^[0-9a-f]{64}$/;
 const MAX_META_BYTES = 512 * 1024;
 const MAX_CHUNK_BYTES = 90 * 1024 * 1024; // Workers request bodies are capped at 100 MB
 const LINK_TTL_S = 15 * 60;
+const SHARE_RE = /^[A-Za-z0-9_-]{22}$/; // 16 random bytes, base64url
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -48,6 +49,9 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
     return download(p, env, ctx);
   }
 
+  // Share links work without a token: one recording, trimmed, read-only.
+  if (m === "GET" && p[0] === "shared" && p.length === 2) return getShared(p[1], env);
+
   const scopes = await authenticate(req, env);
   const need = (s: Scope) => {
     if (!scopes.includes(s)) throw new HttpError(403, `requires ${s} scope`);
@@ -74,6 +78,12 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   if (p.length === 4 && p[2] === "chunks" && m === "PUT") {
     need("upload");
     return putChunk(req, id, parseSeq(p[3]), env);
+  }
+  if (p[2] === "shares") {
+    need("read");
+    if (p.length === 3 && m === "GET") return listShares(id, env);
+    if (p.length === 3 && m === "POST") return createShare(id, env);
+    if (p.length === 4 && m === "DELETE") return revokeShare(id, p[3], env);
   }
   if (p.length === 3 && p[2] === "links" && m === "POST") {
     need("read");
@@ -305,6 +315,10 @@ function recordingRow(r: any) {
 }
 
 async function getRecording(id: string, env: Env): Promise<Response> {
+  return json(await recordingDetail(id, env));
+}
+
+async function recordingDetail(id: string, env: Env) {
   const r = await env.DB.prepare(
     `SELECT r.*, (SELECT COUNT(*) FROM chunks WHERE recording_id = r.id) AS chunks_received,
             (SELECT COALESCE(SUM(bytes), 0) FROM chunks WHERE recording_id = r.id) AS bytes
@@ -329,7 +343,63 @@ async function getRecording(id: string, env: Env): Promise<Response> {
   const expected = r.chunk_count ?? (chunks.length ? chunks[chunks.length - 1].seq + 1 : 0);
   const missing: number[] = [];
   for (let s = 0; s < expected; s++) if (!have.has(s)) missing.push(s);
-  return json({ recording: recordingRow(r), chunks, missing });
+  return { recording: recordingRow(r), chunks, missing };
+}
+
+// ---------- share links ----------
+
+function shareToken(): string {
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  return btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function listShares(id: string, env: Env): Promise<Response> {
+  const { results } = await env.DB.prepare(
+    "SELECT token, created_at_ms FROM shares WHERE recording_id = ? AND revoked_at_ms IS NULL ORDER BY created_at_ms",
+  )
+    .bind(id)
+    .all<any>();
+  return json({ shares: results.map((s) => ({ token: s.token, createdAtMs: s.created_at_ms })) });
+}
+
+async function createShare(id: string, env: Env): Promise<Response> {
+  const exists = await env.DB.prepare("SELECT 1 FROM recordings WHERE id = ?").bind(id).first();
+  if (!exists) throw new HttpError(404, "recording not found");
+  const token = shareToken();
+  const now = Date.now();
+  await env.DB.prepare("INSERT INTO shares (token, recording_id, created_at_ms) VALUES (?, ?, ?)").bind(token, id, now).run();
+  return json({ token, createdAtMs: now }, 201);
+}
+
+async function revokeShare(id: string, token: string, env: Env): Promise<Response> {
+  await env.DB.prepare("UPDATE shares SET revoked_at_ms = ? WHERE token = ? AND recording_id = ? AND revoked_at_ms IS NULL")
+    .bind(Date.now(), token, id)
+    .run();
+  return json({ ok: true });
+}
+
+// What a share link shows: the trip and its chunk summaries (route, engine data), but none of the
+// phone's settings, Bluetooth addresses or device details, and no raw chunks.
+export function sharedView(detail: { recording: any; chunks: any[]; missing: number[] }) {
+  const r = detail.recording, m = r.meta ?? {};
+  const meta: Record<string, unknown> = {};
+  for (const k of ["vehicle", "trigger", "stopReason", "timezone", "startedWallMs"]) if (m[k] != null) meta[k] = m[k];
+  return {
+    recording: {
+      id: r.id, status: r.status, startedWallMs: r.startedWallMs, endedWallMs: r.endedWallMs, driveEndWallMs: r.driveEndWallMs,
+      chunkCount: r.chunkCount, chunksReceived: r.chunksReceived, complete: r.complete, updatedAtMs: r.updatedAtMs, meta,
+    },
+    chunks: detail.chunks.map((c) => ({ seq: c.seq, meta: c.meta })),
+    missing: detail.missing,
+  };
+}
+
+async function getShared(token: string, env: Env): Promise<Response> {
+  if (!SHARE_RE.test(token)) throw new HttpError(404, "This link isn't shared.");
+  const s = await env.DB.prepare("SELECT recording_id, revoked_at_ms FROM shares WHERE token = ?").bind(token).first<any>();
+  if (!s) throw new HttpError(404, "This link isn't shared.");
+  if (s.revoked_at_ms != null) throw new HttpError(404, "This trip is no longer shared.");
+  return json(sharedView(await recordingDetail(s.recording_id, env)));
 }
 
 async function createLinks(url: URL, id: string, env: Env): Promise<Response> {

@@ -140,6 +140,15 @@ document.getElementById("logout").onclick = () => {
 };
 
 async function route() {
+  // A shared trip needs no sign-in.
+  const share = location.hash.match(/^#\/s\/([A-Za-z0-9_-]+)/);
+  if (share) {
+    document.body.classList.add("page-trip");
+    document.getElementById("logout").hidden = true;
+    app.innerHTML = `<p class="muted loading">Loading…</p>`;
+    try { await showTrip(null, share[1]); } catch (e) { app.innerHTML = `<p class="bad loading">${esc(e.message)}</p>`; }
+    return;
+  }
   if (!token()) return showLogin();
   document.getElementById("logout").hidden = false;
   const h = location.hash;
@@ -251,9 +260,10 @@ function outingCard(o) {
 // ---------- points for a trip ----------
 
 // GPS points for one recording, cut off where the drive ended. `onProgress` reports a raw rebuild.
-async function tripPoints(id, detail, onProgress) {
+async function tripPoints(id, detail, onProgress, { shared = false } = {}) {
   const { recording: r, chunks } = detail || (await api(`/recordings/${id}`));
   let pts = Route.fromChunks(chunks) || routeCache.get(id);
+  if (!pts && shared) throw new Error("This trip was recorded before routes were summarized, so it can't be shown on a shared link.");
   if (!pts) {
     // Recorded before the phone summarized every GPS fix: rebuild from the raw chunks once.
     const links = await api(`/recordings/${id}/links`, { method: "POST" });
@@ -264,7 +274,7 @@ async function tripPoints(id, detail, onProgress) {
   const out = end != null ? pts.filter((p) => p.t <= end) : pts;
   // Engine rows from the chunk summaries; `engineRaw` lists chunks whose engine data is only raw.
   out.engine = Engine.derive(Engine.fromChunks(chunks)).filter((e) => end == null || e.t <= end);
-  out.engineRaw = Engine.rawOnly(chunks);
+  out.engineRaw = shared ? [] : Engine.rawOnly(chunks); // shared links never get raw chunks
   out.end = end;
   return out;
 }
@@ -283,7 +293,7 @@ async function rawEngine(id, pts, onProgress) {
 const stat = (label, value, unit = "") => `<div class="stat"><span>${label}</span><b>${value}<small>${unit}</small></b></div>`;
 // Engine-only options (RPM, pedal, fuel) stay hidden until the drive's engine data is in.
 const seg = (key, options) => `<div class="seg" data-key="${key}" role="group">${Object.entries(options)
-  .map(([k, v]) => `<button type="button" data-v="${k}"${key !== "base" && Route.METRICS[k]?.engine ? " data-engine hidden" : ""}>${esc(typeof v === "string" ? v : v.label)}</button>`).join("")}</div>`;
+  .map(([k, v]) => `<button type="button" data-v="${k}"${Route.METRICS[k]?.engine ? " data-engine hidden" : ""}>${esc(typeof v === "string" ? v : v.label)}</button>`).join("")}</div>`;
 const engineCard = () => `<div class="card" id="engine-card" hidden><h2>Engine</h2><div id="engine-body"></div></div>`;
 const routeCard = () => `
   <div class="card">
@@ -291,7 +301,6 @@ const routeCard = () => `
     <div class="control"><span>Color</span>${seg("color", Route.METRICS)}</div>
     <div id="rt-legend"></div>
     <div class="control"><span>Line width</span>${seg("width", Route.WIDTHS)}</div>
-    <div class="control"><span>Map</span>${seg("base", Route.BASES)}</div>
   </div>`;
 const frictionCard = (what) => `
   <div class="card">
@@ -303,13 +312,17 @@ const frictionCard = (what) => `
 
 // ---------- one trip ----------
 
-async function showTrip(id) {
+// `share` is a share-link token: the trip is shown read-only, without anything that needs signing in.
+async function showTrip(id, share = null) {
   // The list is only needed to find the other trips of this one's outing; the page works without it.
-  const [detail, list] = await Promise.all([api(`/recordings/${id}`), api("/recordings").catch(() => null)]);
+  const [detail, list] = share
+    ? [await api(`/shared/${share}`), null]
+    : await Promise.all([api(`/recordings/${id}`), api("/recordings").catch(() => null)]);
   const { recording: r } = detail;
+  id = r.id;
   const m = r.meta;
   const auto = m.trigger?.startsWith("car_bluetooth");
-  const pills = [statusPill(r), auto ? `<span class="pill">Auto-started</span>` : "", m.vehicle ? `<span class="pill">${esc(m.vehicle)}</span>` : ""].join("");
+  const pills = [share ? `<span class="pill">Shared trip</span>` : "", statusPill(r), auto ? `<span class="pill">Auto-started</span>` : "", m.vehicle ? `<span class="pill">${esc(m.vehicle)}</span>` : ""].join("");
   const day = new Date(r.startedWallMs).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
   const tail = r.endedWallMs != null && r.driveEndWallMs != null ? r.endedWallMs - r.driveEndWallMs : 0;
 
@@ -328,11 +341,12 @@ async function showTrip(id) {
   app.innerHTML = `
     <div class="trip">
       <header class="trip-head">
-        <a href="#/" class="back">← Trips</a>
+        ${share ? "" : `<a href="#/" class="back">← Trips</a>`}
         <h1>${esc(tripName(r.startedWallMs))}</h1>
         <p class="muted">${esc(day)} · ${esc(timeRange(r))}</p>
         <div class="pills">${pills}</div>
         ${outing}
+        ${share ? "" : `<div class="share" id="share"></div>`}
         ${r.status === "recording" ? `<p class="hint">Still recording; the route fills in as parts upload.</p>`
           : !r.complete ? `<p class="hint">${r.chunksReceived} of ${r.chunkCount ?? "?"} parts uploaded so far; the phone sends the rest on Wi-Fi.</p>` : ""}
         ${tail >= 30000 ? `<p class="hint">Ends when the car switched off. The ${fmtDur(tail)} the phone kept recording after that aren't counted.</p>` : ""}
@@ -352,10 +366,11 @@ async function showTrip(id) {
       </aside>
     </div>`;
 
+  if (!share) shareControls(id);
   const status = document.getElementById("rt-status");
   const pts = await tripPoints(id, detail, (i, n) => {
     if (status) status.innerHTML = `Building the detailed route… <progress max="${n}" value="${i}"></progress>`;
-  });
+  }, { shared: !!share });
   if (!document.getElementById("map")) return; // navigated away meanwhile
   if (pts.length < 2) {
     status.textContent = "Not enough GPS fixes to draw a route.";
@@ -383,6 +398,45 @@ async function showTrip(id) {
     } catch (e) {
       if (e.message !== "unauthorized") body.innerHTML = `<p class="bad">Couldn't read the engine data: ${esc(e.message)}</p>`;
     }
+  }
+}
+
+// Share link for one trip: create, copy, stop sharing.
+async function shareControls(id) {
+  const box = document.getElementById("share");
+  const linkOf = (t) => `${location.origin}/#/s/${t}`;
+  const render = (tok) => {
+    if (!document.getElementById("share")) return;
+    if (!tok) {
+      box.innerHTML = `<button type="button" class="ghost share-btn" id="share-on">Share this trip…</button>`;
+      box.querySelector("#share-on").onclick = async () => {
+        try { render((await api(`/recordings/${id}/shares`, { method: "POST" })).token); }
+        catch (e) { box.insertAdjacentHTML("beforeend", `<p class="bad">${esc(e.message)}</p>`); }
+      };
+      return;
+    }
+    box.innerHTML = `
+      <div class="share-box">
+        <div class="share-row"><input readonly value="${esc(linkOf(tok))}" aria-label="Share link"><button type="button" class="primary" id="share-copy">Copy</button></div>
+        <p class="hint">Anyone with this link can see this trip without signing in: the route, including where it starts and ends, and its engine data.</p>
+        <button type="button" class="ghost" id="share-off">Stop sharing</button>
+      </div>`;
+    const input = box.querySelector("input");
+    input.onclick = () => input.select();
+    box.querySelector("#share-copy").onclick = async (e) => {
+      try { await navigator.clipboard.writeText(input.value); e.target.textContent = "Copied"; }
+      catch { input.select(); }
+    };
+    box.querySelector("#share-off").onclick = async () => {
+      await api(`/recordings/${id}/shares/${tok}`, { method: "DELETE" });
+      render(null);
+    };
+  };
+  try {
+    const { shares } = await api(`/recordings/${id}/shares`);
+    render(shares.at(-1)?.token ?? null);
+  } catch {
+    box.innerHTML = "";
   }
 }
 
@@ -515,11 +569,10 @@ async function showMany(kind, key) {
 // ---------- map, charts and controls (shared) ----------
 
 function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } = {}) {
-  let state = { color: "speed", width: "none", base: "muted" };
+  let state = { color: "speed", width: "none" };
   try { state = { ...state, ...JSON.parse(localStorage.getItem(VIEW_KEY) || "{}") }; } catch {}
   if (!Route.METRICS[state.color]) state.color = "speed";
   if (!Route.WIDTHS[state.width]) state.width = "none";
-  if (!Route.BASES[state.base]) state.base = "muted";
 
   // What's drawn: the saved choice, except engine colors on a drive without engine data.
   let hasEngine = false;
@@ -572,8 +625,7 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
     const b = e.target.closest("button");
     if (!b) return;
     state[g.dataset.key] = b.dataset.v;
-    if (g.dataset.key === "base") view.setBase(state.base);
-    else recolor();
+    recolor();
     syncButtons();
     save();
   }));

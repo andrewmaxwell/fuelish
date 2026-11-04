@@ -112,6 +112,31 @@ describe("upload pipeline", () => {
   });
 });
 
+describe("share links", () => {
+  it("shows one trip without a token, trimmed, until revoked", async () => {
+    await call("/recordings/rec1", { method: "PUT", headers: DEVICE, body: meta({ vehicle: "Civic", note: "private", config: { obd: { deviceAddress: "00:04" } } }) });
+    expect((await call("/recordings/rec1/shares", { method: "POST", headers: DEVICE })).status).toBe(403);
+    const created = await call("/recordings/rec1/shares", { method: "POST", headers: WEB });
+    expect(created.status).toBe(201);
+    const { token } = (await created.json()) as any;
+    expect(token).toMatch(/^[A-Za-z0-9_-]{22}$/);
+
+    const shared = await call(`/shared/${token}`);
+    expect(shared.status).toBe(200);
+    const body = (await shared.json()) as any;
+    expect(body.recording.id).toBe("rec1");
+    expect(body.recording.meta).toEqual({ vehicle: "Civic", startedWallMs: 1000 });
+    expect(JSON.stringify(body)).not.toContain("00:04");
+    expect(body.recording.deviceId).toBeUndefined();
+
+    const list = (await (await call("/recordings/rec1/shares", { headers: WEB })).json()) as any;
+    expect(list.shares.map((s: any) => s.token)).toEqual([token]);
+    await call(`/recordings/rec1/shares/${token}`, { method: "DELETE", headers: WEB });
+    expect((await call(`/shared/${token}`)).status).toBe(404);
+    expect((await call("/shared/not-a-real-token-at-all")).status).toBe(404);
+  });
+});
+
 describe("trip summary", () => {
   it("measures distance, top speed and moving time from chunk tracks, skipping gaps", async () => {
     const { tripSummary } = await import("../src/index");

@@ -139,10 +139,9 @@ const Route = (() => {
 
   // ---------- metrics ----------
 
-  const dark = () => window.matchMedia("(prefers-color-scheme: dark)").matches;
-
+  // The map is always the dark one, so route colors are tuned for it alone.
   const ramp = (stops) => (x) => {
-    if (x == null || !Number.isFinite(x)) return dark() ? "#5f5e5a" : "#a3a29b";
+    if (x == null || !Number.isFinite(x)) return "#6b6a65";
     if (x <= stops[0][0]) return stops[0][1];
     for (let i = 1; i < stops.length; i++) {
       if (x <= stops[i][0]) {
@@ -157,73 +156,67 @@ const Route = (() => {
     const [x, y] = [p(a), p(b)];
     return "#" + x.map((v, i) => Math.round(v + (y[i] - v) * f).toString(16).padStart(2, "0")).join("");
   }
-  // Sequential ramps run toward more contrast with the map: darker on the light map, brighter on the dark
-  // one. Each theme has its own steps; the low end stays clear of the map in both.
-  const seq = (xs, light, dark) => ({ light: xs.map((x, i) => [x, light[i]]), dark: xs.map((x, i) => [x, dark[i]]) });
-  const BLUE = [["#b7d3f6", "#6da7ec", "#2a78d6", "#1c5cab", "#0d366b"], ["#1f5fb0", "#3987e5", "#6da7ec", "#b7d3f6", "#f2f7fe"]];
-  const ORANGE = [["#fbd8c7", "#f5a17d", "#eb6834", "#b84a1e", "#7a2e10"], ["#9c3c16", "#d95926", "#f5a17d", "#fbd8c7", "#fff4ee"]];
-  const VIOLET = [["#d9d4f7", "#a99ef0", "#6250d6", "#3f30a3"], ["#4a3bb0", "#9085e9", "#c4bdf5", "#f1effd"]];
+  const RED = "#ef4444", ORANGE = "#f28c28", YELLOW = "#f2c94c", GREEN = "#3fc66b", BLUE = "#3b8ff6", PURPLE = "#b25cf6";
+  const at = (xs, colors) => xs.map((x, i) => [x, colors[i]]);
+  // Good → bad, like a traffic light: smooth, gentle, accurate in green; rough, hard, uncertain in red.
+  const goodBad = (xs) => at(xs, [GREEN, YELLOW, ORANGE, RED]);
 
-  // Each metric: label, value for a segment (between points p → q), color stops per theme, legend formatting.
+  // Each metric: label, value for a segment (between points p → q), color stops, legend formatting.
   // Scales are fixed (not per drive) so colors compare across drives.
   const METRICS = {
     speed: {
-      label: "Speed", unit: "mph", fmt: (x) => x.toFixed(0),
+      label: "Speed", unit: "mph", fmt: (x) => x.toFixed(0), note: "Red stopped, yellow slow, green cruising, blue fast, purple very fast",
       value: (p, q) => (p.v != null && q.v != null ? ((p.v + q.v) / 2) * MPH : null),
-      stops: seq([0, 10, 25, 40, 60], ...BLUE),
-      width: [0, 70],
+      stops: at([0, 8, 18, 35, 55, 75], [RED, ORANGE, YELLOW, GREEN, BLUE, PURPLE]),
+      width: [0, 75],
     },
     accel: {
       label: "Accel", unit: "g", fmt: (x) => x.toFixed(2), note: "Red is braking, blue is speeding up",
       value: (p, q) => (p.a != null && q.a != null ? (p.a + q.a) / 2 / G : null),
       // Diverging: two poles and a neutral gray middle.
-      stops: {
-        light: [[-0.3, "#a32323"], [-0.12, "#e34948"], [0, "#b8b6ae"], [0.12, "#2a78d6"], [0.3, "#104281"]],
-        dark: [[-0.3, "#ff8a89"], [-0.12, "#e66767"], [0, "#6b6a65"], [0.12, "#3987e5"], [0.3, "#9ec5f4"]],
-      },
+      stops: [[-0.3, "#ff6b6b"], [-0.1, "#c94a4a"], [0, "#6b6a65"], [0.1, "#3577c9"], [0.3, "#7fb6ff"]],
       width: [0, 0.3], abs: true,
     },
     jolt: {
       label: "Bumps", unit: "g", fmt: (x) => x.toFixed(1), note: "Biggest jolt between GPS fixes (includes mount bounce)",
       value: (p, q) => (q.jolt != null ? q.jolt / G : null),
-      stops: seq([0, 0.15, 0.3, 0.5, 0.8], ...ORANGE),
+      stops: goodBad([0.05, 0.2, 0.4, 0.7]),
       width: [0, 0.8],
     },
     accuracy: {
       label: "GPS", unit: "m", fmt: (x) => x.toFixed(0), note: "Estimated GPS error",
       value: (p, q) => (q.acc != null ? q.acc : null),
-      stops: seq([2, 5, 10, 20], ...VIOLET),
+      stops: goodBad([3, 6, 12, 25]),
       width: [0, 25],
     },
     time: {
       label: "Time", unit: "",
       value: null, // filled per route: 0..1 progress
-      stops: seq([0, 0.33, 0.66, 1], ...VIOLET),
+      stops: at([0, 0.33, 0.66, 1], ["#4a3bb0", "#9085e9", "#c4bdf5", "#f1effd"]),
     },
     // From the OBD adapter (p.eng, see engine.js); offered only on drives that have it.
     rpm: {
       label: "RPM", unit: "rpm", fmt: (x) => x.toFixed(0), engine: true,
       value: (p, q) => q.eng?.rpm ?? null,
-      stops: seq([800, 2000, 3000, 4500], ...VIOLET),
+      stops: goodBad([800, 2200, 3500, 5000]),
       width: [800, 5000],
     },
     pedal: {
-      label: "Pedal", unit: "%", fmt: (x) => x.toFixed(0), engine: true, note: "Gas pedal position as the car reports it (about 20% at rest)",
+      label: "Pedal", unit: "%", fmt: (x) => x.toFixed(0), engine: true, note: "Blue is foot off the pedal (the car reads about 20% at rest), red is floored",
       value: (p, q) => q.eng?.pedal ?? null,
-      stops: seq([20, 30, 45, 65, 90], ...BLUE),
-      width: [20, 90],
+      stops: at([21, 28, 45, 65, 85], [BLUE, GREEN, YELLOW, ORANGE, RED]),
+      width: [20, 85],
     },
     fuel: {
-      label: "Fuel", unit: "gal/h", fmt: (x) => x.toFixed(1), engine: true, note: "Estimated fuel flow (0 while coasting in fuel cut)",
+      label: "Fuel", unit: "gal/h", fmt: (x) => x.toFixed(1), engine: true, note: "Estimated fuel flow. Blue is coasting with fuel cut off",
       value: (p, q) => q.eng?.gph ?? null,
-      stops: seq([0, 0.5, 1.5, 3, 6], ...ORANGE),
-      width: [0, 6],
+      stops: at([0, 0.3, 1, 2.5, 5], [BLUE, GREEN, YELLOW, ORANGE, RED]),
+      width: [0, 5],
     },
   };
 
   const WIDTHS = { none: "Even", speed: "Speed", accel: "Accel", jolt: "Bumps", rpm: "RPM", fuel: "Fuel" };
-  const BASES = { muted: "Map", streets: "Streets", satellite: "Satellite" };
-  const stopsFor = (m) => m.stops[dark() ? "dark" : "light"];
+  const stopsFor = (m) => m.stops;
 
   // ---------- rendering ----------
 
@@ -232,21 +225,11 @@ const Route = (() => {
     const map = L.map(el, { preferCanvas: true, zoomControl: false, attributionControl: true });
     el._map = map;
     L.control.zoom({ position: "topright" }).addTo(map);
-    const osm = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
-    const bases = {
-      muted: L.tileLayer(osm, { maxZoom: 19, attribution: "&copy; OpenStreetMap", className: "tiles-muted" }),
-      streets: L.tileLayer(osm, { maxZoom: 19, attribution: "&copy; OpenStreetMap" }),
-      satellite: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-        maxZoom: 19, attribution: "Imagery &copy; Esri",
-      }),
-    };
-    let base = null;
-    const setBase = (k) => {
-      if (base) map.removeLayer(base);
-      base = (bases[k] || bases.muted).addTo(map);
-      base.bringToBack();
-    };
-    setBase(state.base);
+    // Always the dark map: OpenStreetMap tiles, grayscaled and inverted (see .tiles-dark).
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap", className: "tiles-dark" }).addTo(map);
+    // The route sits in its own pane drawn slightly see-through as a whole, so street names show
+    // through it without the overlapping segment ends adding up to darker beads.
+    map.createPane("route").style.opacity = "0.78";
 
     const layer = L.layerGroup().addTo(map);
     const marks = L.layerGroup().addTo(map);
@@ -277,7 +260,6 @@ const Route = (() => {
     return {
       map,
       fit,
-      setBase,
       redraw: () => draw(layer, marks, pts, state, focus),
       // Fade every trip but one (null shows them all evenly).
       focus(k) {
@@ -302,12 +284,12 @@ const Route = (() => {
     for (let i = 1; i < pts.length; i++) {
       const p = pts[i - 1], q = pts[i];
       if (q.t - p.t > 5000) continue; // GPS gap: don't draw a straight line across it
-      let w = 5;
+      let w = 6;
       if (widthM) {
         let wv = widthM.value(p, q);
         if (wv != null && widthM.abs) wv = Math.abs(wv);
         const [lo, hi] = widthM.width;
-        w = wv == null ? 3 : 2.5 + 11 * Math.min(1, Math.max(0, (wv - lo) / (hi - lo)));
+        w = wv == null ? 3 : 2.5 + 19 * Math.min(1, Math.max(0, (wv - lo) / (hi - lo)));
       }
       if (q.trip !== p.trip) continue; // never join one trip's end to the next one's start
       segs.push([[[p.lat, p.lon], [q.lat, q.lon]], colorOf(i), w, focus == null || q.trip === focus]);
@@ -316,9 +298,10 @@ const Route = (() => {
     // The focused trip (if any) is drawn last, over the faded others.
     segs.sort((x, y) => x[3] - y[3]);
     // Faded trips are solid gray, not see-through: overlapping round caps would show as beads.
-    const faded = dark() ? "#4a4946" : "#c9c7bf";
-    for (const [ll, , w, on] of segs) if (on) L.polyline(ll, { color: "#0b0b0b", weight: w + 3, opacity: 0.6, lineCap: "round", interactive: false }).addTo(layer);
-    for (const [ll, c, w, on] of segs) L.polyline(ll, { color: on ? c : faded, weight: on ? w : Math.min(w, 4), opacity: 1, lineCap: "round", interactive: false }).addTo(layer);
+    const faded = "#4a4946";
+    const line = { lineCap: "round", lineJoin: "round", interactive: false, pane: "route" };
+    for (const [ll, , w, on] of segs) if (on) L.polyline(ll, { ...line, color: "#0b0b0b", weight: w + 3, opacity: 0.55 }).addTo(layer);
+    for (const [ll, c, w, on] of segs) L.polyline(ll, { ...line, color: on ? c : faded, weight: on ? w : Math.min(w, 4), opacity: 1 }).addTo(layer);
 
     const shown = (p) => focus == null || p.trip === focus;
     for (const s of stops(pts)) {
@@ -369,5 +352,5 @@ const Route = (() => {
       (m.note ? `<p class="hint">${m.note}</p>` : "");
   }
 
-  return { fromChunks, fromRaw, render, tripRanges, legendHtml, summary, segmentColors, METRICS, WIDTHS, BASES, G, MPH };
+  return { fromChunks, fromRaw, render, tripRanges, legendHtml, summary, segmentColors, METRICS, WIDTHS, G, MPH };
 })();
