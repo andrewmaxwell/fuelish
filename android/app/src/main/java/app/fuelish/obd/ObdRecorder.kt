@@ -48,6 +48,10 @@ class ObdRecorder(
     private var maxBatch = 1
     /** The engine ECU: its values (not the transmission's duplicates) go into the engine summary. */
     private var mainEcu = ""
+    /** Supported PIDs per ECU header, from discovery. */
+    private var ecuPids = mapOf<String, Set<Int>>()
+    /** True while requests go to the engine ECU alone (physical addressing) instead of every ECU. */
+    private var engineOnly = false
 
     // Rolling stats for status and obd_stats records.
     private var statWindowStart = 0L
@@ -144,6 +148,11 @@ class ObdRecorder(
 
     /** Returns false if the car does not answer (ignition off, wrong protocol, ...). */
     private fun discoverVehicle(s: ElmSession): Boolean {
+        // Discovery always asks every ECU, so it can see them all.
+        if (engineOnly) {
+            allEcus(s)
+            engineOnly = false
+        }
         setState("discovering", "searching for protocol")
         val first = s.cmd("0100", 15_000)
         if (first.status == ElmStatus.TIMEOUT) throw ObdDisconnected("adapter stopped answering")
@@ -173,6 +182,10 @@ class ObdRecorder(
             if (resp.status != ElmStatus.OK) break
         }
         supported = all.filterTo(sortedSetOf()) { !Pids.isBitmapPid(it) }
+        ecuPids = perEcu.keys().asSequence().associateWith { e ->
+            val a = perEcu.getJSONArray(e)
+            (0 until a.length()).map { a.getString(it).toInt(16) }.toSet()
+        }
         if (supported.isEmpty()) return false
 
         // ECU #1 (7E8 / 18DAF110) is the engine by OBD convention; otherwise the one supporting the most.
@@ -238,6 +251,30 @@ class ObdRecorder(
     }
 
     /** Measures single-PID latency and finds the largest multi-PID request the ECU answers fully. */
+    // ---------- addressing ----------
+    // Requests normally go to every ECU (functional address 7DF / 18DB33F1), and on the Civic the
+    // transmission ECU then answers half of them with copies of the engine's values. Addressing the
+    // engine ECU alone (physical: 7E0 / 18DA10F1) skips those. Used only when the engine ECU supports
+    // every PID any ECU does, so nothing is lost, and only if the benchmark finds it faster.
+
+    private fun canAddressEngineOnly(): Boolean {
+        val mine = ecuPids[mainEcu] ?: return false
+        return (mainEcu.length == 3 || (mainEcu.length == 8 && mainEcu.startsWith("18DAF1"))) && supported.all { it in mine }
+    }
+
+    private fun engineOnlyAddress(s: ElmSession): Boolean = when (mainEcu.length) {
+        3 -> s.cmd("ATSH%03X".format(mainEcu.toInt(16) - 8)).status == ElmStatus.OK
+        8 -> s.cmd("ATCP18").status == ElmStatus.OK && s.cmd("ATSHDA${mainEcu.substring(6)}F1").status == ElmStatus.OK
+        else -> false
+    }
+
+    private fun allEcus(s: ElmSession) {
+        if (mainEcu.length == 8) {
+            s.cmd("ATCP18")
+            s.cmd("ATSHDB33F1")
+        } else s.cmd("ATSH7DF")
+    }
+
     private fun benchmark(s: ElmSession) {
         setState("benchmarking")
         val bench = JSONObject()
@@ -263,20 +300,45 @@ class ObdRecorder(
         fun stats(l: List<Long>) = JSONObject().put("n", l.size).put("meanMs", l.average() / 1e6)
             .put("minMs", (l.minOrNull() ?: 0) / 1e6).put("maxMs", (l.maxOrNull() ?: 0) / 1e6)
 
-        val (_, single) = trial(candidates.take(1), 10)
-        bench.put("single", stats(single).put("pid", Pids.hex(candidates[0])))
-        var best = 1
-        val multi = JSONObject()
-        for (k in 2..candidates.size) {
-            val (ok, lat) = trial(candidates.take(k), 4)
-            multi.put(k.toString(), stats(lat).put("complete", ok).put("pidsPerSec", k / (lat.average() / 1e9)))
-            if (!ok) break
-            best = k
+        /** Largest batch answered completely, and PIDs per second at that batch; details into [out]. */
+        fun measure(out: JSONObject): Pair<Int, Double> {
+            val (singleOk, single) = trial(candidates.take(1), 10)
+            out.put("single", stats(single).put("pid", Pids.hex(candidates[0])).put("complete", singleOk))
+            var best = if (singleOk) 1 else 0
+            var rate = if (singleOk) 1 / (single.average() / 1e9) else 0.0
+            val multi = JSONObject()
+            for (k in 2..candidates.size) {
+                val (ok, lat) = trial(candidates.take(k), 4)
+                val pps = k / (lat.average() / 1e9)
+                multi.put(k.toString(), stats(lat).put("complete", ok).put("pidsPerSec", pps))
+                if (!ok) break
+                best = k
+                rate = pps
+            }
+            out.put("multi", multi).put("maxCompleteBatch", best)
+            return best to rate
         }
-        bench.put("multi", multi)
-        bench.put("maxCompleteBatch", best)
+
+        val (bestAll, rateAll) = measure(bench)
+        val mode = cfg.optString("engineOnly", "auto") // auto | on | off
+        var useEngine = false
+        var best = bestAll
+        if (mode != "off" && canAddressEngineOnly() && engineOnlyAddress(s)) {
+            val e = JSONObject()
+            val (bestEng, rateEng) = measure(e)
+            bench.put("engineOnly", e.put("ecu", mainEcu).put("pidsPerSec", rateEng))
+            bench.put("allEcusPidsPerSec", rateAll)
+            // Engine-only must answer at least as many PIDs per request completely, and be 5% faster.
+            useEngine = bestEng > 0 && (mode == "on" || (bestEng >= bestAll && rateEng >= rateAll * 1.05))
+            if (useEngine) best = bestEng else allEcus(s)
+        } else if (mode != "off") {
+            bench.put("engineOnly", JSONObject().put("skipped", if (canAddressEngineOnly()) "adapter refused the header" else "another ECU supports PIDs the engine ECU doesn't"))
+            allEcus(s)
+        }
+        engineOnly = useEngine
+        bench.put("addressing", if (useEngine) "engine_only" else "all_ecus")
         val forced = cfg.optInt("maxPidsPerRequest", 0)
-        maxBatch = if (forced > 0) forced else best
+        maxBatch = if (forced > 0) forced else maxOf(1, best)
         bench.put("chosenBatch", maxBatch)
         summary.put("benchmark", bench)
         val now = nanoTime()

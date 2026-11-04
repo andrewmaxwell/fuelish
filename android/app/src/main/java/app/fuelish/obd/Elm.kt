@@ -28,13 +28,15 @@ data class ElmResponse(
 
 /**
  * Commands the app is allowed to send. Everything is read-only: adapter configuration
- * (AT/ST), mode 01 current data, mode 03/07/0A stored/pending/permanent DTC reads, and
+ * (AT/ST, including which ECU a request is addressed to), mode 01 current data, mode 03/07/0A stored/pending/permanent DTC reads, and
  * mode 09 vehicle info. Modes that clear codes (04), run tests (08) or anything else are
  * rejected before reaching the adapter.
  */
 object ElmAllowlist {
     private val allowed = listOf(
         Regex("AT(Z|WS|D|E[01]|L[01]|S[01]|H[01]|SP[0-9A-C]|TP[0-9A-C]|DPN?|RV|I|@1|AT[012]|ST[0-9A-F]{2}|CAF[01]|M0)"),
+        // Request header / CAN priority: only where a request goes (one ECU or all), never what it asks.
+        Regex("AT(SH([0-9A-F]{3}|[0-9A-F]{6})|CP[0-9A-F]{2})"),
         Regex("ST(I|DI|SN)"),
         Regex("01([0-9A-F]{2}){1,6}[1-9]?"),
         Regex("09[0-9A-F]{2}"),

@@ -49,7 +49,8 @@ before reaching the adapter. On connect the recorder discovers which PIDs the ca
 (nothing is assumed about the Civic), reads VIN and DTCs, then **benchmarks** single-PID latency and the largest
 multi-PID request the ECU answers fully. After that it polls with an earliest-deadline-first scheduler: "fast" PIDs (RPM,
 speed, MAF/MAP, throttle, load, pedal) use all spare bus time, while medium (500 ms) and slow (5 s) PIDs get their turn.
-When multi-PID requests work, the slow PIDs ride along in otherwise-empty slots. Every exchange is logged raw (`obd_raw`)
+When multi-PID requests work, the slow PIDs ride along in otherwise-empty slots. The benchmark also tries addressing the engine ECU alone (the Civic's transmission ECU otherwise answers
+half the requests with copies of the engine's values) and keeps that if it's faster and nothing is lost. Every exchange is logged raw (`obd_raw`)
 beside the decoded values (`obd`, with unit and source bytes). Supported PIDs the decoder doesn't know are still
 polled and stored as raw bytes. Fuel rate (PID 5E) is recorded only if the car reports it. Nothing is estimated.
 

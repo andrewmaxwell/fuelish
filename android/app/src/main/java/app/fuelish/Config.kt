@@ -64,10 +64,11 @@ class Config(val json: JSONObject) {
             "mediumIntervalMs": 500,
             "slowIntervalMs": 5000,
             "otherIntervalMs": 10000,
-            "fast": ["0C", "0D", "10", "0B", "11", "04", "49", "5A", "45", "43"],
-            "medium": ["0E", "06", "07", "44", "34", "24", "14", "15", "4C", "61", "62", "5E", "0F", "47"],
+            "fast": ["0C", "0D", "10", "0B", "11", "04", "49", "5A", "44"],
+            "medium": ["0E", "06", "07", "45", "43", "34", "24", "14", "15", "4C", "61", "62", "5E", "0F", "47"],
             "slow": ["05", "2F", "33", "46", "42", "5C", "3C", "1F", "01", "03", "31", "21", "4D", "4E", "A6", "13", "1C", "51", "63"],
             "maxPidsPerRequest": 0,
+            "engineOnly": "auto",
             "demoteAfterMisses": 5,
             "vehicleLostAfterSilent": 5,
             "demotedIntervalMs": 30000,
@@ -92,10 +93,29 @@ class Config(val json: JSONObject) {
         }
         """.trimIndent()
 
+        /**
+         * Earlier default OBD lists. Saving settings stores the whole merged config, so a phone keeps
+         * an old default list forever; a stored list still exactly equal to an old default is treated
+         * as "never edited" and takes the current default. A list the user changed is left alone.
+         */
+        private val OLD_OBD_DEFAULTS = mapOf(
+            "fast" to listOf(listOf("0C", "0D", "10", "0B", "11", "04", "49", "5A", "45", "43")),
+            "medium" to listOf(listOf("0E", "06", "07", "44", "34", "24", "14", "15", "4C", "61", "62", "5E", "0F", "47")),
+        )
+
         fun parse(userJson: String?): Config {
             val base = JSONObject(DEFAULTS)
-            if (!userJson.isNullOrBlank()) merge(base, JSONObject(userJson))
+            if (!userJson.isNullOrBlank()) merge(base, upgrade(JSONObject(userJson)))
             return Config(base)
+        }
+
+        fun upgrade(user: JSONObject): JSONObject {
+            val obd = user.optJSONObject("obd") ?: return user
+            for ((key, olds) in OLD_OBD_DEFAULTS) {
+                val stored = obd.optJSONArray(key)?.let { a -> (0 until a.length()).map { a.getString(it).uppercase() } } ?: continue
+                if (olds.any { it == stored }) obd.remove(key)
+            }
+            return user
         }
 
         fun merge(into: JSONObject, from: JSONObject) {

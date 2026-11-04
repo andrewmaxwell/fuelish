@@ -49,7 +49,7 @@ batching latency.
 | `obd_event` | adapter link changes | `ev`: `connected`, `adapter_ready`, `disconnected`, `vehicle_lost` (the car stopped answering: 5 errors, or 5 requests in a row with nothing answered, which is how ignition off shows up on the Civic), `pid_demoted`, `pid_restored` (a demoted PID answered again and is back on its tier's interval) |
 | `obd_raw` | every adapter exchange | `tx`, `rx`, `cmd`, `st` (OK/NO_DATA/ERROR/TIMEOUT), `resp` (exact text before the `>` prompt) |
 | `obd_discovery` | after the car answers | protocol, `mainEcu` (the engine ECU: 7E8/18DAF110, else the one supporting the most PIDs), supported PIDs per ECU, PIDs the decoder doesn't know, decoder formulas for every supported PID, VIN/calibration info, raw DTC responses |
-| `obd_bench` | after discovery | single-PID latency, multi-PID completeness and throughput per batch size, chosen batch size |
+| `obd_bench` | after discovery | single-PID latency, multi-PID completeness and throughput per batch size, chosen batch size; the same measured with requests addressed to the engine ECU alone (`engineOnly`), and `addressing`: `engine_only` when that answered completely and was at least 5% faster (config `obd.engineOnly`: auto / on / off), else `all_ecus` |
 | `obd` | each decoded value | `tx`, `rx`, `ecu` (CAN header), `pid`, `data` (hex data bytes), `f` (field), `val`, `u` (unit). PIDs without a decoder have only `data`. |
 | `obd_adapter` | every 5 s | adapter-measured battery voltage (`ATRV`) |
 | `obd_stats` | every 10 s | requests/s, mean latency, per-PID polls/answers/tier/interval |

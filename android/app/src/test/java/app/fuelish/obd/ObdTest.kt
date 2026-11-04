@@ -189,6 +189,52 @@ class ObdTest {
     }
 
     @Test
+    fun allowlistTakesRequestHeadersOnly() {
+        for (c in listOf("ATSH7E0", "ATSH7DF", "ATCP18", "ATSHDA10F1", "ATSHDB33F1")) ElmAllowlist.check(c)
+        for (c in listOf("ATSH7E", "ATSHDA10F1FF", "ATCPX1")) {
+            assertTrue(c, runCatching { ElmAllowlist.check(c) }.isFailure)
+        }
+    }
+
+    @Test
+    fun engineOnlyAddressingAndBackToAllEcusAfterIgnitionOff() {
+        val fake = FakeElm(offReply = "NO DATA")
+        var switchedOff = false
+        var restarted = false
+        val (_, sink) = runRecorder(fake, """{"engineOnly": "on"}""") { s ->
+            val streams = s.streams()
+            if (!switchedOff && streams.count { it == "obd:rpm" } >= 20) {
+                fake.vehicleOn = false
+                switchedOff = true
+            }
+            val events = synchronized(s.lines) { s.lines.filter { it.first == "obd_event" }.map { JSONObject(it.second).getString("ev") } }
+            if (switchedOff && !restarted && "vehicle_lost" in events) {
+                fake.vehicleOn = true
+                restarted = true
+            }
+            restarted && streams.count { it == "obd_bench" } >= 2 && streams.count { it == "obd:rpm" } >= 40
+        }
+        val bench = JSONObject(sink.lines.first { it.first == "obd_bench" }.second).getJSONObject("b")
+        assertEquals("engine_only", bench.getString("addressing"))
+        // Engine-only header set after the first benchmark, reset to all ECUs before rediscovering.
+        val sent = fake.received
+        val firstPhysical = sent.indexOf("ATSH7E0")
+        assertTrue("sent: $sent", firstPhysical >= 0)
+        val secondDiscovery = sent.withIndex().filter { it.value == "0100" }.map { it.index }.getOrNull(1) ?: -1
+        assertTrue("second discovery after switch-off", secondDiscovery > firstPhysical)
+        assertTrue("ATSH7DF before rediscovery", sent.subList(firstPhysical, secondDiscovery).contains("ATSH7DF"))
+        assertTrue(sink.streams().count { it == "obd:rpm" } >= 40)
+    }
+
+    @Test
+    fun benchmarkRecordsWhichAddressingItChose() {
+        val (_, sink) = runRecorder(FakeElm()) { it.streams().contains("obd_bench") }
+        val bench = JSONObject(sink.lines.first { it.first == "obd_bench" }.second).getJSONObject("b")
+        assertTrue(bench.getString("addressing") in setOf("engine_only", "all_ecus"))
+        assertTrue(bench.has("engineOnly"))
+    }
+
+    @Test
     fun reconnectsAfterLinkDrop() {
         var connects = 0
         var current = FakeElm()
