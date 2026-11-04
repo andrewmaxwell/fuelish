@@ -30,80 +30,127 @@ const Insights = (() => {
     return out;
   }
 
-  // Distance, fuel and time per bin, from consecutive seconds (fuel economy is total miles over
-  // total gallons in the bin, not an average of instant readings, which blow up near zero).
-  function binned(trips, keyOf, binOf) {
-    const bins = new Map();
+  // One sample per second of driving: x (speed, temperature, ...) with the miles, gallons and seconds in it.
+  function samples(trips, xOf) {
+    const out = [];
     for (const { rows } of trips) {
       for (let i = 1; i < rows.length; i++) {
         const a = rows[i - 1], b = rows[i], dt = (b.t - a.t) / 1000;
         if (dt > 2.5 || b.fuelGs == null || b.speed == null) continue;
-        const k = keyOf(b);
-        if (k == null) continue;
-        const bin = binOf(k);
-        const acc = bins.get(bin) || bins.set(bin, { miles: 0, gal: 0, secs: 0 }).get(bin);
-        acc.miles += (b.speed / 3.6) * dt / 1609.344;
-        acc.gal += (b.fuelGs * dt) / 745 / 3.78541;
-        acc.secs += dt;
+        const x = xOf(b);
+        if (x == null || !Number.isFinite(x)) continue;
+        out.push({ x, miles: ((b.speed / 3.6) * dt) / 1609.344, gal: (b.fuelGs * dt) / 745 / 3.78541, secs: dt, gph: b.gph, mph: b.speed * MPH, cut: b.cut });
       }
     }
-    return [...bins.entries()].sort((x, y) => x[0] - y[0]).map(([bin, v]) => ({ bin, ...v, mpg: v.gal > 0 ? v.miles / v.gal : null }));
+    return out;
   }
 
-  // ---------- bar chart: one series, one axis, hover tooltip ----------
+  // A smooth curve over a fine grid: at each x, a Gaussian-weighted sum of nearby seconds. Economy is
+  // weighted miles over weighted gallons (an average of instant mpg would blow up near zero fuel).
+  // `secs` at each point is how much data backs it, in seconds within about one bandwidth.
+  function kernel(smp, { lo, hi, step, bw }) {
+    const fine = new Map(); // pre-bin at step/2 so long histories stay fast
+    const fw = step / 2;
+    for (const s of smp) {
+      const k = Math.round(s.x / fw);
+      const b = fine.get(k) || fine.set(k, { x: k * fw, miles: 0, gal: 0, secs: 0, gphSecs: 0 }).get(k);
+      b.miles += s.miles; b.gal += s.gal; b.secs += s.secs; b.gphSecs += (s.gph ?? 0) * s.secs;
+    }
+    const bins = [...fine.values()];
+    const out = [];
+    for (let x = lo; x <= hi + 1e-9; x += step) {
+      let m = 0, g = 0, sec = 0, gs = 0, near = 0;
+      for (const b of bins) {
+        const d = (b.x - x) / bw;
+        if (Math.abs(d) > 3) continue;
+        const w = Math.exp(-0.5 * d * d);
+        m += w * b.miles; g += w * b.gal; sec += w * b.secs; gs += w * b.gphSecs;
+        if (Math.abs(d) <= 1) near += b.secs;
+      }
+      out.push({ x, mpg: g > 0 ? m / g : null, gph: sec > 0 ? gs / sec : null, density: sec / (bw * Math.sqrt(2 * Math.PI)), near });
+    }
+    return out;
+  }
 
-  function bars(host, items, { unit, fmt, aria, faded = () => false, tip }) {
+  // ---------- curve chart: one series, one axis, raw seconds as faint dots, hover readout ----------
+
+  function curveChart(host, { curve, y, dots = [], xFmt, yFmt, xUnit, yUnit, aria, minNear = 20, height = 220, area = false, yMax }) {
     host.replaceChildren();
     const svg = svgEl("svg", { class: "ins-chart", role: "img", "aria-label": aria }, host);
     const tipEl = document.createElement("div");
     tipEl.className = "chart-tip";
     tipEl.hidden = true;
     host.appendChild(tipEl);
-    const H = 190, top = 14, bottom = 26, left = 40, right = 8;
-    // Scale to the bars with enough data; a thin one (a few seconds coasting at 100+ mpg) is clipped
-    // at the top instead of flattening everything else. Its tooltip still has the real value.
-    const solid = items.filter((d) => d.value != null && !faded(d)).map((d) => d.value);
-    const vals = solid.length ? solid : items.map((d) => d.value).filter((v) => v != null);
-    const max = Math.max(1e-9, ...vals);
-    const step = niceStep(max / 4);
-    const ymax = Math.ceil(max / step) * step;
+    const H = height, top = 22, bottom = 26, left = 44, right = 10;
+    const pts = curve.filter((c) => c[y] != null && c.near > 0);
+    if (!pts.length) { host.innerHTML = `<p class="hint">Not enough data yet.</p>`; return; }
+    const x0 = curve[0].x, x1 = curve[curve.length - 1].x;
+    // Scale to the well-supported part of the curve; sparse ends and stray dots are clipped.
+    const solid = pts.filter((c) => c.near >= minNear).map((c) => c[y]);
+    const peak = yMax ?? Math.max(1e-9, ...(solid.length ? solid : pts.map((c) => c[y])));
+    const step = niceStep(peak / 4), ymax = Math.ceil((peak * 1.08) / step) * step;
+    let W = 0, X = () => 0;
+    const Y = (v) => top + (1 - Math.min(v, ymax) / ymax) * (H - top - bottom);
     function draw() {
-      const W = Math.max(280, host.clientWidth);
+      W = Math.max(280, host.clientWidth);
       svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
       svg.setAttribute("width", W);
       svg.setAttribute("height", H);
       svg.replaceChildren();
-      const y = (v) => top + (1 - v / ymax) * (H - top - bottom);
+      X = (v) => left + ((v - x0) / (x1 - x0 || 1)) * (W - left - right);
       for (let v = 0; v <= ymax + 1e-9; v += step) {
-        svgEl("line", { x1: left, x2: W - right, y1: y(v), y2: y(v), class: v ? "grid" : "axis" }, svg);
-        svgEl("text", { x: left - 6, y: y(v) + 4, class: "tick", "text-anchor": "end" }, svg).textContent = fmt(v);
+        svgEl("line", { x1: left, x2: W - right, y1: Y(v), y2: Y(v), class: v ? "grid" : "axis" }, svg);
+        svgEl("text", { x: left - 8, y: Y(v) + 4, class: "tick", "text-anchor": "end" }, svg).textContent = yFmt(v);
       }
-      const slot = (W - left - right) / Math.max(1, items.length);
-      const bw = Math.max(3, Math.min(36, slot - 4));
-      const every = Math.ceil(28 / slot);
-      items.forEach((d, i) => {
-        const cx = left + slot * (i + 0.5);
-        if (i % every === 0) svgEl("text", { x: cx, y: H - 8, class: "tick", "text-anchor": "middle" }, svg).textContent = d.label;
-        if (d.value == null) return;
-        const h = Math.max(1, y(0) - y(Math.min(d.value, ymax)));
-        const r = Math.min(4, bw / 2, h);
-        // Rounded top, square base on the axis.
-        const x0 = cx - bw / 2, x1 = cx + bw / 2, y0 = y(0) - h;
-        const path = `M${x0},${y(0)}V${y0 + r}Q${x0},${y0} ${x0 + r},${y0}H${x1 - r}Q${x1},${y0} ${x1},${y0 + r}V${y(0)}Z`;
-        svgEl("path", { d: path, class: faded(d) ? "bar bar-faded" : "bar" }, svg);
-        const hit = svgEl("rect", { x: cx - slot / 2, y: top, width: slot, height: H - top - bottom, fill: "transparent" }, svg);
-        hit.addEventListener("pointerenter", () => {
-          tipEl.hidden = false;
-          tipEl.innerHTML = tip(d);
-          const w = tipEl.offsetWidth;
-          tipEl.style.left = Math.min(W - w - 4, Math.max(4, cx - w / 2)) + "px";
-        });
-        hit.addEventListener("pointerleave", () => { tipEl.hidden = true; });
-      });
+      const xStep = niceStep((x1 - x0) / Math.max(3, Math.floor((W - left - right) / 70)));
+      // Units: the y unit above its axis, the x unit on the last tick.
+      svgEl("text", { x: left - 8, y: 10, class: "tick axis-unit", "text-anchor": "end" }, svg).textContent = yUnit.trim();
+      for (let v = Math.ceil(x0 / xStep) * xStep; v <= x1 + 1e-9; v += xStep) {
+        const last = v + xStep > x1 + 1e-9;
+        svgEl("text", { x: X(v), y: H - 6, class: "tick", "text-anchor": last ? "end" : "middle" }, svg).textContent = xFmt(v) + (last ? xUnit : "");
+      }
+      const dg = svgEl("g", { class: "raw-dots" }, svg);
+      for (const [dx, dy] of dots) if (dy <= ymax) svgEl("circle", { cx: X(dx), cy: Y(dy), r: 1.6 }, dg);
+      // The curve: solid where enough seconds back it, dashed where they're thin.
+      // A stretch with no data at all breaks the line instead of bridging it.
+      const runs = [];
+      const gridStep = curve.length > 1 ? curve[1].x - curve[0].x : 1;
+      for (const c of pts) {
+        const ok = c.near >= minNear, prev = runs.at(-1)?.cs.at(-1);
+        const gap = prev && c.x - prev.x > gridStep * 1.5;
+        if (!runs.length || gap) runs.push({ ok, cs: [] });
+        else if (runs.at(-1).ok !== ok) runs.push({ ok, cs: [prev] });
+        runs.at(-1).cs.push(c);
+      }
+      for (const r of runs) {
+        const d = "M" + r.cs.map((c) => `${X(c.x).toFixed(1)},${Y(c[y]).toFixed(1)}`).join("L");
+        if (area && r.ok) svgEl("path", { d: `${d}L${X(r.cs.at(-1).x)},${Y(0)}L${X(r.cs[0].x)},${Y(0)}Z`, class: "curve-area" }, svg);
+        svgEl("path", { d, class: r.ok ? "curve" : "curve curve-thin" }, svg);
+      }
+      cross = svgEl("line", { class: "crosshair", y1: top, y2: H - bottom, x1: -10, x2: -10 }, svg);
+      dot = svgEl("circle", { class: "cursor-dot", r: 4.5, cx: -10, cy: -10 }, svg);
+      svgEl("rect", { x: left, y: 0, width: W - left - right, height: H, fill: "transparent" }, svg);
     }
+    let cross, dot;
+    svg.addEventListener("pointermove", (e) => {
+      const rect = svg.getBoundingClientRect(), mx = ((e.clientX - rect.left) / rect.width) * W;
+      let best = null;
+      for (const c of pts) if (!best || Math.abs(X(c.x) - mx) < Math.abs(X(best.x) - mx)) best = c;
+      if (!best) return;
+      cross.setAttribute("x1", X(best.x));
+      cross.setAttribute("x2", X(best.x));
+      dot.setAttribute("cx", X(best.x));
+      dot.setAttribute("cy", Y(best[y]));
+      tipEl.hidden = false;
+      const backing = best.near < 60 ? `${Math.round(best.near)} s` : `${(best.near / 60).toFixed(best.near < 600 ? 1 : 0)} min`;
+      tipEl.innerHTML = `<b>${xFmt(best.x)}${xUnit}: ${yFmt(best[y])}${yUnit}</b> <span>${backing} of data nearby${best.near < minNear ? ", thin" : ""}</span>`;
+      tipEl.style.left = Math.min(W - tipEl.offsetWidth - 4, Math.max(4, X(best.x) - tipEl.offsetWidth / 2)) + "px";
+    });
+    svg.addEventListener("pointerleave", () => { cross.setAttribute("x1", -10); cross.setAttribute("x2", -10); dot.setAttribute("cx", -10); tipEl.hidden = true; });
     draw();
-    new ResizeObserver(() => draw()).observe(host);
+    new ResizeObserver(() => { if (Math.abs(host.clientWidth - W) > 1) draw(); }).observe(host);
   }
+
   function niceStep(x) {
     const p = 10 ** Math.floor(Math.log10(x)), f = x / p;
     return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
@@ -173,11 +220,16 @@ const Insights = (() => {
       ${skipped.length ? `<p class="hint">Not enough variation to compare: ${skipped.map((c) => c.label).join(", ")}.</p>` : ""}`;
     const svg = host.querySelector(".heat"), tipEl = host.querySelector(".chart-tip");
     const n = usable.length, labelW = 136, cell = Math.max(14, Math.min(30, Math.floor((Math.min(640, host.clientWidth || 640) - labelW) / Math.max(1, n - 1))));
-    const W = labelW + cell * (n - 1) + 4, H = cell * (n - 1) + 4;
+    const colLabelH = 104; // column names, angled, under the grid
+    const W = labelW + cell * (n - 1) + 4 + 96, H = cell * (n - 1) + 4 + colLabelH;
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
     svg.setAttribute("width", W);
     svg.setAttribute("height", H);
     // Lower triangle: row i against columns j < i. Row labels on the left; a column's name is in its tooltip.
+    for (let j = 0; j < n - 1; j++) {
+      const x = labelW + j * cell + cell / 2, y = cell * (n - 1) + 10;
+      svgEl("text", { x, y, class: "tick heat-label", "text-anchor": "start", transform: `rotate(45 ${x} ${y})` }, svg).textContent = usable[j].label;
+    }
     for (let i = 1; i < n; i++) {
       svgEl("text", { x: labelW - 6, y: (i - 1) * cell + cell / 2 + 4, class: "tick heat-label", "text-anchor": "end" }, svg).textContent = usable[i].label;
       for (let j = 0; j < i; j++) {
@@ -218,10 +270,10 @@ const Insights = (() => {
     const strength = Math.abs(p.r) >= 0.9 ? "nearly the same signal" : Math.abs(p.r) >= 0.7 ? "strongly related" : Math.abs(p.r) >= 0.4 ? "loosely related" : "mostly independent";
     const derived = DERIVED[p.a.key] || DERIVED[p.b.key];
     host.innerHTML = `
-      <h3 class="sub">${esc(p.a.label)} × ${esc(p.b.label)} <span>r = ${p.r.toFixed(2)} · ${strength} · ${idx.length.toLocaleString()} seconds</span></h3>
+      <h3>${esc(p.a.label)} × ${esc(p.b.label)} <span>r = ${p.r.toFixed(2)} · ${strength} · ${idx.length.toLocaleString()} seconds</span></h3>
       ${derived ? `<p class="hint">Fuel flow is ${derived}, so a strong link with those is expected.</p>` : ""}
       <div class="scatter-host chart-host"></div>
-      <h3 class="sub">Where they disagree most</h3>
+      <h3>Where they disagree most</h3>
       ${picks.length ? `<ol class="legs diverge">${picks.map((d) => {
         const s = secs[d.i];
         const expect = p.icept + p.slope * xs[d.i];
@@ -298,60 +350,71 @@ const Insights = (() => {
         if (t.gas) wasteCost += w * t.gas.price;
       }
     }
-    const tile = (label, value, unit = "") => `<div class="stat"><span>${label}</span><b>${value}<small>${unit}</small></b></div>`;
-    const bySpeed = binned(trips, (b) => b.speed * MPH, (mph) => Math.floor(mph / 5) * 5);
-    const moving = bySpeed.filter((d) => d.bin > 0);
-    const byTempMoving = binned(trips, (b) => (b.speed * MPH > 3 && b.coolant != null ? Engine.cToF(b.coolant) : null), (f) => Math.floor(f / 10) * 10);
-    const byTempIdle = binned(trips, (b) => (b.speed === 0 && b.rpm > 300 && b.coolant != null ? Engine.cToF(b.coolant) : null), (f) => Math.floor(f / 10) * 10);
-    const thin = (d) => d.secs < 20;
-    const mins = (s) => (s < 90 ? `${Math.round(s)} s` : `${(s / 60).toFixed(s < 600 ? 1 : 0)} min`);
+    const fig = (value, label, unit = "") => `<div class="fig"><b>${value}<small>${unit}</small></b><span>${label}</span></div>`;
+
+    // Speed: 0.5 mph steps, smoothed over about 2 mph. Temperature: 1 °F steps over about 4 °F.
+    const bySpeed = samples(trips, (b) => b.speed * MPH);
+    const maxMph = Math.max(30, ...bySpeed.map((s) => s.x));
+    const speedHi = Math.ceil(maxMph / 5) * 5;
+    const speedCurve = kernel(bySpeed.filter((s) => s.x >= 1), { lo: 1, hi: speedHi, step: 0.5, bw: 2 });
+    const timeCurve = kernel(bySpeed, { lo: 0, hi: speedHi, step: 0.5, bw: 1.5 });
+    const instantMpg = (s) => (s.gph > 0 && !s.cut && s.mph > 1 ? s.mph / s.gph : null);
+    const temp = (b) => (b.coolant != null ? Engine.cToF(b.coolant) : null);
+    const movingTemp = samples(trips, (b) => (b.speed * MPH > 3 ? temp(b) : null));
+    const idleTemp = samples(trips, (b) => (b.speed === 0 && b.rpm > 300 ? temp(b) : null));
+    const tLo = (smp) => Math.floor(Math.min(...smp.map((s) => s.x)) / 10) * 10, tHi = (smp) => Math.ceil(Math.max(...smp.map((s) => s.x)) / 10) * 10;
+    const tempCurve = movingTemp.length ? kernel(movingTemp, { lo: tLo(movingTemp), hi: tHi(movingTemp), step: 1, bw: 4 }) : [];
+    const idleCurve = idleTemp.length ? kernel(idleTemp, { lo: tLo(idleTemp), hi: tHi(idleTemp), step: 1, bw: 4 }) : [];
 
     host.innerHTML = `
-      <div class="stats ins-tiles">
-        ${tile("Drives", trips.length)}
-        ${tile("Distance", miles.toFixed(miles < 10 ? 1 : 0), "mi")}
-        ${tile("Fuel economy", gal ? (miles / gal).toFixed(0) : "–", "mpg")}
-        ${tile("Fuel used", gallons(gal), "gal")}
-        ${tile("Spent", cost && priced ? money(cost) : "–")}
-        ${tile("Wasted", gal ? Math.round((waste / gal) * 100) + "%" : "–", wasteCost ? " · " + money(wasteCost) : "")}
+      <div class="figs">
+        ${fig(miles.toFixed(miles < 10 ? 1 : 0), "miles", "")}
+        ${fig(gal ? (miles / gal).toFixed(0) : "–", "miles per gallon")}
+        ${fig(gallons(gal), "gallons")}
+        ${fig(cost && priced ? money(cost) : "–", "spent on gas")}
+        ${fig(gal ? Math.round((waste / gal) * 100) + "%" : "–", `wasted${wasteCost ? ` (${money(wasteCost)})` : ""}`)}
       </div>
-      <section class="card ins-card">
+
+      <section class="ins-sec">
         <h2>Fuel economy by speed</h2>
+        <p class="lede">Where your car is most efficient. Each faint dot is one second of driving; the line is the average around each speed (total miles over total gallons), dashed where there's little data.</p>
         <div id="ins-speed" class="chart-host"></div>
-        <h3 class="sub">Time spent at each speed</h3>
+        <h3>Time spent at each speed</h3>
         <div id="ins-speed-time" class="chart-host"></div>
-        <p class="hint">Miles divided by gallons for every second spent in each 5 mph band, across all drives. Pale bars have under 20 seconds of data.</p>
       </section>
-      <section class="card ins-card">
+
+      <section class="ins-sec">
         <h2>Fuel economy by engine temperature</h2>
+        <p class="lede">A cold engine runs richer and fights thicker oil until it reaches about 180 °F. While driving, cold minutes are often also slow neighborhood minutes, so part of this is speed.</p>
         <div id="ins-temp" class="chart-host"></div>
-        <h3 class="sub">Fuel burned idling, by engine temperature</h3>
+        <h3>Fuel burned idling, by engine temperature</h3>
+        <p class="lede">The cleanest view of the warm-up cost, since speed doesn't change.</p>
         <div id="ins-temp-idle" class="chart-host"></div>
-        <p class="hint">A cold engine runs richer and fights thicker oil. The idle chart shows that most cleanly, since speed doesn't vary. While driving, cold minutes are often also slow neighborhood minutes, so part of that gap is speed, not temperature.</p>
       </section>
-      <section class="card ins-card">
+
+      <section class="ins-sec">
         <h2>How the signals move together</h2>
-        <p class="hint ins-lead">Each square compares two engine signals, second by second: blue rises together, red moves opposite, gray is unrelated. Click a square to see the two side by side and when they part ways.</p>
+        <p class="lede">Each square compares two engine signals second by second: blue rises together, red moves opposite, gray is unrelated. Pick one to see the pair side by side and the moments they part ways.</p>
         <div id="ins-corr"></div>
         <div id="ins-same"></div>
         <div id="ins-pair"></div>
       </section>`;
 
-    bars(host.querySelector("#ins-speed"), moving.map((d) => ({ ...d, label: `${d.bin}`, value: d.mpg })), {
-      unit: "mpg", fmt: (v) => v.toFixed(0), aria: "Fuel economy by speed", faded: thin,
-      tip: (d) => `<b>${d.bin}–${d.bin + 5} mph: ${d.mpg != null ? d.mpg.toFixed(1) + " mpg" : "–"}</b> <span>${mins(d.secs)}</span>`,
+    curveChart(host.querySelector("#ins-speed"), {
+      curve: speedCurve, y: "mpg", dots: bySpeed.map((s) => [s.x, instantMpg(s)]).filter((d) => d[1] != null),
+      xFmt: (v) => v.toFixed(0), yFmt: (v) => v.toFixed(0), xUnit: " mph", yUnit: " mpg", aria: "Fuel economy by speed",
     });
-    bars(host.querySelector("#ins-speed-time"), bySpeed.map((d) => ({ ...d, label: d.bin === 0 ? "0" : `${d.bin}`, value: d.secs / 60 })), {
-      unit: "min", fmt: (v) => v.toFixed(v < 10 ? 1 : 0), aria: "Time spent at each speed",
-      tip: (d) => `<b>${d.bin === 0 ? "Under 5 mph" : `${d.bin}–${d.bin + 5} mph`}: ${mins(d.secs)}</b>`,
+    curveChart(host.querySelector("#ins-speed-time"), {
+      curve: timeCurve.map((c) => ({ ...c, perMph: c.density / 60 })), y: "perMph", minNear: 0, height: 120, area: true,
+      xFmt: (v) => v.toFixed(0), yFmt: (v) => v.toFixed(v < 1 ? 2 : 1), xUnit: " mph", yUnit: " min per mph", aria: "Time spent at each speed",
     });
-    bars(host.querySelector("#ins-temp"), byTempMoving.map((d) => ({ ...d, label: `${d.bin}°`, value: d.mpg })), {
-      unit: "mpg", fmt: (v) => v.toFixed(0), aria: "Fuel economy by coolant temperature", faded: thin,
-      tip: (d) => `<b>${d.bin}–${d.bin + 10} °F: ${d.mpg != null ? d.mpg.toFixed(1) + " mpg" : "–"}</b> <span>${mins(d.secs)} driving</span>`,
+    curveChart(host.querySelector("#ins-temp"), {
+      curve: tempCurve, y: "mpg", dots: movingTemp.map((s) => [s.x, instantMpg(s)]).filter((d) => d[1] != null),
+      xFmt: (v) => v.toFixed(0), yFmt: (v) => v.toFixed(0), xUnit: " °F", yUnit: " mpg", aria: "Fuel economy by coolant temperature",
     });
-    bars(host.querySelector("#ins-temp-idle"), byTempIdle.map((d) => ({ ...d, label: `${d.bin}°`, value: d.secs ? (d.gal / d.secs) * 3600 : null })), {
-      unit: "gal/h", fmt: (v) => v.toFixed(2), aria: "Idle fuel flow by coolant temperature", faded: thin,
-      tip: (d) => `<b>${d.bin}–${d.bin + 10} °F: ${((d.gal / d.secs) * 3600).toFixed(2)} gal/h</b> <span>${mins(d.secs)} idling</span>`,
+    curveChart(host.querySelector("#ins-temp-idle"), {
+      curve: idleCurve, y: "gph", dots: idleTemp.map((s) => [s.x, s.gph]).filter((d) => d[1] != null), minNear: 15, height: 170,
+      xFmt: (v) => v.toFixed(0), yFmt: (v) => v.toFixed(2), xUnit: " °F", yUnit: " gal/h", aria: "Idle fuel flow by coolant temperature",
     });
 
     const pairHost = host.querySelector("#ins-pair");
@@ -362,12 +425,12 @@ const Insights = (() => {
     const pairs = correlations(host.querySelector("#ins-corr"), secs, pick);
     const same = pairs.filter((p) => Math.abs(p.r) >= 0.9).sort((u, v) => Math.abs(v.r) - Math.abs(u.r));
     host.querySelector("#ins-same").innerHTML = same.length
-      ? `<h3 class="sub">Nearly the same signal <span>|r| ≥ 0.9: showing both adds little, except where they part ways</span></h3>
+      ? `<h3>Nearly the same signal <span>|r| ≥ 0.9: showing both adds little, except where they part ways</span></h3>
          <div class="same-list">${same.map((p) => `<button type="button" class="same-pair" data-k="${p.a.key}|${p.b.key}">${esc(p.a.label)} & ${esc(p.b.label)} <b>${p.r.toFixed(2)}</b></button>`).join("")}</div>`
       : `<p class="hint">No two signals track each other closely (|r| ≥ 0.9) yet.</p>`;
     host.querySelectorAll(".same-pair").forEach((b) => b.addEventListener("click", () => pick(same.find((p) => p.a.key + "|" + p.b.key === b.dataset.k))));
     // Start on the strongest pair that isn't related by construction.
-    const first = same.find((p) => !DERIVED[p.a.key] && !DERIVED[p.b.key]) || pairs.sort((u, v) => Math.abs(v.r) - Math.abs(u.r))[0];
+    const first = same.find((p) => !DERIVED[p.a.key] && !DERIVED[p.b.key]) || [...pairs].sort((u, v) => Math.abs(v.r) - Math.abs(u.r))[0];
     if (first) pick(first);
   }
 
