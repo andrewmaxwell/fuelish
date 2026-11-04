@@ -371,6 +371,39 @@ const Engine = (() => {
     return rows;
   }
 
+  // Each second's fuel per mile, over the ±10 s around it, against the drive's average at the same
+  // speed (5 mph bands), as rows[i].rel: 1 is usual, 2 is twice the fuel. Twenty seconds is long
+  // enough that a map shows stretches (a climb, a ramp, stop-and-go) rather than every touch of the
+  // pedal. Below 5 mph there's no per-mile figure to compare, so rel stays null.
+  function relCost(rows, { halfMs = 10000 } = {}) {
+    const band = (kmh) => Math.floor((kmh * KMH_TO_MPH) / 5);
+    const bins = new Map();
+    // Miles and gallons in each second (0 across gaps), with running totals for the windows.
+    const mi = new Float64Array(rows.length), gal = new Float64Array(rows.length);
+    for (let i = 1; i < rows.length; i++) {
+      const a = rows[i - 1], r = rows[i], dt = (r.t - a.t) / 1000;
+      if (dt <= 0 || dt > 2.5 || r.speed == null || r.fuelGs == null) continue;
+      mi[i] = ((r.speed / 3.6) * dt) / 1609.344;
+      gal[i] = galOf(r.fuelGs) * dt;
+      if (r.speed * KMH_TO_MPH < 5) continue;
+      const k = band(r.speed);
+      const b = bins.get(k) || bins.set(k, { mi: 0, gal: 0, secs: 0 }).get(k);
+      b.mi += mi[i]; b.gal += gal[i]; b.secs += dt;
+    }
+    let lo = 0, hi = -1, wMi = 0, wGal = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      while (hi + 1 < rows.length && rows[hi + 1].t <= r.t + halfMs) { hi++; wMi += mi[hi]; wGal += gal[hi]; }
+      while (rows[lo].t < r.t - halfMs) { wMi -= mi[lo]; wGal -= gal[lo]; lo++; }
+      r.rel = null;
+      if (r.speed == null || r.speed * KMH_TO_MPH < 5 || !(wMi > 0)) continue;
+      const b = bins.get(band(r.speed));
+      if (!b || b.secs < 20 || !(b.gal > 0)) continue; // too few seconds at this speed to call anything usual
+      r.rel = Math.max(0, wGal / wMi) / (b.gal / b.mi);
+    }
+    return rows;
+  }
+
   // Each GPS point gets the engine row for its second (within 1.5 s), as p.eng.
   function attach(pts, rows) {
     let j = 0;
@@ -385,7 +418,7 @@ const Engine = (() => {
 
   const physics = { J_PER_GAL, ENGINE_EFF, CRR, CDA, AIR, massKg };
 
-  return { physics, align, fuelLabel, epa, recorded, rawOnly, hasSummary, merge, fromChunks, fromRaw, derive, calibrate, summary, smoothMpg, HIGHWAY_MPH, attach, cToF, mph, galOf, FUEL_G_PER_L, L_PER_GAL };
+  return { physics, align, relCost, fuelLabel, epa, recorded, rawOnly, hasSummary, merge, fromChunks, fromRaw, derive, calibrate, summary, smoothMpg, HIGHWAY_MPH, attach, cToF, mph, galOf, FUEL_G_PER_L, L_PER_GAL };
 })();
 
 // Average regular gas price for a trip's week and region (U.S. EIA weekly survey, via /api/v1/gas-prices).

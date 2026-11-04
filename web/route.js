@@ -237,6 +237,15 @@ const Route = (() => {
       stops: at([21, 30, 40, 52, 66, 85], SEQ),
       width: [21, 85],
     },
+    // Fuel per mile here against this drive's average at the same speed (engine.js relCost): where
+    // the drive cost more than it had to. Hills, hard acceleration and stop-and-go show up red.
+    cost: {
+      label: "Cost", unit: "", engine: true,
+      fmt: (x) => (Math.abs(x - 1) < 0.005 ? "usual" : x < 1 ? `${Math.round((1 - x) * 100)}% less` : `${Math.round((x - 1) * 100)}% more`),
+      note: "Fuel per mile against this drive's average at the same speed. Red cost more, blue less (coasting is bluest)",
+      value: (p, q) => q.eng?.rel ?? null,
+      stops: [[0.4, "#7fb6ff"], [0.7, "#3577c9"], [0.88, "#6b6a65"], [1.15, "#6b6a65"], [1.5, "#e0703a"], [2, "#ff5a5a"]],
+    },
     mpg: {
       label: "MPG", unit: "mpg", fmt: (x) => x.toFixed(0), engine: true, note: "Over a few seconds. Brighter is thirstier; coasting with fuel cut off is darkest",
       value: (p, q) => q.eng?.mpg ?? null,
@@ -251,6 +260,13 @@ const Route = (() => {
   };
 
   const WIDTHS = { none: "Even", speed: "Speed", accel: "Accel", turn: "Turning", pedal: "Pedal", fuel: "Gal/h" };
+  // What the map offers: four views, each one color at an even width. Cost and pedal need engine data.
+  const VIEWS = {
+    cost: { label: "Cost", color: "cost", engine: true },
+    speed: { label: "Speed", color: "speed" },
+    smooth: { label: "Smooth", color: "accel" },
+    pedal: { label: "Pedal", color: "pedal", engine: true },
+  };
   const stopsFor = (m) => m.stops;
 
   // ---------- rendering ----------
@@ -407,5 +423,5 @@ const Route = (() => {
       (m.note ? `<p class="hint">${m.note}</p>` : "");
   }
 
-  return { fromChunks, rawChunks, merge, segmentMeters, haversine, fromRaw, render, tripRanges, legendHtml, summary, segmentColors, METRICS, WIDTHS, G, MPH };
+  return { fromChunks, rawChunks, merge, segmentMeters, haversine, fromRaw, render, tripRanges, legendHtml, summary, segmentColors, METRICS, WIDTHS, VIEWS, G, MPH };
 })();

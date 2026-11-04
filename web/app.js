@@ -387,14 +387,13 @@ async function rawEngine(id, pts, onProgress) {
 
 // Engine-only options (pedal, mpg, gal/h) stay hidden until the drive's engine data is in.
 const seg = (key, options) => `<div class="seg" data-key="${key}" role="group">${Object.entries(options)
-  .map(([k, v]) => `<button type="button" data-v="${k}"${Route.METRICS[k]?.engine ? " data-engine hidden" : ""}>${esc(typeof v === "string" ? v : v.label)}</button>`).join("")}</div>`;
+  .map(([k, v]) => `<button type="button" data-v="${k}"${(v.engine ?? Route.METRICS[k]?.engine) ? " data-engine hidden" : ""}>${esc(typeof v === "string" ? v : v.label)}</button>`).join("")}</div>`;
 const fig = (value, label, unit = "") => `<div class="fig"><b>${value}<small>${unit}</small></b><span>${label}</span></div>`;
 
-// Over the map: what the line's color and width show, whether notable moments are labeled, and the legend.
+// Over the map: which view colors the line, whether notable moments are labeled, and the legend.
 const mapControls = () => `
   <div class="map-controls">
-    <div class="ctl"><span>Color</span>${seg("color", Route.METRICS)}</div>
-    <div class="ctl"><span>Width</span>${seg("width", Route.WIDTHS)}<button type="button" class="chip" id="moments-toggle">Labels</button></div>
+    <div class="ctl">${seg("view", Route.VIEWS)}<button type="button" class="chip" id="moments-toggle">Labels</button></div>
   </div>
   <div class="map-legend" id="rt-legend"></div>`;
 
@@ -1120,18 +1119,18 @@ const money = (d) => (d < 10 ? "$" + d.toFixed(2) : "$" + Math.round(d).toLocale
 // ---------- map, charts and controls (shared) ----------
 
 function drawRoute(pts, sm, { withDay = false } = {}) {
-  let state = { color: "speed", width: "none", labels: true };
-  try { state = { ...state, ...JSON.parse(localStorage.getItem(VIEW_KEY) || "{}") }; } catch {}
-  if (!Route.METRICS[state.color]) state.color = "speed";
-  if (!Route.WIDTHS[state.width]) state.width = "none";
+  // `view` is the saved choice; none saved yet means Cost on drives with engine data, else Speed.
+  let state = { view: null, labels: true };
+  try { const saved = JSON.parse(localStorage.getItem(VIEW_KEY) || "{}"); state = { view: Route.VIEWS[saved.view] ? saved.view : null, labels: saved.labels ?? true }; } catch {}
 
-  // What's drawn: the saved choice, except engine colors on a drive without engine data.
+  // What's drawn: the chosen view, except engine views on a drive without engine data.
   let hasEngine = false;
   const shownState = {};
-  const effective = () => Object.assign(shownState, state, {
-    color: Route.METRICS[state.color].engine && !hasEngine ? "speed" : state.color,
-    width: Route.METRICS[state.width]?.engine && !hasEngine ? "none" : state.width,
-  });
+  const effective = () => {
+    const want = state.view ?? (hasEngine ? "cost" : "speed");
+    const view = Route.VIEWS[want].engine && !hasEngine ? "speed" : want;
+    return Object.assign(shownState, { view, color: Route.VIEWS[view].color, width: "none", labels: state.labels });
+  };
   effective();
 
   const readout = document.getElementById("readout");
@@ -1150,6 +1149,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
         <dt>Turning</dt><dd>${fmt(p.side != null ? Math.abs(p.side) / Route.G : null, 2, " g")}${p.side != null && Math.abs(p.side) / Route.G >= 0.03 ? (p.side > 0 ? " right" : " left") : ""}</dd>
         ${p.eng ? `<dt>Gas pedal</dt><dd>${fmt(p.eng.pedal, 0, "%")}</dd>
         <dt>Economy</dt><dd>${p.eng.mpg == null ? "–" : p.eng.mpg >= 99 ? "coasting" : fmt(p.eng.mpg, 0, " mpg")}</dd>
+        ${p.eng.rel != null ? `<dt>Fuel/mi, 20 s</dt><dd>${esc(Route.METRICS.cost.fmt(p.eng.rel))}${Math.abs(p.eng.rel - 1) >= 0.005 ? " than usual" : ""}</dd>` : ""}
         <dt>Fuel</dt><dd>${p.eng.cut ? "cut off" : fmt(p.eng.gph, 2, " gal/h")}</dd>
         <dt>RPM</dt><dd>${fmt(p.eng.rpm, 0, "")}</dd>` : ""}
       </dl>`;
@@ -1174,9 +1174,9 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
   labels.onclick = () => { state.labels = !state.labels; syncLabels(); save(); };
   syncLabels();
   const save = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify(state)); } catch {} };
-  const syncButtons = () => document.querySelectorAll(".seg").forEach((g) =>
+  const syncButtons = () => document.querySelectorAll(".map-controls .seg").forEach((g) =>
     g.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(shownState[g.dataset.key] === b.dataset.v))));
-  document.querySelectorAll(".seg").forEach((g) => g.addEventListener("click", (e) => {
+  document.querySelectorAll(".map-controls .seg").forEach((g) => g.addEventListener("click", (e) => {
     const b = e.target.closest("button");
     if (!b) return;
     state[g.dataset.key] = b.dataset.v;
@@ -1196,7 +1196,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
   // Engine data arrives with the route, or later for older drives read from raw chunks.
   function setEngine(rows, { partial = false, gas = null, vehicle = "", trip = null } = {}) {
     if (!rows.length || !document.getElementById("map")) return;
-    Engine.attach(pts, Engine.smoothMpg(rows));
+    Engine.attach(pts, Engine.relCost(Engine.smoothMpg(rows)));
     hasEngine = true;
     document.querySelectorAll("[data-engine]").forEach((b) => { b.hidden = false; });
     recolor();

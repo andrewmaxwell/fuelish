@@ -270,3 +270,20 @@ test("coach: a hard stop from speed is the biggest braking event, and slower cru
   assert.ok(Math.abs(sp.aboveMin - 599 / 60) < 0.01);
   assert.equal(Coach.slowerCruise(rows, 80), null);
 });
+
+test("cost view: a thirsty stretch reads above usual for its speed, coasting below", () => {
+  const { Engine } = load("route.js", "engine.js");
+  // 120 s at 96 km/h on 1.5 g/s, then 30 s at 3 g/s (a climb), then 30 s coasting with the fuel cut.
+  const rows = Array.from({ length: 180 }, (_, i) => ({ t: i * 1000, speed: 96, fuelGs: i >= 120 && i < 150 ? 3 : i >= 150 ? 0 : 1.5 }));
+  Engine.relCost(Engine.smoothMpg(rows));
+  assert.ok(Math.abs(rows[50].rel - 1) < 0.15, String(rows[50].rel)); // the usual
+  assert.ok(rows[135].rel > 1.6, String(rows[135].rel));
+  assert.ok(rows[165].rel < 0.1, String(rows[165].rel));
+  // A 5 s burst is averaged into its stretch instead of painting its own spot.
+  const burst = Array.from({ length: 120 }, (_, i) => ({ t: i * 1000, speed: 96, fuelGs: i >= 60 && i < 65 ? 3 : 1.5 }));
+  Engine.relCost(Engine.smoothMpg(burst));
+  assert.ok(burst[62].rel < 1.3, String(burst[62].rel));
+  const slow = [{ t: 0, speed: 2, fuelGs: 0.3 }, { t: 1000, speed: 2, fuelGs: 0.3 }];
+  Engine.relCost(Engine.smoothMpg(slow));
+  assert.equal(slow[1].rel, null);
+});

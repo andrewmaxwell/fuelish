@@ -25,8 +25,9 @@ docs/      data-format.md: every record type, clock and file
    deleted from the phone, and a finished recording's folder is removed once the server has all of it
    (`upload.deleteAfterUpload`, default on).
 4. The web page lists trips by day (route outline, distance, moving time, top speed). Each trip opens on a full-size
-   map with its color and line-width controls over it: speed, acceleration, turning (left blue, right red), and with
-   the OBD adapter gas pedal, MPG and gallons per hour. Notable moments are labeled on the map (hardest brake and
+   map with four views over it: **Cost** (with the OBD adapter, the default: fuel per mile over ~20 s against the
+   drive's own average at that speed, so climbs, ramps and stop-and-go show red and coasting blue), **Speed**,
+   **Smooth** (braking red, speeding up blue) and **Pedal**. Notable moments are labeled on the map (hardest brake and
    acceleration, sharpest turn, top speed, longest stop, thirstiest minute). Below the map is a short speed
    timeline; beside it the headline numbers (miles, moving time, mpg, cost), highway vs. town economy, wasted fuel,
    a one-line car health summary and a friction circle (forward vs. sideways g from GPS speed and heading).
