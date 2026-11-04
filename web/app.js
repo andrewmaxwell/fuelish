@@ -45,6 +45,23 @@ async function api(path, opts = {}) {
   return body;
 }
 
+// Settings saved on the server for every browser (place names, cost assumptions). Loaded once.
+const Prefs = (() => {
+  let data = null;
+  async function load() {
+    if (data) return data;
+    try { data = (await api("/prefs")).prefs || {}; }
+    catch (e) { if (e.message === "unauthorized") throw e; data = {}; }
+    Costs.use(data.costs);
+    return data;
+  }
+  async function set(key, value) {
+    (data ||= {})[key] = value;
+    await api(`/prefs/${key}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) });
+  }
+  return { load, set, get: (k) => data?.[k] };
+})();
+
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 function fmtDur(ms) {
   if (ms == null || ms < 0) return "–";
@@ -176,13 +193,20 @@ async function route() {
   const h = location.hash;
   const trip = h.match(/^#\/r\/([A-Za-z0-9_-]+)(?:\/(\d+))?/);
   const insights = h.startsWith("#/insights");
+  const routes = h.match(/^#\/routes(?:\/([A-Za-z0-9_.-]+))?/);
+  const cvt = h.startsWith("#/cvt");
+  const costs = h.startsWith("#/costs");
   const many = h.match(/^#\/(day|week)\/(\d{4}-\d{2}-\d{2})/) || h.match(/^#\/(outing)\/([A-Za-z0-9_-]+)/);
   document.body.classList.toggle("page-trip", !!(trip || many));
   window.scrollTo(0, 0);
   app.innerHTML = `<p class="muted loading">Loading…</p>`;
   try {
+    await Prefs.load();
     if (trip) await showTrip(trip[1], null, trip[2] ? +trip[2] : null);
     else if (insights) await showInsights();
+    else if (routes) await showRoutes(routes[1] || null);
+    else if (cvt) await showCvt();
+    else if (costs) await showCosts();
     else if (many) await showMany(many[1], many[2]);
     else await showList();
   } catch (e) {
@@ -218,6 +242,9 @@ async function showList() {
         <div class="head-links">
           <a class="see-map" href="#/week/${ymd(thisWeek)}">This week on a map →</a>
           <a class="see-map" href="#/insights">Insights →</a>
+          <a class="see-map" href="#/routes">Repeated trips →</a>
+          <a class="see-map" href="#/costs">Costs →</a>
+          <a class="see-map" href="#/cvt">Transmission →</a>
         </div>
       </div>
       <div class="week">
@@ -351,6 +378,7 @@ const sidePanel = (middle = "") => `
   </section>
   <section class="side-sec" id="split" hidden></section>
   <section class="side-sec" id="waste" hidden></section>
+  <section class="side-sec" id="trip-cost" hidden></section>
   ${middle}
   <section class="side-sec" id="health" hidden></section>
   <section class="side-sec">
@@ -437,6 +465,9 @@ function sideEngine(sm, e, { gas = null, partial = false, trip = null } = {}) {
       </details>`;
   }
 
+  // What this trip cost, counting more than gas.
+  if (trip && typeof Costs !== "undefined") Costs.tripPanel(document.getElementById("trip-cost"), { trip, sm, e, gas });
+
   // Car health in one line; anything wrong comes first and stands out.
   const health = document.getElementById("health");
   const bad = [], ok = [];
@@ -518,6 +549,12 @@ async function showTrip(id, share = null, focusT = null) {
   const day = new Date(r.startedWallMs).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
 
   const o = list && outingOf(list.recordings, id);
+  // Driven before? Link to its leaderboard.
+  let repeat = "";
+  if (list) {
+    const j = Repeats.journeyOf(Repeats.journeys(list.recordings, Prefs.get("places")).journeys, id);
+    if (j) repeat = `<nav class="outing-nav"><span>One of ${j.trips.length} trips ${esc(j.loop ? `looping from ${j.from.name}` : `from ${j.from.name} to ${j.to.name}`)}</span><a href="#/routes/${esc(j.key)}">Compare them →</a></nav>`;
+  }
   let outing = "";
   if (o && o.length > 1) {
     const i = o.findIndex((x) => x.id === id);
@@ -537,6 +574,7 @@ async function showTrip(id, share = null, focusT = null) {
         <p class="muted">${esc(day)} · ${esc(timeRange(r))}</p>
         <div class="pills">${pills}</div>
         ${outing}
+        ${repeat}
         ${share ? "" : `<div class="share" id="share"></div>`}
         ${r.status === "recording" ? `<p class="hint">Still recording; the route fills in as parts upload.</p>`
           : !r.complete ? `<p class="hint">${r.chunksReceived} of ${r.chunkCount ?? "?"} parts uploaded so far; the phone sends the rest on Wi-Fi.</p>` : ""}
@@ -671,6 +709,83 @@ async function showInsights() {
   const d = (ms) => new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
   sub.textContent = `${plural(trips.length, "drive")} with engine data${first === last ? `, ${d(first)}` : `, ${d(first)} – ${d(last)}`}.`;
   Insights.render(document.getElementById("ins"), trips);
+}
+
+// ---------- repeated trips, costs, transmission ----------
+
+async function showRoutes(key) {
+  const live = current();
+  const { recordings } = await allRecordings();
+  if (!live()) return;
+  const data = Repeats.journeys(recordings, Prefs.get("places"));
+  if (!key) {
+    app.innerHTML = `<div class="insights"><a href="#/" class="back">← Trips</a><h1>Repeated trips</h1>
+      <p class="muted">Drives between the same two places, to see which went best and which way is cheaper.</p><div id="rep"></div></div>`;
+    const draw = (d) => Repeats.overview(document.getElementById("rep"), d, {
+      endOf,
+      rename: async (lat, lon, name) => {
+        const near = (p) => Route.haversine(p.lat, p.lon, lat, lon) < 250;
+        const list = (Prefs.get("places") || []).filter((p) => !near(p));
+        if (name) list.push({ lat, lon, name });
+        await Prefs.set("places", list);
+        // Redraw in place, keeping the scroll position and focus on the next name field.
+        if (!live()) return;
+        const next = document.activeElement?.closest?.(".place") ? [...document.querySelectorAll(".place input")].indexOf(document.activeElement) : -1;
+        draw(Repeats.journeys(recordings, list));
+        if (next >= 0) document.querySelectorAll(".place input")[next]?.focus({ preventScroll: true });
+      },
+    });
+    draw(data);
+    return;
+  }
+  const j = Repeats.journeyOf(data.journeys, key);
+  if (!j) throw new Error("That trip isn't part of a repeated journey (yet).");
+  app.innerHTML = `<div class="insights"><a href="#/routes" class="back">← Repeated trips</a><h1>${esc(Repeats.title(j))}</h1>
+    <p class="muted" id="rep-sub">${plural(j.trips.length, "trip")} · loading engine data…</p><div id="rep"></div></div>`;
+  const sub = document.getElementById("rep-sub");
+  const trips = await engineTrips(j.trips, live, (msg) => { if (sub) sub.textContent = `${plural(j.trips.length, "trip")} · ${msg.toLowerCase()}`; });
+  if (!live()) return;
+  sub.textContent = `${plural(j.trips.length, "trip")}, ${new Date(j.trips[0].startedWallMs).toLocaleDateString([], { month: "short", day: "numeric" })} – ${new Date(j.trips.at(-1).startedWallMs).toLocaleDateString([], { month: "short", day: "numeric" })}`;
+  const engine = new Map(trips.map((t) => [t.r.id, { e: Engine.summary(t.rows, { vehicle: t.r.meta.vehicle }), gas: t.gas }]));
+  const rows = Repeats.score(j, engine, endOf);
+  let boardKey = "gal";
+  try { boardKey = localStorage.getItem("fuelish.board") || "gal"; } catch {}
+  const draw = () => Repeats.board(document.getElementById("rep"), j, rows, {
+    boardKey,
+    onBoard: (k) => { boardKey = k; try { localStorage.setItem("fuelish.board", k); } catch {} draw(); },
+  });
+  draw();
+}
+
+async function showCosts() {
+  const live = current();
+  const { recordings } = await allRecordings();
+  if (!live()) return;
+  app.innerHTML = `<div class="insights"><a href="#/" class="back">← Trips</a><h1>Costs</h1>
+    <p class="muted" id="cost-sub">Loading engine data…</p><div id="costs"></div></div>`;
+  const sub = document.getElementById("cost-sub");
+  const done = recordings.filter((r) => r.status !== "recording");
+  const trips = await engineTrips(done, live, (msg) => { if (sub) sub.textContent = msg; });
+  if (!live()) return;
+  sub.textContent = "What driving costs you, counting more than gas, and where you can spend less.";
+  Costs.page(document.getElementById("costs"), trips, {
+    durationOf: (r) => endOf(r) - r.startedWallMs,
+    otherTrips: done.filter(moved).length - trips.length,
+    save: (v) => Prefs.set("costs", v).catch(() => {}),
+  });
+}
+
+async function showCvt() {
+  const live = current();
+  const { recordings } = await allRecordings();
+  if (!live()) return;
+  app.innerHTML = `<div class="insights"><a href="#/" class="back">← Trips</a><h1>Transmission</h1>
+    <p class="muted" id="cvt-sub">Loading engine data…</p><div id="cvt"></div></div>`;
+  const sub = document.getElementById("cvt-sub");
+  const trips = await engineTrips(recordings.filter((r) => r.status !== "recording"), live, (msg) => { if (sub) sub.textContent = msg; });
+  if (!live()) return;
+  sub.textContent = "How the CVT picks engine speed, from the engine's own readings.";
+  Cvt.render(document.getElementById("cvt"), trips);
 }
 
 // Every drive with engine data, oldest first: [{ r, rows, gas }]. Rows come from the summaries,

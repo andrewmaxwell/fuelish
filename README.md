@@ -7,7 +7,7 @@ data reliably**. Reporting and scoring come later.
 ```
 android/   Android recorder (Kotlin, Compose). Foreground service, chunked local storage, WorkManager uploads
 server/    Cloudflare Worker: API (/api/v1/*) + serves web/ as static assets; D1 metadata, R2 chunks
-web/       Static web page: list recordings, inspect collection quality, download raw data
+web/       Static web page: trips, maps, insights, repeated-trip leaderboards, costs, transmission (node --test web/test/*.test.mjs)
 tools/     fuelish.py: summarise / export a downloaded recording to CSV (stdlib only)
 docs/      data-format.md: every record type, clock and file
 ```
@@ -43,6 +43,15 @@ docs/      data-format.md: every record type, clock and file
    **Insights** (`#/insights`) covers every drive with engine data: totals, fuel economy by speed and by engine
    temperature, and a grid of how the engine signals correlate, with a scatter for any pair and links to the
    moments they disagree most.
+   **Repeated trips** (`#/routes`) groups drives between the same two places (named once, for every browser)
+   into leaderboards: least gas, quickest, cheapest all in, best mpg, with cold starts and thin fuel data marked.
+   When you've driven a journey more than one way, the ways are compared side by side by median time, gas and cost.
+   **Costs** (`#/costs`) counts what driving really costs: gas, your time, wear and repairs, lost resale value and
+   carbon, each assumption editable. It finds your cheapest steady speed from your own fuel use (with and without
+   your time), what idling costs a minute, and what each cold start costs. Every trip page shows its own breakdown.
+   **Transmission** (`#/cvt`) shows how the CVT picks engine speed: rpm against road speed colored by pedal, revs
+   per mph at light and heavy pedal, how revs answer a press of the pedal, cold vs warm, and engine braking while
+   coasting. It's built from engine rpm and road speed (the Civic reports no CVT data), so it shows behavior, not wear.
    **Share this trip** on a trip page makes a link anyone can open without the web token: just that trip
    (route, charts, engine data), with no phone settings, Bluetooth addresses or raw data. **Stop sharing**
    turns the link off.
