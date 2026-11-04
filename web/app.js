@@ -297,25 +297,168 @@ async function rawEngine(id, pts, onProgress) {
   return rows;
 }
 
-const stat = (label, value, unit = "") => `<div class="stat"><span>${label}</span><b>${value}<small>${unit}</small></b></div>`;
-// Engine-only options (RPM, pedal, fuel) stay hidden until the drive's engine data is in.
+// Engine-only options (pedal, mpg, gal/h) stay hidden until the drive's engine data is in.
 const seg = (key, options) => `<div class="seg" data-key="${key}" role="group">${Object.entries(options)
   .map(([k, v]) => `<button type="button" data-v="${k}"${Route.METRICS[k]?.engine ? " data-engine hidden" : ""}>${esc(typeof v === "string" ? v : v.label)}</button>`).join("")}</div>`;
-const engineCard = () => `<div class="card" id="engine-card" hidden><h2>Engine</h2><div id="engine-body"></div></div>`;
-const routeCard = () => `
-  <div class="card">
-    <h2>Route</h2>
-    <div class="control"><span>Color</span>${seg("color", Route.METRICS)}</div>
-    <div id="rt-legend"></div>
-    <div class="control"><span>Line width</span>${seg("width", Route.WIDTHS)}</div>
-  </div>`;
-const frictionCard = (what) => `
-  <div class="card">
+const fig = (value, label, unit = "") => `<div class="fig"><b>${value}<small>${unit}</small></b><span>${label}</span></div>`;
+
+// Over the map: what the line's color and width show, whether notable moments are labeled, and the legend.
+const mapControls = () => `
+  <div class="map-controls">
+    <div class="ctl"><span>Color</span>${seg("color", Route.METRICS)}</div>
+    <div class="ctl"><span>Width</span>${seg("width", Route.WIDTHS)}<button type="button" class="chip" id="moments-toggle">Labels</button></div>
+  </div>
+  <div class="map-legend" id="rt-legend"></div>`;
+
+// The side panel: headline numbers, then engine sections once its data is in, then the friction circle.
+const sidePanel = (middle = "") => `
+  <section class="side-sec">
+    <div class="figs trip-figs" id="figs"></div>
+    <p class="sub-line" id="sub-line"></p>
+    <p class="hint" id="gas-note" hidden></p>
+    <p class="hint" id="engine-status" hidden></p>
+  </section>
+  <section class="side-sec" id="split" hidden></section>
+  <section class="side-sec" id="waste" hidden></section>
+  ${middle}
+  <section class="side-sec" id="health" hidden></section>
+  <section class="side-sec">
     <h2>Friction circle</h2>
+    <p class="hint">Each dot is one second: how hard you were speeding up or braking (up and down), and turning (sideways). Smooth driving stays near the middle.</p>
     <div id="friction" class="chart-host"></div>
     <div id="peaks" class="peaks"></div>
-    <p class="hint">Each dot is one second of driving${what}: how hard you were speeding up or braking, and turning. Smooth driving stays near the middle.</p>
-  </div>`;
+  </section>`;
+
+// Headline numbers from the route; mpg and cost fill in when engine data arrives.
+function sideRoute(sm, { engine = false, trips = 0 } = {}) {
+  const mi = sm.miles.toFixed(sm.miles < 10 ? 1 : 0);
+  const avg = sm.avgMph != null ? sm.avgMph.toFixed(0) : "–", top = sm.maxMph != null ? sm.maxMph.toFixed(0) : "–";
+  document.getElementById("figs").innerHTML = fig(mi, "miles") + fig(fmtDur(sm.movingMs), "moving") +
+    (engine ? fig("–", "mpg") + fig("–", "gas") : fig(avg, "mph average") + fig(top, "mph top"));
+  const bits = [
+    trips > 1 ? plural(trips, "trip") : "",
+    engine ? `${avg} mph average · ${top} top` : "",
+    plural(sm.stops.length, "stop"),
+    `${Math.abs(sm.peak.brake).toFixed(2)} g hardest brake`,
+  ].filter(Boolean);
+  document.getElementById("sub-line").textContent = bits.join(" · ");
+}
+
+// Highway vs town, wasted fuel, car health: everything that needs the engine.
+function sideEngine(sm, e, { gas = null, partial = false } = {}) {
+  const figs = document.getElementById("figs");
+  if (!figs) return;
+  const cost = (g) => (gas ? money(g * gas.price) : null);
+  const mi = sm.miles.toFixed(sm.miles < 10 ? 1 : 0);
+  figs.innerHTML = fig(mi, "miles") + fig(fmtDur(sm.movingMs), "moving") +
+    fig(e.mpg != null ? e.mpg.toFixed(0) : "–", "mpg") + fig(e.gal != null && gas ? cost(e.gal) : "–", e.gal != null ? `for ${gallons(e.gal)} gal` : "gas");
+  const note = document.getElementById("gas-note");
+  if (gas) {
+    note.hidden = false;
+    note.textContent = `Gas at ${money(gas.price)}/gal, the ${gas.regionName} average for the week of ${new Date(gas.weekMs).toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" })} (U.S. EIA).${partial ? " Some of these trips have no engine data and aren't counted." : ""}`;
+  }
+
+  // Highway vs town: economy bars on one scale.
+  const split = document.getElementById("split");
+  const parts = [["Highway", `${Engine.HIGHWAY_MPH}+ mph`, e.highway], ["Town", `under ${Engine.HIGHWAY_MPH} mph`, e.town]].filter(([, , g]) => g.gal > 0.001);
+  if (parts.length) {
+    const max = Math.max(...parts.map(([, , g]) => g.mpg ?? 0), 1);
+    split.hidden = false;
+    split.innerHTML = `<h2>Highway vs town</h2>
+      <div class="split">${parts.map(([name, note, g]) => `
+        <div class="split-row">
+          <div class="split-name"><b>${name}</b><span>${note}</span></div>
+          <div class="split-bar"><i style="width:${((g.mpg ?? 0) / max) * 100}%"></i></div>
+          <div class="split-val"><b>${g.mpg != null ? g.mpg.toFixed(0) : "–"}<small>mpg</small></b><span>${g.miles.toFixed(g.miles < 10 ? 1 : 0)} mi · ${gallons(g.gal)} gal</span></div>
+        </div>`).join("")}</div>
+      ${e.cutMs >= 30000 ? `<p class="hint">The engine cut fuel entirely while you coasted for ${fmtDur(e.cutMs)}.</p>` : ""}`;
+  }
+
+  // Wasted fuel: one bar of all the fuel used, the wasted parts colored.
+  const waste = document.getElementById("waste");
+  if (e.waste && e.gal) {
+    const w = e.waste, total = w.idle + w.braking + w.rich;
+    const kinds = [
+      ["braking", "Braking", w.braking, "speed you built up, then braked away"],
+      ["idle", "Idling", w.idle, `engine running at 0 mph for ${fmtDur(e.idleMs)}`],
+      ["rich", "Running rich", w.rich, "extra fuel at full throttle"],
+    ];
+    const pct = (g) => Math.max(0, (g / e.gal) * 100);
+    waste.hidden = false;
+    waste.innerHTML = `<h2>Wasted fuel <span>${gallons(total)} gal${cost(total) ? ` · ${cost(total)}` : ""} · ${Math.round(pct(total))}% of the fuel</span></h2>
+      <div class="waste-bar" role="img" aria-label="Share of fuel wasted">${kinds.map(([k, , g]) => `<i class="w-${k}" style="width:${pct(g)}%"></i>`).join("")}<i class="w-rest"></i></div>
+      <dl class="waste-list">${kinds.map(([k, label, g, why]) => `
+        <div><dt><i class="sw w-${k}"></i>${label}<small>${why}</small></dt><dd>${gallons(g)} gal${cost(g) ? ` · ${cost(g)}` : ""}</dd></div>`).join("")}</dl>
+      <details class="how"><summary>How these are estimated</summary>
+        <p>${e.fromCar ? "Fuel use is as reported by the car." : "This car doesn't report fuel use, so it's estimated from the air flowing into the engine and the air-fuel ratio the engine asks for."}
+        ${e.speedFactor !== 1 ? `Miles use the car's speed, which read ${Math.abs((1 - 1 / e.speedFactor) * 100).toFixed(1)}% ${e.speedFactor > 1 ? "low" : "high"} against GPS on this drive, corrected.` : "Miles use the car's own speed."}</p>
+        <p>Braking is the energy your brakes turned into heat, beyond what air and tires would have taken anyway, counted as the fuel it took to build that speed (${Math.round(e.massKg)} kg, 25% engine efficiency).</p>
+      </details>`;
+  }
+
+  // Car health in one line; anything wrong comes first and stands out.
+  const health = document.getElementById("health");
+  const bad = [], ok = [];
+  if (e.mil != null) (e.mil || e.dtcs ? bad : ok).push(e.mil ? `Check engine light on${e.dtcs ? `, ${plural(e.dtcs, "code")}` : ""}` : e.dtcs ? `${plural(e.dtcs, "stored code")}` : "Check engine light off");
+  if (Number.isFinite(e.volts[0])) {
+    const v = `charging ${e.volts[0].toFixed(1)}–${e.volts[1].toFixed(1)} V`;
+    (e.volts[0] < 12.8 || e.volts[1] > 15.2 ? bad : ok).push(v);
+  }
+  if (e.warmMs != null) ok.push(`warmed up in ${fmtDur(e.warmMs)}`);
+  else if (e.coolant[1] != null) ok.push(`coolant ${Engine.cToF(e.coolant[1]).toFixed(0)} °F`);
+  if (e.fuelLevel != null) ok.push(`tank ${e.fuelLevel.toFixed(0)}%`);
+  if (e.maxRpm) ok.push(`top ${Math.round(e.maxRpm).toLocaleString()} rpm`);
+  if (bad.length || ok.length) {
+    health.hidden = false;
+    const cap = (x) => x.charAt(0).toUpperCase() + x.slice(1);
+    health.innerHTML = `<h2>Car health</h2><p class="health">${[...bad.map((x) => `<b class="bad">${esc(cap(x))}</b>`), ...ok.map((x, i) => esc(!bad.length && !i ? cap(x) : x))].join(" · ")}</p>`;
+  }
+}
+
+// Labels for the map: the moments most worth a look. Engine ones (best and thirstiest minute) need p.eng.
+function momentsFor(pts, sm) {
+  const out = [];
+  const arg = (f) => { let b = -1, bv = -Infinity; pts.forEach((p, i) => { const v = f(p); if (v != null && v > bv) { bv = v; b = i; } }); return [b, bv]; };
+  const [ib, brake] = arg((p) => (p.a != null ? -p.a / Route.G : null));
+  if (brake >= 0.15) out.push({ i: ib, text: `Hardest brake ${brake.toFixed(2)} g` });
+  const [ia, acc] = arg((p) => (p.a != null ? p.a / Route.G : null));
+  if (acc >= 0.15) out.push({ i: ia, text: `Hardest acceleration ${acc.toFixed(2)} g` });
+  const [it, turn] = arg((p) => (p.side != null ? Math.abs(p.side) / Route.G : null));
+  if (turn >= 0.2) out.push({ i: it, text: `Sharpest turn ${turn.toFixed(2)} g ${pts[it].side > 0 ? "right" : "left"}` });
+  const [iv, top] = arg((p) => (p.v != null ? p.v * Route.MPH : null));
+  if (top > 5) out.push({ i: iv, text: `Top speed ${top.toFixed(0)} mph` });
+  const longest = [...sm.stops].sort((a, b) => b.ms - a.ms)[0];
+  if (longest && longest.ms >= 20000) out.push({ i: longest.i0, text: `Stopped ${fmtDur(longest.ms)}` });
+  // Rolling one-minute economy while moving (at least 0.2 mi in the minute).
+  let best = null, worst = null, j = 0, mi = 0, gal = 0;
+  const step = (p, q) => (q.t - p.t <= 3000 && p.trip === q.trip && q.eng?.speed != null && q.eng.fuelGs != null
+    ? [(q.eng.speed / 3.6) * ((q.t - p.t) / 1000) / 1609.344, (q.eng.fuelGs * (q.t - p.t)) / 1000 / 745 / 3.78541] : null);
+  for (let i = 1; i < pts.length; i++) {
+    const d = step(pts[i - 1], pts[i]);
+    if (!d) { j = i; mi = gal = 0; continue; }
+    mi += d[0]; gal += d[1];
+    while (pts[i].t - pts[j].t > 60000) {
+      const o = step(pts[j], pts[j + 1]);
+      if (o) { mi -= o[0]; gal -= o[1]; }
+      j++;
+    }
+    if (pts[i].t - pts[j].t < 55000 || mi < 0.2 || gal <= 0) continue;
+    const mpg = mi / gal, mid = (i + j) >> 1;
+    if (!best || mpg > best.mpg) best = { i: mid, mpg };
+    if (!worst || mpg < worst.mpg) worst = { i: mid, mpg };
+  }
+  if (best && worst && best.mpg - worst.mpg > 5) {
+    out.push({ i: best.i, text: `Best minute ${best.mpg >= 99 ? "99+" : best.mpg.toFixed(0)} mpg` });
+    out.push({ i: worst.i, text: `Thirstiest minute ${worst.mpg.toFixed(0)} mpg` });
+  }
+  // Moments within about 300 m of each other share one label.
+  const merged = [];
+  for (const m of out) {
+    const near = merged.find((x) => haversine([pts[x.i].lat, pts[x.i].lon], [pts[m.i].lat, pts[m.i].lon]) < 300);
+    if (near) near.text += "<br>" + m.text; else merged.push({ ...m });
+  }
+  return merged;
+}
 
 // ---------- one trip ----------
 
@@ -328,10 +471,8 @@ async function showTrip(id, share = null, focusT = null) {
   const { recording: r } = detail;
   id = r.id;
   const m = r.meta;
-  const auto = m.trigger?.startsWith("car_bluetooth");
-  const pills = [share ? `<span class="pill">Shared trip</span>` : "", statusPill(r), auto ? `<span class="pill">Auto-started</span>` : "", m.vehicle ? `<span class="pill">${esc(m.vehicle)}</span>` : ""].join("");
+  const pills = [share ? `<span class="pill">Shared trip</span>` : "", statusPill(r), m.vehicle ? `<span class="pill">${esc(m.vehicle)}</span>` : ""].join("");
   const day = new Date(r.startedWallMs).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
-  const tail = r.endedWallMs != null && r.driveEndWallMs != null ? r.endedWallMs - r.driveEndWallMs : 0;
 
   const o = list && outingOf(list.recordings, id);
   let outing = "";
@@ -356,21 +497,16 @@ async function showTrip(id, share = null, focusT = null) {
         ${share ? "" : `<div class="share" id="share"></div>`}
         ${r.status === "recording" ? `<p class="hint">Still recording; the route fills in as parts upload.</p>`
           : !r.complete ? `<p class="hint">${r.chunksReceived} of ${r.chunkCount ?? "?"} parts uploaded so far; the phone sends the rest on Wi-Fi.</p>` : ""}
-        ${tail >= 30000 ? `<p class="hint">Ends when the car switched off. The ${fmtDur(tail)} the phone kept recording after that aren't counted.</p>` : ""}
         ${m.note ? `<p class="note">${esc(m.note)}</p>` : ""}
       </header>
       <section class="trip-map">
         <div id="map"></div>
+        ${mapControls()}
         <div class="readout" id="readout" hidden></div>
         <div class="map-status" id="rt-status">Loading route…</div>
       </section>
       <section class="trip-time"><div id="timeline" class="chart-host"></div></section>
-      <aside class="trip-side">
-        <div class="stats" id="stats"></div>
-        ${engineCard()}
-        ${routeCard()}
-        ${frictionCard("")}
-      </aside>
+      <aside class="trip-side">${sidePanel()}</aside>
     </div>`;
 
   if (!share) shareControls(id);
@@ -385,13 +521,7 @@ async function showTrip(id, share = null, focusT = null) {
   }
   status.remove();
   const sm = Route.summary(pts);
-  document.getElementById("stats").innerHTML =
-    stat("Distance", sm.miles.toFixed(sm.miles < 10 ? 1 : 0), "mi") +
-    stat("Moving time", fmtDur(sm.movingMs)) +
-    stat("Average", sm.avgMph != null ? sm.avgMph.toFixed(0) : "–", "mph") +
-    stat("Top speed", sm.maxMph != null ? sm.maxMph.toFixed(0) : "–", "mph") +
-    stat("Stops", sm.stops.length) +
-    stat("Hardest brake", Math.abs(sm.peak.brake).toFixed(2), "g");
+  sideRoute(sm, { engine: pts.engine.length > 0 || pts.engineRaw.length > 0 });
   const view = drawRoute(pts, sm, { timeline: true });
   if (focusT != null) {
     // Opened at a moment (from Insights): zoom there and hold the cursor on it.
@@ -407,18 +537,19 @@ async function showTrip(id, share = null, focusT = null) {
     view.setEngine(pts.engine, engineOpts);
     if (view.focusAt != null) view.pick(view.focusAt); // again, now with engine values in the readout
   } else if (pts.engineRaw.length) {
-    const card = document.getElementById("engine-card"), body = document.getElementById("engine-body");
-    card.hidden = false;
+    const st = document.getElementById("engine-status");
+    st.hidden = false;
     try {
       const rows = await rawEngine(id, pts, (i, n) => {
-        body.innerHTML = `<p class="hint">Reading engine data from the raw recording… <progress max="${n}" value="${i}"></progress></p>`;
+        st.innerHTML = `Reading engine data from the raw recording… <progress max="${n}" value="${i}"></progress>`;
       });
-      if (document.getElementById("engine-card") === card) {
+      if (document.getElementById("engine-status") === st) {
+        st.hidden = true;
         view.setEngine(rows, engineOpts);
         if (view.focusAt != null) view.pick(view.focusAt);
       }
     } catch (e) {
-      if (e.message !== "unauthorized") body.innerHTML = `<p class="bad">Couldn't read the engine data: ${esc(e.message)}</p>`;
+      if (e.message !== "unauthorized") st.innerHTML = `<span class="bad">Couldn't read the engine data: ${esc(e.message)}</span>`;
     }
   }
 }
@@ -564,14 +695,12 @@ async function showMany(kind, key) {
       </header>
       <section class="trip-map">
         <div id="map"></div>
+        ${shown.length ? mapControls() : ""}
         <div class="readout" id="readout" hidden></div>
         <div class="map-status" id="rt-status">${shown.length ? "Loading trips…" : `No trips ${kind === "day" ? "this day" : "this week"}.`}</div>
       </section>
       <aside class="trip-side">
-        <div class="stats" id="stats"></div>
-        ${shown.length ? engineCard() : ""}
-        ${shown.length ? `<div class="card"><h2>${plural(shown.length, "trip")}</h2><ol class="legs trip-rows">${rows}</ol></div>` : ""}
-        ${shown.length ? routeCard() + frictionCard(" in these trips") : ""}
+        ${shown.length ? sidePanel(`<section class="side-sec"><h2>${plural(shown.length, "trip")}</h2><ol class="legs trip-rows">${rows}</ol></section>`) : ""}
       </aside>
     </div>`;
   if (!shown.length) return;
@@ -611,14 +740,7 @@ async function showMany(kind, key) {
   }
   status.remove();
   const sm = Route.summary(pts);
-  const t = totals(shown);
-  document.getElementById("stats").innerHTML =
-    stat("Trips", t.trips) +
-    stat("Distance", sm.miles.toFixed(sm.miles < 10 ? 1 : 0), "mi") +
-    stat("Moving time", fmtDur(sm.movingMs)) +
-    stat("Average", sm.avgMph != null ? sm.avgMph.toFixed(0) : "–", "mph") +
-    stat("Top speed", sm.maxMph != null ? sm.maxMph.toFixed(0) : "–", "mph") +
-    stat("Hardest brake", Math.abs(sm.peak.brake).toFixed(2), "g");
+  sideRoute(sm, { engine: engines.some((e) => e.length), trips: shown.length });
   const view = drawRoute(pts, sm, { withDay: kind === "week" });
   const engineRows = engines.flat();
   if (engineRows.length) {
@@ -641,25 +763,10 @@ async function showMany(kind, key) {
 const gallons = (g) => (g < 0.1 ? g.toFixed(3) : g < 10 ? g.toFixed(2) : g.toFixed(1));
 const money = (d) => (d < 10 ? "$" + d.toFixed(2) : "$" + Math.round(d).toLocaleString());
 
-function wasteHtml(e, gas) {
-  if (!e.waste || !e.gal) return "";
-  const w = e.waste, total = w.idle + w.braking + w.rich;
-  const cost = (g) => (gas ? ` · ${money(g * gas.price)}` : "");
-  const line = (label, g, note) => `<div><dt>${label}<small>${note}</small></dt><dd>${gallons(g)} gal${cost(g)}</dd></div>`;
-  return `
-    <h3 class="sub">Wasted fuel <span>${gallons(total)} gal${cost(total)} · ${Math.round((total / e.gal) * 100)}% of the fuel</span></h3>
-    <dl class="engine-list waste-list">
-      ${line("Braking", w.braking, "speed you built up, then braked away")}
-      ${line("Idling", w.idle, "engine running at 0 mph")}
-      ${line("Running rich", w.rich, "extra fuel at full throttle")}
-    </dl>
-    <p class="hint">Braking is an estimate: the energy your brakes turned into heat, beyond what air and tires would have taken anyway, as the fuel it took to build that speed (${Math.round(e.massKg)} kg, 25% engine efficiency).</p>`;
-}
-
 // ---------- map, charts and controls (shared) ----------
 
 function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } = {}) {
-  let state = { color: "speed", width: "none" };
+  let state = { color: "speed", width: "none", labels: true };
   try { state = { ...state, ...JSON.parse(localStorage.getItem(VIEW_KEY) || "{}") }; } catch {}
   if (!Route.METRICS[state.color]) state.color = "speed";
   if (!Route.WIDTHS[state.width]) state.width = "none";
@@ -687,11 +794,10 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
       <dl>
         <dt>${p.a != null && p.a < 0 ? "Braking" : "Speeding up"}</dt><dd>${fmt(p.a != null ? Math.abs(p.a) / Route.G : null, 2, " g")}</dd>
         <dt>Turning</dt><dd>${fmt(p.side != null ? Math.abs(p.side) / Route.G : null, 2, " g")}${p.side != null && Math.abs(p.side) / Route.G >= 0.03 ? (p.side > 0 ? " right" : " left") : ""}</dd>
-        <dt>Bumps</dt><dd>${fmt(p.jolt != null ? p.jolt / Route.G : null, 2, " g")}</dd>
-        <dt>GPS error</dt><dd>${fmt(p.acc, 0, " m")}</dd>
-        ${p.eng ? `<dt>RPM</dt><dd>${fmt(p.eng.rpm, 0, "")}</dd>
-        <dt>Gas pedal</dt><dd>${fmt(p.eng.pedal, 0, "%")}</dd>
-        <dt>Fuel</dt><dd>${p.eng.cut ? "cut off" : fmt(p.eng.gph, 2, " gal/h")}</dd>` : ""}
+        ${p.eng ? `<dt>Gas pedal</dt><dd>${fmt(p.eng.pedal, 0, "%")}</dd>
+        <dt>Economy</dt><dd>${p.eng.mpg == null ? "–" : p.eng.mpg >= 99 ? "coasting" : fmt(p.eng.mpg, 0, " mpg")}</dd>
+        <dt>Fuel</dt><dd>${p.eng.cut ? "cut off" : fmt(p.eng.gph, 2, " gal/h")}</dd>
+        <dt>RPM</dt><dd>${fmt(p.eng.rpm, 0, "")}</dd>` : ""}
       </dl>`;
   };
 
@@ -708,6 +814,12 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
 
   const legend = () => { document.getElementById("rt-legend").innerHTML = Route.legendHtml(shownState, pts); };
   const recolor = () => { effective(); view.redraw(); legend(); timeline?.recolor(Route.segmentColors(pts, shownState)); };
+  // Notable moments, labeled on the map (again with engine ones once that data is in).
+  view.moments(momentsFor(pts, sm));
+  const labels = document.getElementById("moments-toggle");
+  const syncLabels = () => { labels.setAttribute("aria-pressed", String(!!state.labels)); view.showMoments(!!state.labels); };
+  labels.onclick = () => { state.labels = !state.labels; syncLabels(); save(); };
+  syncLabels();
   const save = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify(state)); } catch {} };
   const syncButtons = () => document.querySelectorAll(".seg").forEach((g) =>
     g.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(shownState[g.dataset.key] === b.dataset.v))));
@@ -728,37 +840,13 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
   // Engine data arrives with the route, or later for older drives read from raw chunks.
   function setEngine(rows, { partial = false, gas = null, vehicle = "" } = {}) {
     if (!rows.length || !document.getElementById("map")) return;
-    Engine.attach(pts, rows);
+    Engine.attach(pts, Engine.smoothMpg(rows));
     hasEngine = true;
     document.querySelectorAll("[data-engine]").forEach((b) => { b.hidden = false; });
-    syncButtons();
     recolor();
-    const card = document.getElementById("engine-card");
-    if (!card) return;
-    card.hidden = false;
-    const e = Engine.summary(rows, { vehicle });
-    const temp = (c) => (c == null ? "–" : Engine.cToF(c).toFixed(0));
-    const row = (label, value) => `<div><dt>${label}</dt><dd>${value}</dd></div>`;
-    const light = e.mil == null ? "–" : `${e.mil ? "On" : "Off"}${e.dtcs != null ? `, ${e.dtcs ? plural(e.dtcs, "code") : "no codes"}` : ""}`;
-    document.getElementById("engine-body").innerHTML = `
-      <div class="stats engine-stats">
-        ${stat("Fuel used", e.gal != null ? gallons(e.gal) : "–", "gal")}
-        ${stat("Fuel economy", e.mpg != null ? e.mpg.toFixed(0) : "–", "mpg")}
-        ${stat("Cost", e.gal != null && gas ? money(e.gal * gas.price) : "–")}
-      </div>
-      ${gas ? `<p class="hint gas-note">Gas at ${money(gas.price)}/gal: the ${esc(gas.regionName)} average for the week of ${new Date(gas.weekMs).toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" })} (U.S. EIA).</p>` : ""}
-      ${wasteHtml(e, gas)}
-      <dl class="engine-list">
-        ${row("Top RPM", e.maxRpm ? Math.round(e.maxRpm).toLocaleString() : "–")}
-        ${row("Idling", fmtDur(e.idleMs))}
-        ${row("Coasting with fuel cut", fmtDur(e.cutMs))}
-        ${row("Coolant", e.coolant[0] != null ? `${temp(e.coolant[0])} → ${temp(e.coolant[1])} °F` : "–")}
-        ${row("Charging", Number.isFinite(e.volts[0]) ? `${e.volts[0].toFixed(1)}–${e.volts[1].toFixed(1)} V` : "–")}
-        ${row("Fuel tank", e.fuelLevel != null ? e.fuelLevel.toFixed(0) + "%" : "–")}
-        ${row("Check engine light", light)}
-      </dl>
-      <p class="hint">${e.fromCar ? "Fuel use as reported by the car." : "Fuel use is estimated from airflow and the air-fuel ratio the engine asks for; this car doesn't report it directly."}
-        ${e.speedFactor !== 1 ? `Miles use the car's speed, which read ${Math.abs((1 - 1 / e.speedFactor) * 100).toFixed(1)}% ${e.speedFactor > 1 ? "low" : "high"} against GPS on this drive, corrected.` : "Miles use the car's own speed."}${partial ? " Some of these trips have no engine data and aren't counted." : ""}</p>`;
+    syncButtons();
+    view.moments(momentsFor(pts, sm));
+    sideEngine(sm, Engine.summary(rows, { vehicle }), { gas, partial });
   }
 
   return { ...view, setEngine, pick };

@@ -15,6 +15,7 @@ const Engine = (() => {
   /** Rough loaded weight (car, driver, fuel) by vehicle name; braking waste scales with it. */
   const massKg = (vehicle = "") => (/civic/i.test(vehicle) ? 1360 : /truck|f-?150|silverado|ram|tundra|sierra/i.test(vehicle) ? 2600 : 1500);
   const galOf = (g) => g / FUEL_G_PER_L / L_PER_GAL;
+  const HIGHWAY_MPH = 45;
 
   // Row: { t: wall ms, rpm, speed (km/h), pedal %, load %, maf g/s, lambda, coolant °C, ... ,
   //        fuelGs: fuel g/s (estimated), gph: gallons/hour, cut: true during fuel cut }
@@ -149,6 +150,8 @@ const Engine = (() => {
   function summary(rows, { vehicle = "" } = {}) {
     const mass = massKg(vehicle);
     let fuelG = 0, meters = 0, idleMs = 0, cutMs = 0, fuelSecs = 0, idleG = 0, richG = 0, brakeJ = 0;
+    // Highway (45 mph and up) vs town (everything slower, idling included): miles and fuel each.
+    const split = { highway: { meters: 0, fuelG: 0 }, town: { meters: 0, fuelG: 0 } };
     // A second without a value (a stalled poll) uses the last one seen, up to 3 s old.
     let fuel = null, fuelT = -Infinity, speed = null, speedT = -Infinity;
     for (let i = 1; i < rows.length; i++) {
@@ -156,8 +159,14 @@ const Engine = (() => {
       if (b.fuelGs != null) { fuel = b.fuelGs; fuelT = b.t; }
       if (b.speed != null) { speed = b.speed; speedT = b.t; }
       if (dt <= 0 || dt > 2.5) continue; // a gap (adapter dropped, engine off): don't integrate across it
-      if (fuel != null && b.t - fuelT <= 3000) { fuelG += fuel * dt; fuelSecs += dt; }
-      if (speed != null && b.t - speedT <= 3000) meters += (speed / 3.6) * dt;
+      const fuelOk = fuel != null && b.t - fuelT <= 3000, speedOk = speed != null && b.t - speedT <= 3000;
+      if (fuelOk) { fuelG += fuel * dt; fuelSecs += dt; }
+      if (speedOk) meters += (speed / 3.6) * dt;
+      if (fuelOk && speedOk) {
+        const g = speed * KMH_TO_MPH >= HIGHWAY_MPH ? split.highway : split.town;
+        g.meters += (speed / 3.6) * dt;
+        g.fuelG += fuel * dt;
+      }
       if (fuel != null && b.t - fuelT <= 3000 && b.speed === 0 && b.rpm > 300) idleG += fuel * dt;
       if (b.fuelRateLph == null && b.maf != null && b.lambda != null && !b.cut && b.lambda < 0.99) {
         richG += (b.maf / AFR) * (1 / b.lambda - 1) * dt;
@@ -174,6 +183,17 @@ const Engine = (() => {
     const first = (k) => vals(k)[0], last = (k) => vals(k).at(-1);
     const gal = fuelG / FUEL_G_PER_L / L_PER_GAL;
     const miles = meters / 1609.344;
+    const part = (g) => {
+      const mi = g.meters / 1609.344, gl = galOf(g.fuelG);
+      return { miles: mi, gal: gl, mpg: gl > 0 ? mi / gl : null };
+    };
+    // Warm-up: from a cold start (below 60 °C) until the coolant first reaches 80 °C.
+    const cool = rows.filter((r) => r.coolant != null);
+    let warmMs = null;
+    if (cool.length && cool[0].coolant < 60) {
+      const w = cool.find((r) => r.coolant >= 80);
+      if (w) warmMs = w.t - rows[0].t;
+    }
     return {
       gal: fuelSecs ? gal : null,
       mpg: fuelSecs && gal > 0 ? miles / gal : null,
@@ -190,7 +210,26 @@ const Engine = (() => {
       waste: fuelSecs ? { idle: galOf(idleG), braking: brakeJ / J_PER_GAL / ENGINE_EFF, rich: galOf(richG) } : null,
       massKg: mass,
       speedFactor: rows.calibrated ?? 1,
+      highway: part(split.highway),
+      town: part(split.town),
+      warmMs,
     };
+  }
+
+  // Economy over a short window around each second (instant mpg jumps too much to color a map):
+  // miles over gallons within ±3 s, capped at 99 (fuel cut while moving reads as 99).
+  function smoothMpg(rows) {
+    for (let i = 0; i < rows.length; i++) {
+      let mi = 0, gal = 0;
+      for (let j = Math.max(0, i - 3); j <= Math.min(rows.length - 1, i + 3); j++) {
+        const r = rows[j];
+        if (Math.abs(r.t - rows[i].t) > 3500 || r.speed == null || r.fuelGs == null) continue;
+        mi += r.speed / 3.6 / 1609.344;
+        gal += galOf(r.fuelGs);
+      }
+      rows[i].mpg = gal > 0 ? Math.min(99, mi / gal) : mi > 0 ? 99 : null;
+    }
+    return rows;
   }
 
   // Each GPS point gets the engine row for its second (within 1.5 s), as p.eng.
@@ -205,7 +244,7 @@ const Engine = (() => {
   const cToF = (c) => (c * 9) / 5 + 32;
   const mph = (kmh) => kmh * KMH_TO_MPH;
 
-  return { recorded, rawOnly, fromChunks, fromRaw, derive, calibrate, summary, attach, cToF, mph };
+  return { recorded, rawOnly, fromChunks, fromRaw, derive, calibrate, summary, smoothMpg, HIGHWAY_MPH, attach, cToF, mph };
 })();
 
 // Average regular gas price for a trip's week and region (U.S. EIA weekly survey, via /api/v1/gas-prices).

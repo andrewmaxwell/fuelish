@@ -158,8 +158,6 @@ const Route = (() => {
   }
   const RED = "#ef4444", ORANGE = "#f28c28", YELLOW = "#f2c94c", GREEN = "#3fc66b", BLUE = "#3b8ff6", PURPLE = "#b25cf6";
   const at = (xs, colors) => xs.map((x, i) => [x, colors[i]]);
-  // Good → bad, like a traffic light: smooth, gentle, accurate in green; rough, hard, uncertain in red.
-  const goodBad = (xs) => at(xs, [GREEN, YELLOW, ORANGE, RED]);
 
   // Each metric: label, value for a segment (between points p → q), color stops, legend formatting.
   // Scales are fixed (not per drive) so colors compare across drives.
@@ -171,7 +169,7 @@ const Route = (() => {
       width: [0, 75],
     },
     accel: {
-      label: "Accel", unit: "g", fmt: (x) => x.toFixed(2), note: "Red is braking, blue is speeding up",
+      label: "Accel", unit: "g", fmt: (x) => x.toFixed(2), note: "Red is braking, blue is speeding up, gray is steady",
       value: (p, q) => (p.a != null && q.a != null ? (p.a + q.a) / 2 / G : null),
       // Diverging: two poles and a neutral gray middle.
       stops: [[-0.3, "#ff6b6b"], [-0.1, "#c94a4a"], [0, "#6b6a65"], [0.1, "#3577c9"], [0.3, "#7fb6ff"]],
@@ -184,45 +182,27 @@ const Route = (() => {
       stops: [[-0.35, "#8fc0ff"], [-0.15, "#3b82e0"], [-0.03, "#6b6a65"], [0.03, "#6b6a65"], [0.15, "#e04848"], [0.35, "#ff8a8a"]],
       width: [0, 0.35], abs: true,
     },
-    jolt: {
-      label: "Bumps", unit: "g", fmt: (x) => x.toFixed(1), note: "Biggest jolt between GPS fixes (includes mount bounce)",
-      value: (p, q) => (q.jolt != null ? q.jolt / G : null),
-      stops: goodBad([0.05, 0.2, 0.4, 0.7]),
-      width: [0, 0.8],
-    },
-    accuracy: {
-      label: "GPS", unit: "m", fmt: (x) => x.toFixed(0), note: "Estimated GPS error",
-      value: (p, q) => (q.acc != null ? q.acc : null),
-      stops: goodBad([3, 6, 12, 25]),
-      width: [0, 25],
-    },
-    time: {
-      label: "Time", unit: "",
-      value: null, // filled per route: 0..1 progress
-      stops: at([0, 0.33, 0.66, 1], ["#4a3bb0", "#9085e9", "#c4bdf5", "#f1effd"]),
-    },
     // From the OBD adapter (p.eng, see engine.js); offered only on drives that have it.
-    rpm: {
-      label: "RPM", unit: "rpm", fmt: (x) => x.toFixed(0), engine: true,
-      value: (p, q) => q.eng?.rpm ?? null,
-      stops: goodBad([800, 2200, 3500, 5000]),
-      width: [800, 5000],
-    },
     pedal: {
       label: "Pedal", unit: "%", fmt: (x) => x.toFixed(0), engine: true, note: "Blue is foot off the pedal (the car reads about 20% at rest), red is floored",
       value: (p, q) => q.eng?.pedal ?? null,
       stops: at([21, 28, 45, 65, 85], [BLUE, GREEN, YELLOW, ORANGE, RED]),
-      width: [20, 85],
+      width: [21, 85],
+    },
+    mpg: {
+      label: "MPG", unit: "mpg", fmt: (x) => x.toFixed(0), engine: true, note: "Miles per gallon over a few seconds. Red is thirsty, green efficient, blue coasting with fuel cut off",
+      value: (p, q) => q.eng?.mpg ?? null,
+      stops: at([5, 15, 25, 40, 60], [RED, ORANGE, YELLOW, GREEN, BLUE]),
     },
     fuel: {
-      label: "Fuel", unit: "gal/h", fmt: (x) => x.toFixed(1), engine: true, note: "Estimated fuel flow. Blue is coasting with fuel cut off",
+      label: "Gal/h", unit: "gal/h", fmt: (x) => x.toFixed(1), engine: true, note: "Estimated fuel flow. Blue is coasting with fuel cut off",
       value: (p, q) => q.eng?.gph ?? null,
       stops: at([0, 0.3, 1, 2.5, 5], [BLUE, GREEN, YELLOW, ORANGE, RED]),
       width: [0, 5],
     },
   };
 
-  const WIDTHS = { none: "Even", speed: "Speed", accel: "Accel", turn: "Turning", jolt: "Bumps", rpm: "RPM", fuel: "Fuel" };
+  const WIDTHS = { none: "Even", speed: "Speed", accel: "Accel", turn: "Turning", pedal: "Pedal", fuel: "Gal/h" };
   const stopsFor = (m) => m.stops;
 
   // ---------- rendering ----------
@@ -231,7 +211,7 @@ const Route = (() => {
     if (el._map) el._map.remove();
     const map = L.map(el, { preferCanvas: true, zoomControl: false, attributionControl: true });
     el._map = map;
-    L.control.zoom({ position: "topright" }).addTo(map);
+    L.control.zoom({ position: "bottomright" }).addTo(map);
     // Always the dark map: OpenStreetMap tiles, grayscaled and inverted (see .tiles-dark).
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap", className: "tiles-dark" }).addTo(map);
     // The route sits in its own pane drawn slightly see-through as a whole, so street names show
@@ -242,7 +222,8 @@ const Route = (() => {
     const marks = L.layerGroup().addTo(map);
     let focus = null; // trip index to bring forward, or null for all
     draw(layer, marks, pts, state, focus);
-    const fit = () => map.fitBounds(L.latLngBounds(pts.map((p) => [p.lat, p.lon])), { padding: [36, 36] });
+    // Room for the controls over the top of the map and the legend along the bottom.
+    const fit = () => map.fitBounds(L.latLngBounds(pts.map((p) => [p.lat, p.lon])), { paddingTopLeft: [30, 100], paddingBottomRight: [30, 70] });
     fit();
 
     // Hover (mouse) or tap anywhere near the route picks the nearest fix.
@@ -264,7 +245,34 @@ const Route = (() => {
     map.on("click", (e) => onPick(nearest(e.latlng), "map"));
 
     const cursor = L.marker([0, 0], { icon: dotIcon("end-dot ring", 18), interactive: false, keyboard: false });
+    const moments = L.layerGroup().addTo(map);
+    // Labels that would overlap one listed earlier are hidden until zooming in separates them.
+    function declutter() {
+      const placed = [];
+      moments.eachLayer((mk) => {
+        const el = mk.getTooltip()?.getElement();
+        if (!el) return;
+        el.style.visibility = "";
+        const r = el.getBoundingClientRect();
+        const hit = placed.some((q) => r.left < q.right + 4 && r.right + 4 > q.left && r.top < q.bottom + 2 && r.bottom + 2 > q.top);
+        if (hit) el.style.visibility = "hidden"; else placed.push(r);
+      });
+    }
+    map.on("zoomend resize", declutter);
     return {
+      // Labels pinned to the map at notable moments: [{ i: point index, text, dir? }]. Hover or tap shows that moment.
+      moments(list) {
+        moments.clearLayers();
+        for (const m of list) {
+          const p = pts[m.i];
+          const mk = L.circleMarker([p.lat, p.lon], { radius: 4, color: "#fff", weight: 2, fillColor: "#0b0b0b", fillOpacity: 1 })
+            .bindTooltip(m.text, { permanent: true, direction: m.dir || "top", offset: [0, m.dir === "bottom" ? 6 : -6], className: "moment" })
+            .addTo(moments);
+          mk.on("mouseover click", () => onPick(m.i, "moment"));
+        }
+        declutter();
+      },
+      showMoments(on) { if (on) { moments.addTo(map); declutter(); } else moments.remove(); },
       map,
       fit,
       redraw: () => draw(layer, marks, pts, state, focus),
@@ -338,23 +346,15 @@ const Route = (() => {
   function segmentColors(pts, state) {
     const m = METRICS[state.color];
     const c = ramp(stopsFor(m));
-    const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
-    return (i) => c(state.color === "time" ? (pts[i].t - t0) / Math.max(1, t1 - t0) : m.value(pts[Math.max(0, i - 1)], pts[i]));
+    return (i) => c(m.value(pts[Math.max(0, i - 1)], pts[i]));
   }
 
   function legendHtml(state, pts) {
     const m = METRICS[state.color];
     const s = stopsFor(m);
     const grad = s.map(([, c], i) => `${c} ${(i / (s.length - 1)) * 100}%`).join(", ");
-    let lo, hi;
-    if (state.color === "time") {
-      const f = (t) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-      lo = f(pts[0].t);
-      hi = f(pts[pts.length - 1].t);
-    } else {
-      lo = `${m.fmt(s[0][0])} ${m.unit}`;
-      hi = m.unit ? `${m.fmt(s[s.length - 1][0])}+ ${m.unit}` : m.fmt(s[s.length - 1][0]);
-    }
+    const lo = `${m.fmt(s[0][0])} ${m.unit}`;
+    const hi = m.unit ? `${m.fmt(s[s.length - 1][0])}+ ${m.unit}` : m.fmt(s[s.length - 1][0]);
     return `<div class="legend"><span>${lo}</span><span class="bar" style="background:linear-gradient(90deg, ${grad})"></span><span>${hi}</span></div>` +
       (m.note ? `<p class="hint">${m.note}</p>` : "");
   }
