@@ -15,6 +15,12 @@ const Engine = (() => {
   /** Rough loaded weight (car, driver, fuel) by vehicle name; braking waste scales with it. */
   const massKg = (vehicle = "") => (/civic/i.test(vehicle) ? 1360 : /truck|f-?150|silverado|ram|tundra|sierra/i.test(vehicle) ? 2600 : 1500);
   const galOf = (g) => g / FUEL_G_PER_L / L_PER_GAL;
+  // EPA window-sticker ratings (fueleconomy.gov) for the cars Fuelish knows, to put a drive's mpg
+  // in context. Matched on the vehicle name; anything else gets no comparison.
+  const EPA = [
+    [/2016.*civic.*2\.0/i, { city: 31, hwy: 41, comb: 35 }], // 2.0L CVT sedan
+  ];
+  const epa = (vehicle = "") => EPA.find(([re]) => re.test(vehicle))?.[1] ?? null;
   const HIGHWAY_MPH = 45;
 
   // Row: { t: wall ms, rpm, speed (km/h), pedal %, load %, maf g/s, lambda, coolant °C, ... ,
@@ -155,7 +161,8 @@ const Engine = (() => {
 
   // Fuel flow for each row. The car's own fuel rate if it reports one; otherwise the phone's
   // per-sample estimate (airflow over the commanded air-fuel ratio, sample by sample); for drives
-  // from before that, the same from the second's averages. Commanded lambda at its maximum (2.0) is
+  // from before that, the same from the second's averages. Either estimate is corrected by the fuel
+  // trims (short-term within 3 s, long-term carried forward), capped at ±25%. Commanded lambda at its maximum (2.0) is
   // fuel cut: no fuel.
   // Values the car is polled for only every few seconds (they change slowly) carry forward up to
   // 12 s, so per-second charts and comparisons don't miss most seconds.
@@ -169,11 +176,17 @@ const Engine = (() => {
         else if (last[k] && r.t - last[k][1] <= 12000) r[k] = last[k][0];
       }
     }
+    let stft = null, stftT = -Infinity;
     for (const r of rows) {
       r.cut = r.cutFrac != null ? r.cutFrac >= 0.5 : r.lambda != null && r.lambda >= 1.99;
+      // Fuel trims are the engine's own correction for an airflow sensor that reads off: positive
+      // trims mean it's adding fuel beyond what the airflow implies, so the estimate scales with them.
+      if (r.stft != null) { stft = r.stft; stftT = r.t; }
+      const trims = (r.ltft ?? 0) + (stft != null && r.t - stftT <= 3000 ? stft : 0);
+      r.trimK = Math.min(1.25, Math.max(0.75, 1 + trims / 100));
       if (r.fuelRateLph != null) r.fuelGs = (r.fuelRateLph * FUEL_G_PER_L) / 3600;
-      else if (r.fuelEstGs != null) r.fuelGs = r.fuelEstGs;
-      else if (r.maf != null) r.fuelGs = r.cut ? 0 : r.maf / (AFR * (r.lambda ?? 1));
+      else if (r.fuelEstGs != null) r.fuelGs = r.fuelEstGs * r.trimK;
+      else if (r.maf != null) r.fuelGs = r.cut ? 0 : (r.maf * r.trimK) / (AFR * (r.lambda ?? 1));
       else r.fuelGs = null;
       r.gph = r.fuelGs != null ? (r.fuelGs * 3600) / FUEL_G_PER_L / L_PER_GAL : null;
     }
@@ -228,7 +241,7 @@ const Engine = (() => {
         g.fuelG += fuel * dt;
         if (speed === 0 && b.rpm > 300) idleG += fuel * dt;
         if (b.fuelRateLph == null && b.maf != null && b.lambda != null && !b.cut && b.lambda < 0.99) {
-          richG += (b.maf / AFR) * (1 / b.lambda - 1) * dt;
+          richG += ((b.maf * (b.trimK ?? 1)) / AFR) * (1 / b.lambda - 1) * dt;
         }
       }
       if (a.speed != null && b.speed != null) {
@@ -324,7 +337,7 @@ const Engine = (() => {
   const cToF = (c) => (c * 9) / 5 + 32;
   const mph = (kmh) => kmh * KMH_TO_MPH;
 
-  return { fuelLabel, recorded, rawOnly, hasSummary, merge, fromChunks, fromRaw, derive, calibrate, summary, smoothMpg, HIGHWAY_MPH, attach, cToF, mph, galOf, FUEL_G_PER_L, L_PER_GAL };
+  return { fuelLabel, epa, recorded, rawOnly, hasSummary, merge, fromChunks, fromRaw, derive, calibrate, summary, smoothMpg, HIGHWAY_MPH, attach, cToF, mph, galOf, FUEL_G_PER_L, L_PER_GAL };
 })();
 
 // Average regular gas price for a trip's week and region (U.S. EIA weekly survey, via /api/v1/gas-prices).

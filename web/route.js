@@ -198,16 +198,20 @@ const Route = (() => {
     const [x, y] = [p(a), p(b)];
     return "#" + x.map((v, i) => Math.round(v + (y[i] - v) * f).toString(16).padStart(2, "0")).join("");
   }
-  const RED = "#ef4444", ORANGE = "#f28c28", YELLOW = "#f2c94c", GREEN = "#3fc66b", BLUE = "#3b8ff6", PURPLE = "#b25cf6";
+  // One sequential ramp for every one-directional metric, getting steadily brighter from violet to
+  // yellow (a plasma-like scale, its dark end lifted so low values still show on the dark map).
+  // Brighter always means "more": faster, more pedal, more fuel. No rainbow, so no invented bands,
+  // and it still reads with red-green color blindness.
+  const SEQ = ["#6c4fd6", "#a23fb8", "#d8487f", "#f2774e", "#f9b23a", "#f4e65c"];
   const at = (xs, colors) => xs.map((x, i) => [x, colors[i]]);
 
   // Each metric: label, value for a segment (between points p → q), color stops, legend formatting.
   // Scales are fixed (not per drive) so colors compare across drives.
   const METRICS = {
     speed: {
-      label: "Speed", unit: "mph", fmt: (x) => x.toFixed(0), note: "Red stopped, yellow slow, green cruising, blue fast, purple very fast",
+      label: "Speed", unit: "mph", fmt: (x) => x.toFixed(0),
       value: (p, q) => (p.v != null && q.v != null ? ((p.v + q.v) / 2) * MPH : null),
-      stops: at([0, 8, 18, 35, 55, 75], [RED, ORANGE, YELLOW, GREEN, BLUE, PURPLE]),
+      stops: at([0, 20, 35, 50, 65, 80], SEQ),
       width: [0, 75],
     },
     accel: {
@@ -226,20 +230,20 @@ const Route = (() => {
     },
     // From the OBD adapter (p.eng, see engine.js); offered only on drives that have it.
     pedal: {
-      label: "Pedal", unit: "%", fmt: (x) => x.toFixed(0), engine: true, note: "Blue is foot off the pedal (the car reads about 20% at rest), red is floored",
+      label: "Pedal", unit: "%", fmt: (x) => x.toFixed(0), engine: true, note: "The car reads about 20% with your foot off",
       value: (p, q) => q.eng?.pedal ?? null,
-      stops: at([21, 28, 45, 65, 85], [BLUE, GREEN, YELLOW, ORANGE, RED]),
+      stops: at([21, 30, 40, 52, 66, 85], SEQ),
       width: [21, 85],
     },
     mpg: {
-      label: "MPG", unit: "mpg", fmt: (x) => x.toFixed(0), engine: true, note: "Miles per gallon over a few seconds. Red is thirsty, green efficient, blue coasting with fuel cut off",
+      label: "MPG", unit: "mpg", fmt: (x) => x.toFixed(0), engine: true, note: "Over a few seconds. Brighter is thirstier; coasting with fuel cut off is darkest",
       value: (p, q) => q.eng?.mpg ?? null,
-      stops: at([5, 15, 25, 40, 60], [RED, ORANGE, YELLOW, GREEN, BLUE]),
+      stops: at([5, 12, 20, 30, 45, 60], [...SEQ].reverse()),
     },
     fuel: {
-      label: "Gal/h", unit: "gal/h", fmt: (x) => x.toFixed(1), engine: true, note: "Estimated fuel flow. Blue is coasting with fuel cut off",
+      label: "Gal/h", unit: "gal/h", fmt: (x) => x.toFixed(1), engine: true, note: "Estimated fuel flow",
       value: (p, q) => q.eng?.gph ?? null,
-      stops: at([0, 0.3, 1, 2.5, 5], [BLUE, GREEN, YELLOW, ORANGE, RED]),
+      stops: at([0, 0.5, 1, 2, 3.5, 5], SEQ),
       width: [0, 5],
     },
   };

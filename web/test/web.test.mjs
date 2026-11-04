@@ -65,6 +65,17 @@ test("the phone's per-sample fuel estimate is used, and its fuel-cut share decid
   assert.equal(r.cut, true);
 });
 
+test("an airflow estimate is corrected by the fuel trims; a car-reported rate isn't", () => {
+  const [a, b, c] = Engine.derive([
+    { t: 0, maf: 14.08, lambda: 1, stft: 4, ltft: 6 },
+    { t: 1000, fuelEstGs: 1, ltft: -40 }, // trims are capped at 25%
+    { t: 2000, fuelRateLph: 3.6, stft: 10 },
+  ]);
+  assert.ok(Math.abs(a.fuelGs - 1.1) < 1e-9);
+  assert.ok(Math.abs(b.fuelGs - 0.75) < 1e-9); // stft 4 from 1 s ago still applies: 1 - 40% + 4% → capped
+  assert.ok(Math.abs(c.fuelGs - 0.745) < 1e-9);
+});
+
 test("braking is reported apart from measured fuel", () => {
   const rows = [{ t: 0, speed: 100, fuelGs: 0.01 }, { t: 1000, speed: 0, fuelGs: 0.01 }];
   const e = Engine.summary(rows);
