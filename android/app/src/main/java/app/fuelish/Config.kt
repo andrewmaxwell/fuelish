@@ -69,6 +69,7 @@ class Config(val json: JSONObject) {
             "slow": ["05", "2F", "33", "46", "42", "5C", "3C", "1F", "01", "03", "31", "21", "4D", "4E", "A6", "13", "1C", "51", "63"],
             "maxPidsPerRequest": 0,
             "demoteAfterMisses": 5,
+            "vehicleLostAfterSilent": 5,
             "demotedIntervalMs": 30000,
             "adapterVoltageIntervalMs": 5000,
             "readVehicleInfo": true,

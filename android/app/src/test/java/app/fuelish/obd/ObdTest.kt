@@ -74,6 +74,30 @@ class ObdTest {
         assertEquals(3, s.next(0).size)
     }
 
+    @Test
+    fun schedulerRestoresDemotedPidWhenAnsweredAgain() {
+        val fast = PollItem(0x0C, 0, PollScheduler.FAST, true)
+        val s = PollScheduler(listOf(fast), 1)
+        fast.intervalNs = 30_000_000_000L // demoted
+        assertEquals(listOf(fast), s.completed(listOf(fast), setOf(0x0C), 1))
+        assertEquals(0L, fast.intervalNs)
+        assertFalse(fast.demoted)
+    }
+
+    @Test
+    fun schedulerDoesNotCountWholeCarSilenceAsMisses() {
+        val items = listOf(0x0C, 0x0D, 0x11).map { PollItem(it, 0, PollScheduler.FAST, true) }
+        val s = PollScheduler(items, 3)
+        repeat(10) { s.completed(items, emptySet(), it.toLong()) }
+        assertTrue(items.all { it.consecutiveMisses == 0 })
+        // One PID unanswered while others answer is a real miss.
+        s.completed(items, setOf(0x0C, 0x0D), 11)
+        assertEquals(1, items.first { it.pid == 0x11 }.consecutiveMisses)
+        // So is a single-PID request with no answer.
+        s.completed(listOf(items[0]), emptySet(), 12)
+        assertEquals(1, items[0].consecutiveMisses)
+    }
+
     private class CollectSink : RecordSink {
         val lines: MutableList<Pair<String, String>> = Collections.synchronizedList(mutableListOf())
         override fun emit(stream: String, tNs: Long, line: String, track: DoubleArray?) {
@@ -130,6 +154,32 @@ class ObdTest {
         val (_, sink) = runRecorder(fake) { s -> s.streams().contains("obd:speed") }
         assertTrue(sink.streams().contains("obd:speed"))
         assertFalse(fake.received.isEmpty())
+    }
+
+    @Test
+    fun noDataAfterIgnitionOffIsVehicleLostNotDemotion() {
+        // Like the Civic: once switched off, every request gets NO DATA.
+        val fake = FakeElm(offReply = "NO DATA")
+        var switchedOff = false
+        var restarted = false
+        val (_, sink) = runRecorder(fake) { s ->
+            val streams = s.streams()
+            if (!switchedOff && streams.count { it == "obd:rpm" } >= 20) {
+                fake.vehicleOn = false
+                switchedOff = true
+            }
+            val events = synchronized(s.lines) { s.lines.filter { it.first == "obd_event" }.map { JSONObject(it.second).getString("ev") } }
+            if (switchedOff && !restarted && "vehicle_lost" in events) {
+                fake.vehicleOn = true
+                restarted = true
+            }
+            restarted && streams.count { it == "obd_discovery" } >= 2 && streams.count { it == "obd:rpm" } >= 40
+        }
+        val events = sink.lines.filter { it.first == "obd_event" }.map { JSONObject(it.second).getString("ev") }
+        assertTrue("events: $events", "vehicle_lost" in events)
+        assertTrue("events: $events", "pid_demoted" !in events)
+        assertEquals(2, sink.streams().count { it == "obd_discovery" })
+        assertTrue(sink.streams().count { it == "obd:rpm" } >= 40)
     }
 
     @Test

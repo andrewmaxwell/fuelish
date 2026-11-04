@@ -301,6 +301,10 @@ class ObdRecorder(
         val rvIntervalNs = cfg.optLong("adapterVoltageIntervalMs", 5_000) * 1_000_000
         val demoteAfter = cfg.optInt("demoteAfterMisses", 5)
         val demotedNs = cfg.optLong("demotedIntervalMs", 30_000) * 1_000_000
+        // The Civic answers NO DATA to everything once the ignition is off (no ERROR), so a run of
+        // requests with nothing answered at all is how switching off shows up.
+        val lostAfterSilent = cfg.optInt("vehicleLostAfterSilent", 5)
+        var silent = 0
         var lastRv = nanoTime()
         var timeouts = 0
         var errors = 0
@@ -344,7 +348,15 @@ class ObdRecorder(
                     emitValue(r, m.ecu, v, values)
                 }
             }
-            sched.completed(batch, answered, r.doneNs)
+            if (answered.isEmpty() && r.status != ElmStatus.TIMEOUT) {
+                if (lostAfterSilent > 0 && ++silent >= lostAfterSilent) {
+                    event("vehicle_lost", "$silent requests in a row with nothing answered (last: ${r.lines.joinToString(" / ")})")
+                    return // back to discovery, which waits for the car to answer again
+                }
+            } else if (answered.isNotEmpty()) silent = 0
+            for (it in sched.completed(batch, answered, r.doneNs)) {
+                event("pid_restored", "${Pids.hex(it.pid)} answered again; back to every ${it.intervalNs / 1_000_000}ms")
+            }
             for (it in batch) {
                 if (it.consecutiveMisses == demoteAfter && it.intervalNs < demotedNs) {
                     it.intervalNs = demotedNs

@@ -13,6 +13,8 @@ class FakeElm(
     var vehicleOn: Boolean = true,
     val maxMultiPid: Int = 6,
     val vin: String = "2HGFC2F5XGH000000",
+    /** What the car says while off: older stacks error out, the Civic answers NO DATA. */
+    var offReply: String = "SEARCHING...\rUNABLE TO CONNECT",
 ) : ObdTransport {
     val received = mutableListOf<String>()
     private val out = LinkedBlockingQueue<ByteArray>()
@@ -85,7 +87,7 @@ class FakeElm(
         cmd == "ATDPN" -> "A6"
         cmd == "ATDP" -> "AUTO, ISO 15765-4 (CAN 11/500)"
         cmd.startsWith("AT") || cmd.startsWith("ST") -> "OK"
-        !vehicleOn -> "SEARCHING...\rUNABLE TO CONNECT"
+        !vehicleOn -> offReply
         cmd == "0900" -> frames("4900" + "54400000")
         cmd == "0902" -> frames("490201" + vin.map { "%02X".format(it.code) }.joinToString(""))
         cmd == "03" -> frames("4300")
