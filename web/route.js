@@ -269,6 +269,65 @@ const Route = (() => {
   };
   const stopsFor = (m) => m.stops;
 
+  // ---------- marks along the route ----------
+
+  // Compass bearing from a to b in degrees. Web Mercator keeps angles, so it's also the on-screen angle.
+  const bearingOf = (a, b) => {
+    const r = Math.PI / 180, y = Math.sin((b.lon - a.lon) * r) * Math.cos(b.lat * r);
+    const x = Math.cos(a.lat * r) * Math.sin(b.lat * r) - Math.sin(a.lat * r) * Math.cos(b.lat * r) * Math.cos((b.lon - a.lon) * r);
+    return (Math.atan2(y, x) / r + 360) % 360;
+  };
+
+  // Where a running total along each trip passes each multiple of `step`: [{ lat, lon, brg, n, i }],
+  // n counting from 1 in each trip, i the fix just after. `amount(p, q)` is what the step from p to
+  // q adds (ms for time; dollars or gallons for gas). Positions are interpolated between the fixes.
+  // Across a GPS gap the total still counts, but no mark is placed: there's no route to put it on.
+  function marksAlong(pts, step, amount) {
+    const out = [];
+    for (const [a, b] of tripRanges(pts)) {
+      let total = 0, brg = null;
+      for (let i = a + 1; i <= b; i++) {
+        const p = pts[i - 1], q = pts[i];
+        const add = amount(p, q);
+        if (!(add > 0)) continue;
+        // Heading from the route itself (GPS bearing wanders when slow), kept through stops.
+        if (haversine(p.lat, p.lon, q.lat, q.lon) > 3) brg = bearingOf(p, q);
+        let left = add;
+        for (;;) {
+          const next = (Math.floor(total / step + 1e-9) + 1) * step;
+          if (total + left < next - 1e-9) break;
+          left -= next - total;
+          total = next;
+          const f = 1 - left / add;
+          if (q.t - p.t <= 5000) out.push({ lat: p.lat + (q.lat - p.lat) * f, lon: p.lon + (q.lon - p.lon) * f, brg: brg ?? 0, n: Math.round(next / step), i });
+        }
+        total += left;
+      }
+    }
+    return out;
+  }
+
+  // A mark every minute of driving time.
+  const minuteMarks = (pts) => marksAlong(pts, 60000, (p, q) => q.t - p.t);
+
+  // A mark every so much gas, from the engine rows attached to the fixes (p.eng). With a price, in
+  // cents: the smallest of 5, 10, 25, 50 or 100¢ that leaves at most 60 marks; without one, gallons.
+  // Returns { marks, step, unit: "$" | "gal" }, or null without fuel readings.
+  function gasMarks(pts, price = null) {
+    const amount = (p, q) => {
+      const dt = (q.t - p.t) / 1000;
+      if (dt <= 0 || dt > 5 || q.eng?.fuelGs == null) return 0;
+      const gal = (q.eng.fuelGs * dt) / 745 / 3.78541;
+      return price != null ? gal * price : gal;
+    };
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) if (pts[i].trip === pts[i - 1].trip) total += amount(pts[i - 1], pts[i]);
+    if (!(total > 0)) return null;
+    const steps = price != null ? [0.05, 0.1, 0.25, 0.5, 1] : [0.01, 0.025, 0.05, 0.1, 0.25];
+    const step = steps.find((s) => total / s <= 60) ?? steps[steps.length - 1];
+    return { marks: marksAlong(pts, step, amount), step, unit: price != null ? "$" : "gal" };
+  }
+
   // ---------- rendering ----------
 
   function render(el, pts, state, onPick) {
@@ -284,6 +343,20 @@ const Route = (() => {
 
     const layer = L.layerGroup().addTo(map);
     const marks = L.layerGroup().addTo(map);
+    const ticks = L.layerGroup().addTo(map);
+    let tickLabels = [];
+    // Tick labels that would overlap one placed earlier stay hidden until zooming in separates them.
+    function declutterTicks() {
+      const placed = [];
+      for (const mk of tickLabels) {
+        const el = mk.getElement();
+        if (!el) continue;
+        el.style.visibility = "";
+        const r = el.firstChild.getBoundingClientRect();
+        if (placed.some((q) => r.left < q.right + 3 && r.right + 3 > q.left && r.top < q.bottom + 1 && r.bottom + 1 > q.top)) el.style.visibility = "hidden";
+        else placed.push(r);
+      }
+    }
     let focus = null; // trip index to bring forward, or null for all
     draw(layer, marks, pts, state, focus);
     // Room for the controls over the top of the map and the legend along the bottom.
@@ -322,7 +395,7 @@ const Route = (() => {
         if (hit) el.style.visibility = "hidden"; else placed.push(r);
       });
     }
-    map.on("zoomend resize", declutter);
+    map.on("zoomend resize", () => { declutter(); declutterTicks(); });
     return {
       // Labels pinned to the map at notable moments: [{ i: point index, text, dir? }]. Hover or tap shows that moment.
       moments(list) {
@@ -335,6 +408,28 @@ const Route = (() => {
           mk.on("mouseover click", () => onPick(m.i, "moment"));
         }
         declutter();
+      },
+      // Ruler ticks across the route: [{ lat, lon, brg, major, label }]. A major tick is longer and
+      // carries a small label beside it, on the left of the direction of travel.
+      ticks(list) {
+        ticks.clearLayers();
+        tickLabels = [];
+        for (const t of list) {
+          const len = t.major ? 16 : 9;
+          L.marker([t.lat, t.lon], {
+            icon: L.divIcon({ className: "tick" + (t.major ? " major" : ""), iconSize: [len, len], html: `<i style="height:${len}px;transform:rotate(${(t.brg + 90).toFixed(0)}deg)"></i>` }),
+            interactive: false, keyboard: false, pane: "markerPane",
+          }).addTo(ticks);
+          if (t.major && t.label) {
+            const a = ((t.brg - 90) * Math.PI) / 180, d = 15; // to the left of travel
+            const dx = Math.sin(a) * d, dy = -Math.cos(a) * d;
+            tickLabels.push(L.marker([t.lat, t.lon], {
+              icon: L.divIcon({ className: "tick-label", iconSize: [0, 0], iconAnchor: [-dx, -dy], html: `<span>${t.label}</span>` }),
+              interactive: false, keyboard: false,
+            }).addTo(ticks));
+          }
+        }
+        declutterTicks();
       },
       showMoments(on) { if (on) { moments.addTo(map); declutter(); } else moments.remove(); },
       map,
@@ -423,5 +518,5 @@ const Route = (() => {
       (m.note ? `<p class="hint">${m.note}</p>` : "");
   }
 
-  return { fromChunks, rawChunks, merge, segmentMeters, haversine, fromRaw, render, tripRanges, legendHtml, summary, segmentColors, METRICS, WIDTHS, VIEWS, G, MPH };
+  return { fromChunks, rawChunks, merge, segmentMeters, haversine, fromRaw, render, tripRanges, legendHtml, summary, segmentColors, minuteMarks, gasMarks, METRICS, WIDTHS, VIEWS, G, MPH };
 })();

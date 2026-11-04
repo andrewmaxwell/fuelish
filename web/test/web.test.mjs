@@ -287,3 +287,27 @@ test("cost view: a thirsty stretch reads above usual for its speed, coasting bel
   Engine.relCost(Engine.smoothMpg(slow));
   assert.equal(slow[1].rel, null);
 });
+
+test("minute marks fall where each minute ends, spaced by speed; gas marks by fuel used", () => {
+  const { Route } = load("route.js", "engine.js");
+  // 3 min heading east: the first at 10 m/s, then 30 m/s. One fix a second.
+  const pts = [];
+  let lon = -90;
+  for (let i = 0; i <= 180; i++) {
+    const v = i <= 60 ? 10 : 30;
+    if (i) lon += v / (111320 * Math.cos((38 * Math.PI) / 180));
+    pts.push({ t: i * 1000, lat: 38, lon, v, eng: { fuelGs: i <= 60 ? 1 : 3 } });
+  }
+  const m = Route.minuteMarks(pts);
+  assert.equal(m.map((x) => x.n).join(), "1,2,3");
+  const gap = (a, b) => Route.haversine(a.lat, a.lon, b.lat, b.lon);
+  assert.ok(Math.abs(gap(pts[0], m[0]) - 600) < 3, String(gap(pts[0], m[0]))); // within the test's rough degrees-to-meters
+  assert.ok(Math.abs(gap(m[0], m[1]) - 1800) < 5);
+  assert.ok(Math.abs(m[0].brg - 90) < 1); // heading east, from the route itself
+  // Gas: 60 g, then 360 g over two minutes: 420 g ≈ 0.149 gal ≈ $0.45 at $3: 5¢ marks, 8 of them.
+  const g = Route.gasMarks(pts, 3);
+  assert.equal(g.unit, "$");
+  assert.equal(g.step, 0.05);
+  assert.equal(g.marks.length, 8);
+  assert.equal(Route.gasMarks(pts.map((p) => ({ ...p, eng: null })), 3), null);
+});

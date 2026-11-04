@@ -27,7 +27,9 @@ docs/      data-format.md: every record type, clock and file
 4. The web page lists trips by day (route outline, distance, moving time, top speed). Each trip opens on a full-size
    map with four views over it: **Cost** (with the OBD adapter, the default: fuel per mile over ~20 s against the
    drive's own average at that speed, so climbs, ramps and stop-and-go show red and coasting blue), **Speed**,
-   **Smooth** (braking red, speeding up blue) and **Pedal**. Notable moments are labeled on the map (hardest brake and
+   **Smooth** (braking red, speeding up blue) and **Pedal**. Small ticks cross the route every minute (wide apart
+   on the highway, bunched in town, stacked at stops) or, with engine data, every 5–100¢ of gas (wide where the car
+   sips, bunched on climbs and hard starts); every fifth is labeled. Notable moments are labeled on the map (hardest brake and
    acceleration, sharpest turn, top speed, longest stop, thirstiest minute). Below the map is a short speed
    timeline; beside it the headline numbers (miles, moving time, mpg, cost), highway vs. town economy, wasted fuel,
    a one-line car health summary and a friction circle (forward vs. sideways g from GPS speed and heading).

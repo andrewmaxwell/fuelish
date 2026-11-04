@@ -1120,8 +1120,15 @@ const money = (d) => (d < 10 ? "$" + d.toFixed(2) : "$" + Math.round(d).toLocale
 
 function drawRoute(pts, sm, { withDay = false } = {}) {
   // `view` is the saved choice; none saved yet means Cost on drives with engine data, else Speed.
-  let state = { view: null, labels: true };
-  try { const saved = JSON.parse(localStorage.getItem(VIEW_KEY) || "{}"); state = { view: Route.VIEWS[saved.view] ? saved.view : null, labels: saved.labels ?? true }; } catch {}
+  // `marks`: ticks across the route every minute ("min"), every so much gas ("gas"), or none ("off").
+  let state = { view: null, labels: true, marks: "min" };
+  try {
+    const saved = JSON.parse(localStorage.getItem(VIEW_KEY) || "{}");
+    state = { view: Route.VIEWS[saved.view] ? saved.view : null, labels: saved.labels ?? true, marks: ["min", "gas", "off"].includes(saved.marks) ? saved.marks : "min" };
+  } catch {}
+  // Marks are for one drive: on a day or a week map they'd pile up into noise.
+  const oneTrip = Route.tripRanges(pts).length === 1;
+  let price = null;
 
   // What's drawn: the chosen view, except engine views on a drive without engine data.
   let hasEngine = false;
@@ -1129,7 +1136,8 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
   const effective = () => {
     const want = state.view ?? (hasEngine ? "cost" : "speed");
     const view = Route.VIEWS[want].engine && !hasEngine ? "speed" : want;
-    return Object.assign(shownState, { view, color: Route.VIEWS[view].color, width: "none", labels: state.labels });
+    const marks = !oneTrip ? "off" : state.marks === "gas" && !hasEngine ? "min" : state.marks;
+    return Object.assign(shownState, { view, color: Route.VIEWS[view].color, width: "none", labels: state.labels, marks });
   };
   effective();
 
@@ -1142,7 +1150,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
     const p = pts[i];
     readout.hidden = false;
     readout.innerHTML = `
-      <div class="readout-time">${new Date(p.t).toLocaleString([], { weekday: withDay ? "short" : undefined, hour: "numeric", minute: "2-digit", second: "2-digit" })}</div>
+      <div class="readout-time">${new Date(p.t).toLocaleString([], { weekday: withDay ? "short" : undefined, hour: "numeric", minute: "2-digit", second: "2-digit" })}${oneTrip ? ` · ${Math.floor((p.t - pts[0].t) / 60000)} min in` : ""}</div>
       <div class="readout-speed">${fmt(p.v != null ? p.v * Route.MPH : null, 0, "")}<small> mph</small></div>
       <dl>
         <dt>${p.a != null && p.a < 0 ? "Braking" : "Speeding up"}</dt><dd>${fmt(p.a != null ? Math.abs(p.a) / Route.G : null, 2, " g")}</dd>
@@ -1165,8 +1173,37 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
     ? `<div><span>Braking</span><b>${Math.abs(pk.brake).toFixed(2)} g</b></div><div><span>Speeding up</span><b>${pk.accel.toFixed(2)} g</b></div><div><span>Turning</span><b>${pk.corner.toFixed(2)} g</b></div>`
     : `<p class="muted">Not enough moving GPS fixes here.</p>`;
 
-  const legend = () => { document.getElementById("rt-legend").innerHTML = Route.legendHtml(shownState, pts); };
-  const recolor = () => { effective(); view.redraw(); legend(); };
+  // Ticks: a minute apart (wide on the highway, bunched in town, stacked at stops) or a few cents
+  // of gas apart (wide where the car sips, bunched on climbs and hard starts). Every fifth is longer
+  // and labeled.
+  let gasStep = null;
+  const drawMarks = () => {
+    gasStep = null;
+    if (shownState.marks === "min") {
+      view.ticks(Route.minuteMarks(pts).map((m) => ({ ...m, major: m.n % 5 === 0, label: `${m.n}` })));
+    } else if (shownState.marks === "gas") {
+      const g = Route.gasMarks(pts, price);
+      gasStep = g && { step: g.step, unit: g.unit };
+      const lab = (v) => (g.unit === "$" ? (v < 1 ? `${Math.round(v * 100)}¢` : `$${Number.isInteger(+v.toFixed(2)) ? Math.round(v) : v.toFixed(2)}`) : `${+v.toFixed(3)} gal`);
+      view.ticks(g ? g.marks.map((m) => ({ ...m, major: m.n % 5 === 0, label: lab(m.n * g.step) })) : []);
+    } else view.ticks([]);
+  };
+  const stepName = (g) => (g.unit === "$" ? (g.step < 1 ? `${Math.round(g.step * 100)}¢` : "$1") : `${g.step} gal`);
+  const marksSwitch = () => {
+    if (!oneTrip) return "";
+    const every = shownState.marks === "min" ? "Every minute" : gasStep ? `Every ${stepName(gasStep)} of gas` : "";
+    const opts = [["min", "Minutes"], ...(hasEngine ? [["gas", "Gas"]] : []), ["off", "Off"]];
+    return `<div class="marks-switch">${every ? `<span class="marks-key"><i></i>${esc(every)}</span>` : ""}<div class="seg marks" role="group" aria-label="Marks along the route">${opts.map(([k, l]) =>
+      `<button type="button" data-marks="${k}" aria-pressed="${shownState.marks === k}">${l}</button>`).join("")}</div></div>`;
+  };
+  const legend = () => { document.getElementById("rt-legend").innerHTML = Route.legendHtml(shownState, pts) + marksSwitch(); };
+  document.getElementById("rt-legend").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-marks]");
+    if (!b) return;
+    state.marks = b.dataset.marks;
+    effective(); drawMarks(); legend(); save();
+  });
+  const recolor = () => { effective(); view.redraw(); drawMarks(); legend(); };
   // Notable moments, labeled on the map (again with engine ones once that data is in).
   view.moments(momentsFor(pts, sm));
   const labels = document.getElementById("moments-toggle");
@@ -1198,6 +1235,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
     if (!rows.length || !document.getElementById("map")) return;
     Engine.attach(pts, Engine.relCost(Engine.smoothMpg(rows)));
     hasEngine = true;
+    price = gas?.price ?? null;
     document.querySelectorAll("[data-engine]").forEach((b) => { b.hidden = false; });
     recolor();
     syncButtons();
