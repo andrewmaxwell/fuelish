@@ -67,7 +67,34 @@ class RecordingStore(val root: File) {
     fun markMetaUploaded(id: String, hash: String) = File(dir(id), META_UPLOADED).writeText(hash)
 
     fun serverComplete(id: String) = File(dir(id), SERVER_COMPLETE).exists()
-    fun markServerComplete(id: String) = File(dir(id), SERVER_COMPLETE).writeText("")
+    fun markServerComplete(id: String) {
+        File(dir(id), SERVER_COMPLETE).writeText("")
+        File(dir(id), SERVER_MISSING).delete()
+    }
+
+    /** Chunks the server said it lacks that the phone can no longer send (its copy was deleted). */
+    fun serverMissing(id: String): List<Int> =
+        File(dir(id), SERVER_MISSING).takeIf { it.exists() }?.readText()?.split(',')?.mapNotNull { it.trim().toIntOrNull() } ?: emptyList()
+    fun markServerMissing(id: String, seqs: List<Int>) {
+        if (seqs.isEmpty()) File(dir(id), SERVER_MISSING).delete() else File(dir(id), SERVER_MISSING).writeText(seqs.joinToString(","))
+    }
+
+    /**
+     * Forgets the upload acknowledgement of a chunk the server turned out not to have, so it's sent
+     * again. Only possible while the phone still has its data; returns whether it did.
+     */
+    fun resend(id: String, seq: Int): Boolean {
+        if (!chunkFile(id, seq).exists()) return false
+        File(dir(id), RecordingWriter.chunkName(seq, ".uploaded")).delete()
+        return true
+    }
+
+    /** Finished recordings (not [activeId]) the server hasn't yet confirmed it holds in full. */
+    fun unconfirmed(activeId: String?): List<String> =
+        ids().filter { it != activeId && runCatching { readMeta(it).optString("status") != "recording" && !serverComplete(it) }.getOrDefault(false) }
+
+    /** Recordings with parts missing on the server and gone from the phone: these need a person. */
+    fun needsAttention(): Map<String, List<Int>> = ids().associateWith { serverMissing(it) }.filterValues { it.isNotEmpty() }
 
     /** Raw chunks still being written or left unfinished (by a crash or a writer error), and temp files. */
     fun unfinishedFiles(id: String): List<File> =
@@ -201,6 +228,7 @@ class RecordingStore(val root: File) {
         const val META = "recording.json"
         const val META_UPLOADED = "meta.uploaded"
         const val SERVER_COMPLETE = "server.complete"
+        const val SERVER_MISSING = "server.missing"
         private val CHUNK_META = Regex("""chunk-(\d{6})\.meta\.json""")
         private val RAW_CHUNK = Regex("""chunk-(\d{6})\.ndjson""")
 

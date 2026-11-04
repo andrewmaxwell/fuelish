@@ -34,6 +34,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # The web page's modules (engine math, costs, grouping, CVT events): plain Node, no install.
+      - run: node --test ../web/test/*.test.mjs
       # Migrations first, so the new code never runs against an old schema.
       - run: npx wrangler d1 migrations apply fuelish --remote
       - run: npx wrangler deploy

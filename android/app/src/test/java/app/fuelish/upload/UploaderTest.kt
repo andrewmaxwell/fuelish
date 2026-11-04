@@ -23,6 +23,7 @@ class UploaderTest {
     private val metas = HashMap<String, String>()
     private var failNextChunks = 0
     private var serverLosesChunks = false
+    private val serverDropped = HashSet<String>() // "id/seq" the server pretends it never stored
     private val chunkMetaHeaders = HashMap<String, JSONObject>()
     private var requests = 0
     private val base get() = "http://127.0.0.1:${server.address.port}"
@@ -42,8 +43,9 @@ class UploaderTest {
                 }
                 parts.size == 2 && parts[1] == "verify" -> {
                     val n = JSONObject(metas[parts[0]] ?: "{}").optInt("chunkCount", -1)
-                    val complete = n >= 0 && (0 until n).all { chunks.containsKey(parts[0] + "/" + it) } && !serverLosesChunks
-                    200 to "{\"complete\":$complete}"
+                    val missing = (0 until n).filter { !chunks.containsKey(parts[0] + "/" + it) }
+                    val complete = n >= 0 && missing.isEmpty() && !serverLosesChunks
+                    200 to "{\"complete\":$complete,\"missing\":${missing}}"
                 }
                 parts[0] !in metas -> 404 to "upload recording metadata first"
                 failNextChunks > 0 -> {
@@ -57,6 +59,10 @@ class UploaderTest {
                     if (metaHeader != null) chunkMetaHeaders[key] = JSONObject(String(java.util.Base64.getUrlDecoder().decode(metaHeader)))
                     when {
                         sha != ex.requestHeaders.getFirst("X-Fuelish-Sha256") -> 422 to "sha mismatch"
+                        key in serverDropped -> {
+                            serverDropped -= key // acknowledged, but never stored: lost once
+                            201 to "{}"
+                        }
                         chunks[key] == null -> {
                             chunks[key] = sha
                             201 to "{}"
@@ -253,5 +259,29 @@ class UploaderTest {
         val r = Uploader(store, base, "tok") { n++ >= 3 }.uploadAll()
         assertTrue(r is UploadResult.Retry)
         assertTrue(store.pendingChunks("a").isNotEmpty())
+    }
+
+    @Test
+    fun missingChunkStillOnPhoneIsSentAgain() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 2)
+        serverDropped += "a/1" // acknowledged, then lost by the server
+        val up = Uploader(store, base, "tok") // keeps local data
+        assertTrue(up.uploadAll() is UploadResult.Retry) // verify found the gap and re-queued seq 1
+        assertEquals(listOf(1), store.pendingChunks("a"))
+        assertEquals(UploadResult.Done(1), up.uploadAll())
+        assertTrue(store.serverComplete("a"))
+    }
+
+    @Test
+    fun missingChunkNoLongerOnPhoneNeedsAttention() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 2)
+        serverDropped += "a/0"
+        val r = Uploader(store, base, "tok", deleteAfterUpload = true).uploadAll()
+        assertTrue("got $r", r is UploadResult.Incomplete)
+        assertEquals(mapOf("a" to listOf(0)), (r as UploadResult.Incomplete).missing)
+        assertTrue(store.dir("a").exists()) // never deleted
+        assertEquals(listOf("a"), store.unconfirmed(null))
     }
 }

@@ -15,6 +15,19 @@ const Plot = (() => {
     const p = 10 ** Math.floor(Math.log10(x)), f = x / p;
     return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
   }
+  // One resize observer per chart host: drawing again into the same host releases the old one, and
+  // `release(host)` does so on its own (e.g. when a page is left).
+  const observers = new WeakMap();
+  function release(host) {
+    observers.get(host)?.disconnect();
+    observers.delete(host);
+  }
+  function watch(host, redraw, width) {
+    release(host);
+    const ro = new ResizeObserver(() => { if (Math.abs((host.clientWidth || 0) - width()) > 1) redraw(); });
+    ro.observe(host);
+    observers.set(host, ro);
+  }
   const escHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
   /**
@@ -26,6 +39,7 @@ const Plot = (() => {
    * Hover shows every series' value at the nearest x.
    */
   function lines(host, series, { xFmt = (v) => v.toFixed(0), yFmt = (v) => v.toFixed(1), xUnit = "", yUnit = "", height = 240, yMin, yMax, aria = "Chart", marks = [], bands = [] } = {}) {
+    release(host);
     host.replaceChildren();
     const all = series.flatMap((s) => s.pts.filter((p) => p[1] != null && Number.isFinite(p[1])));
     if (!all.length) { host.innerHTML = `<p class="hint">Not enough data yet.</p>`; return; }
@@ -113,8 +127,7 @@ const Plot = (() => {
     });
     svg.addEventListener("pointerleave", () => { cross.setAttribute("x1", -10); cross.setAttribute("x2", -10); dots.forEach((d) => d.setAttribute("cx", -10)); tip.hidden = true; });
     draw();
-    const ro = new ResizeObserver(() => { if (Math.abs((host.clientWidth || 0) - W) > 1) draw(); });
-    ro.observe(host);
+    watch(host, draw, () => W);
     return { redraw: draw };
   }
 
@@ -124,6 +137,7 @@ const Plot = (() => {
    * Hover reads the cell out with `tipText(cell)`.
    */
   function heatmap(host, cells, { dx, dy, xLo, xHi, yLo, yHi, vLo, vHi, xFmt = (v) => v.toFixed(0), yFmt = (v) => v.toFixed(0), xUnit = "", yUnit = "", height = 300, aria = "Heatmap", tipText = () => "", legend = "" } = {}) {
+    release(host);
     host.replaceChildren();
     if (!cells.length) { host.innerHTML = `<p class="hint">Not enough data yet.</p>`; return; }
     const wrap = document.createElement("div");
@@ -178,8 +192,10 @@ const Plot = (() => {
       }
       const cw = Math.max(1, X(xLo + dx) - X(xLo)), ch = Math.max(1, Y(yLo) - Y(yLo + dy));
       for (const c of cells) {
-        const f = Math.min(1, Math.max(0, (c.v - vLo) / (vHi - vLo || 1)));
-        g.fillStyle = `rgba(${ramp(f)}, ${0.25 + 0.75 * Math.sqrt(c.n / nMax)})`;
+        const alpha = 0.25 + 0.75 * Math.sqrt(c.n / nMax);
+        // A cell without a value (v null) is gray: there's time there, but nothing to color it by.
+        if (c.v == null) g.fillStyle = `rgba(137, 135, 129, ${alpha})`;
+        else g.fillStyle = `rgba(${ramp(Math.min(1, Math.max(0, (c.v - vLo) / (vHi - vLo || 1))))}, ${alpha})`;
         g.fillRect(X(c.x), Y(c.y + dy), cw + 0.5, ch + 0.5);
       }
     }
@@ -195,8 +211,7 @@ const Plot = (() => {
     });
     cv.addEventListener("pointerleave", () => { tip.hidden = true; });
     draw();
-    const ro = new ResizeObserver(() => { if (Math.abs((host.clientWidth || 0) - W) > 1) draw(); });
-    ro.observe(host);
+    watch(host, draw, () => W);
   }
   // Perceptual-ish ramp: blue (low) → teal → yellow → orange → red (high). Readable on both themes.
   const RAMP = ["59,130,246", "20,184,166", "234,179,8", "249,115,22", "220,38,38"];
@@ -213,5 +228,5 @@ const Plot = (() => {
     return sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo);
   }
 
-  return { lines, heatmap, niceStep, quantile };
+  return { lines, heatmap, release, niceStep, quantile };
 })();

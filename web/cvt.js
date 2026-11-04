@@ -6,7 +6,8 @@
 // slip or wear.
 //
 // The pedal reading never goes to zero (the Civic reads about 20% foot-off), so pedal is shown as
-// points above its resting value: 0 is foot off.
+// points above its resting value: 0 is foot off. The resting value is inferred from the data (its
+// 2nd percentile), and a second with no pedal reading is unknown, never foot-off.
 
 const Cvt = (() => {
   const MPH = 0.621371;
@@ -69,16 +70,21 @@ const Cvt = (() => {
         const before = byT.slice(i - 3, i).filter((x) => x.pedal != null && r.t - x.t <= 3500);
         if (before.length < 2 || Math.max(...before.map((x) => x.pedal)) - Math.min(...before.map((x) => x.pedal)) > 3) continue;
         const p0 = before.at(-1).pedal;
-        const jump = byT.slice(i, i + 3).find((x) => x.pedal != null && x.t - r.t <= 1500 && x.pedal - p0 >= 15);
-        if (!jump) continue;
-        const t0 = r.t, rpm0 = before.at(-1).rpm, v0 = before.at(-1).speed;
-        if (rpm0 == null || v0 == null) continue;
+        const j = byT.slice(i, i + 3).findIndex((x) => x.pedal != null && x.t - r.t <= 1500 && x.pedal - p0 >= 15);
+        if (j < 0) continue;
+        // Time zero is the first second that shows the press; the baseline is the second before it,
+        // which must be at most 1.5 s earlier (no gap in between).
+        const jump = byT[i + j], base = byT[i + j - 1];
+        if (!base || jump.t - base.t > 1500 || base.rpm == null || base.speed == null) continue;
+        const t0 = jump.t, rpm0 = base.rpm, v0 = base.speed;
         const trace = [];
-        for (let k = i - 3; k < Math.min(byT.length, i + 12); k++) {
+        for (let k = i - 3; k < Math.min(byT.length, i + j + 12); k++) {
           const x = byT[k], dt = Math.round((x.t - t0) / 1000);
-          if (dt < -2 || dt > 10 || x.rpm == null || x.speed == null) continue;
+          if (dt < -2 || dt > 10 || x.rpm == null || x.speed == null || x === base) continue;
           trace.push({ dt, drpm: x.rpm - rpm0, dmph: (x.speed - v0) * MPH });
         }
+        trace.push({ dt: Math.round((base.t - t0) / 1000), drpm: 0, dmph: 0 });
+        trace.sort((u, v) => u.dt - v.dt);
         ev.push({ trip: rec.id, t: t0, pedal: Math.max(0, jump.pedal - rest), from: Math.max(0, p0 - rest), mph: v0 * MPH, rpm0, trace });
         lastAt = t0;
       }
@@ -100,13 +106,15 @@ const Cvt = (() => {
     };
     const fig = (v, l) => `<div class="fig"><b>${v}</b><span>${esc(l)}</span></div>`;
     const rpmFmt = (v) => (v == null ? "–" : Math.round(v).toLocaleString());
+    // A cruising figure needs 20+ steady, light-to-moderate pedal seconds within 2 mph; say so when it's missing.
+    const cruiseFig = (mph, label) => { const v = cruiseAt(mph); return fig(rpmFmt(v), v == null ? `${label}: not enough steady driving near ${mph} mph yet` : label); };
     const hours = secs.length / 3600;
 
     host.innerHTML = `
       <div class="figs">
-        ${fig(rpmFmt(cruiseAt(30)), "rpm cruising at 30 mph")}
-        ${fig(rpmFmt(cruiseAt(45)), "rpm at 45 mph")}
-        ${fig(rpmFmt(cruiseAt(65)), "rpm at 65 mph")}
+        ${cruiseFig(30, "rpm cruising at 30 mph")}
+        ${cruiseFig(45, "rpm at 45 mph")}
+        ${cruiseFig(65, "rpm at 65 mph")}
         ${fig(`${rpmFmt(q(moving.map((s) => s.rpm), 0.05))}–${rpmFmt(q(moving.map((s) => s.rpm), 0.95))}`, "rpm range while moving (most of the time)")}
         ${fig(hours < 1 ? `${Math.round(hours * 60)} min` : `${hours.toFixed(1)} h`, `of engine data, ${trips.length} drive${trips.length === 1 ? "" : "s"}`)}
       </div>
@@ -160,13 +168,14 @@ const Cvt = (() => {
       c.n++;
       if (s.pedal != null) c.ps.push(s.pedal);
     }
-    const cellList = [...cells.values()].map((c) => ({ ...c, v: c.ps.length ? q(c.ps, 0.5) : 0 }));
+    // Seconds without a pedal reading are drawn gray, not as foot-off.
+    const cellList = [...cells.values()].map((c) => ({ ...c, v: c.ps.length ? q(c.ps, 0.5) : null }));
     const pedalHi = Math.max(10, q(secs.filter((s) => s.pedal != null).map((s) => s.pedal), 0.98) ?? 30);
     Plot.heatmap(host.querySelector("#cvt-heat"), cellList, {
       dx: 2, dy: 100, xLo: 0, xHi: maxMph, yLo: 0, yHi: maxRpm, vLo: 0, vHi: pedalHi,
       xUnit: " mph", yUnit: "rpm", yFmt: (v) => (v >= 1000 ? `${v / 1000}k` : String(v)), aria: "Engine rpm against road speed, colored by pedal",
       legend: ["foot off", `pedal +${Math.round(pedalHi)}`],
-      tipText: (c) => `<b>${c.x}–${c.x + 2} mph, ${c.y.toLocaleString()}–${(c.y + 100).toLocaleString()} rpm</b> <span>${c.n < 60 ? `${c.n} s` : `${(c.n / 60).toFixed(1)} min`} · pedal +${c.v.toFixed(0)}</span>`,
+      tipText: (c) => `<b>${c.x}–${c.x + 2} mph, ${c.y.toLocaleString()}–${(c.y + 100).toLocaleString()} rpm</b> <span>${c.n < 60 ? `${c.n} s` : `${(c.n / 60).toFixed(1)} min`} · ${c.v == null ? "no pedal reading" : `pedal +${c.v.toFixed(0)}`}</span>`,
     });
 
     // Revs per mph by speed, per pedal band.
@@ -199,7 +208,7 @@ const Cvt = (() => {
       const rpm = series("drpm"), mph = series("dmph");
       const peak = Math.max(...rpm.map((p) => p[1]));
       const t90 = rpm.find((p) => p[0] >= 0 && p[1] >= 0.9 * peak)?.[0];
-      lede.textContent = `${ev.length} times you pressed the pedal firmly (at least 15 points, from a steady pedal). Revs rise by a median ${Math.round(peak).toLocaleString()} rpm${t90 != null ? `, most of it within ${t90} s` : ""}, while speed keeps building after. Blue: rpm change; orange: speed gained (× 100 to share the axis).`;
+      lede.textContent = `${ev.length} times you pressed the pedal firmly (at least 15 points, from a steady pedal). Revs rise by a median ${Math.round(peak).toLocaleString()} rpm${t90 != null ? `, most of it within ${t90 <= 1 ? "about a second" : `${t90} s`}` : ""}, while speed keeps building after. Blue: rpm change; orange: speed gained (× 100 to share the axis). Time is in whole seconds (the engine summary is one value per second), so anything quicker than a second can't be seen here.`;
       Plot.lines(host.querySelector("#cvt-press"), [
         { label: "RPM change", cls: "s1", pts: rpm.map((p) => [p[0], p[1]]), width: 2.5 },
         { label: "Speed gained × 100 (mph)", cls: "s2", pts: mph.map((p) => [p[0], p[1] * 100]) },

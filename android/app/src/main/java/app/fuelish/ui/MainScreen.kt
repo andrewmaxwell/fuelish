@@ -144,21 +144,39 @@ fun MainScreen(openSettings: () -> Unit) {
         if (st.recording) LiveDetails(st)
 
         Section("Uploads") {
-            val waiting = up.pending > 0
+            // Waiting covers chunks still to send and finished trips the server hasn't confirmed yet
+            // (final details or the completeness check), not just chunk files.
+            val waiting = up.waiting
+            val uploadsOn = cfg.upload.optBoolean("enabled", true)
+            val what = listOfNotNull(
+                if (up.pending > 0) "${up.pending} chunk${if (up.pending == 1) "" else "s"}" else null,
+                if (up.pending == 0 && up.unconfirmed > 0) "${up.unconfirmed} trip${if (up.unconfirmed == 1) "" else "s"} to finish" else null,
+            ).joinToString()
             Text(
                 when {
-                    !waiting -> "Nothing waiting to upload"
-                    !serverOk -> "${up.pending} chunk${if (up.pending == 1) "" else "s"} will upload once the server is set up"
-                    onWifi || cfg.upload.optBoolean("allowCellular") -> "${up.pending} chunk${if (up.pending == 1) "" else "s"} waiting to upload"
-                    else -> "${up.pending} chunk${if (up.pending == 1) "" else "s"} waiting for Wi-Fi"
+                    !waiting -> "Everything is on the server"
+                    !uploadsOn -> "$what recorded on this phone; uploads are turned off"
+                    !serverOk -> "$what will upload once the server is set up"
+                    up.running -> "Uploading $what…"
+                    onWifi || cfg.upload.optBoolean("allowCellular") -> "$what waiting to upload"
+                    else -> "$what waiting for Wi-Fi"
                 },
                 style = MaterialTheme.typography.bodyLarge,
             )
-            if (waiting && serverOk && up.lastResult.isNotEmpty()) {
-                Muted(up.lastResult.replaceFirstChar { it.uppercase() } + " (" + DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(up.lastAtMs)) + ")")
+            if (up.attention.isNotEmpty()) {
+                Text(
+                    "The server is missing parts of ${up.attention.size} trip${if (up.attention.size == 1) "" else "s"} that this phone no longer has: " +
+                        up.attention.entries.joinToString("; ") { (id, seqs) -> "$id (part${if (seqs.size == 1) "" else "s"} ${seqs.joinToString(", ")})" } +
+                        ". Those parts can't be recovered; the rest of each trip stays on this phone.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
-            Muted("On this phone: ${mb(storage)}. Deleted once uploaded.")
-            if (waiting && serverOk) {
+            if (up.lastResult.isNotEmpty()) {
+                Muted("Last upload: " + up.lastResult + " (" + DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(up.lastAtMs)) + ")")
+            }
+            Muted("On this phone: ${mb(storage)}." + if (cfg.upload.optBoolean("deleteAfterUpload", true)) " Deleted once the server confirms it has everything." else " Kept after upload (keep-local-copy is on).")
+            if (waiting && serverOk && uploadsOn) {
                 Spacer(Modifier.height(4.dp))
                 OutlinedButton(onClick = { UploadWorker.enqueue(ctx, cellular = true) }) {
                     Text(if (onWifi) "Upload now" else "Upload now over mobile data")

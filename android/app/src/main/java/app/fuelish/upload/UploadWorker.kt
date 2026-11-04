@@ -12,6 +12,7 @@ import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
 import app.fuelish.Prefs
+import app.fuelish.RecorderService
 import app.fuelish.RecorderState
 import java.util.concurrent.TimeUnit
 
@@ -21,22 +22,27 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params)
         if (!cfg.upload.optBoolean("enabled", true)) return Result.success()
         val store = Prefs.store(applicationContext)
         val up = RecorderState.upload
-        up.value = up.value.copy(running = true, pending = store.pendingChunkCount())
+        up.value = up.value.copy(running = true, pending = store.pendingChunkCount(), unconfirmed = store.unconfirmed(RecorderService.activeId).size)
         var total = 0
         var result: UploadResult
         // Loop so chunks that close while we upload are picked up in the same run.
         do {
             result = Uploader(store, cfg.serverUrl, cfg.deviceToken, cfg.upload.optBoolean("deleteAfterUpload", true)) { isStopped }.uploadAll()
             if (result is UploadResult.Done) total += result.chunks
+            if (result is UploadResult.Incomplete) total += result.chunks
         } while (result is UploadResult.Done && result.chunks > 0 && !isStopped)
         val text = when (result) {
             is UploadResult.Done -> "ok ($total chunks)"
+            is UploadResult.Incomplete -> "the server is missing parts of ${result.missing.size} recording${if (result.missing.size == 1) "" else "s"} this phone no longer has"
             is UploadResult.Retry -> "will retry: ${result.message}"
             is UploadResult.Fatal -> "failed: ${result.message}"
         }
-        up.value = UploadStatus(running = false, lastResult = text, lastAtMs = System.currentTimeMillis(), pending = store.pendingChunkCount())
+        up.value = UploadStatus(
+            running = false, lastResult = text, lastAtMs = System.currentTimeMillis(), pending = store.pendingChunkCount(),
+            unconfirmed = store.unconfirmed(RecorderService.activeId).size, attention = store.needsAttention(),
+        )
         return when (result) {
-            is UploadResult.Done -> Result.success()
+            is UploadResult.Done, is UploadResult.Incomplete -> Result.success()
             is UploadResult.Retry -> Result.retry()
             is UploadResult.Fatal -> Result.failure()
         }

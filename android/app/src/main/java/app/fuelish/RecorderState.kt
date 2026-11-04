@@ -27,7 +27,21 @@ data class RecorderStatus(
     val writerError: String = "",
 )
 
-data class UploadStatus(val running: Boolean = false, val lastResult: String = "", val lastAtMs: Long = 0, val pending: Int = 0)
+/**
+ * [pending]: finished chunks not yet acknowledged. [unconfirmed]: finished recordings the server
+ * hasn't confirmed in full (metadata or verification still to go). [attention]: recordings with
+ * parts the server lacks and the phone no longer has: id -> missing chunk numbers.
+ */
+data class UploadStatus(
+    val running: Boolean = false,
+    val lastResult: String = "",
+    val lastAtMs: Long = 0,
+    val pending: Int = 0,
+    val unconfirmed: Int = 0,
+    val attention: Map<String, List<Int>> = emptyMap(),
+) {
+    val waiting get() = pending > 0 || unconfirmed > 0
+}
 
 /** Process-wide state shared by the service, the upload worker and the UI. */
 object RecorderState {

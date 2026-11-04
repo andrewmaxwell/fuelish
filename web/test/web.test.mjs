@@ -140,3 +140,61 @@ test("cvt: pedal presses are found and measured from a steady pedal", () => {
   assert.equal(ev.length, 1);
   assert.ok(Math.max(...ev[0].trace.map((p) => p.drpm)) >= 1900);
 });
+
+test("an adapter outage lowers coverage against the drive's GPS miles", () => {
+  // 100 s at 72 km/h (1.24 mi), but no engine rows at all from 30 s to 92 s.
+  const rows = drive().filter((r) => r.t < 30000 || r.t > 92000);
+  const e = Engine.summary(rows, { tripMiles: 1.2427 });
+  assert.ok(e.coverage < 0.45, `coverage ${e.coverage}`);
+  assert.equal(e.extrapolated, true);
+  const full = Engine.summary(drive());
+  assert.ok(Math.abs(e.galTrip - full.gal) / full.gal < 0.08, `${e.galTrip} vs ${full.gal}`);
+  assert.ok(Math.abs(e.mpg - full.mpg) / full.mpg < 0.05);
+});
+
+test("seconds with fuel but no speed don't drag mpg down", () => {
+  const full = Engine.summary(drive());
+  const rows = drive().map((r) => (r.t > 50000 ? { ...r, speed: null } : r));
+  const e = Engine.summary(rows, { tripMiles: full.miles });
+  assert.ok(Math.abs(e.mpg - full.mpg) / full.mpg < 0.05, `${e.mpg} vs ${full.mpg}`);
+  assert.ok(e.coverage < 0.6);
+});
+
+test("extrapolated fuel is flagged as an estimate in the cost", () => {
+  const c = all.Costs.trip({ minutes: 2, miles: 1.24, gal: 0.035, price: 4, extrapolated: true });
+  assert.equal(c.estimated, true);
+  assert.match(c.items[0].note, /extrapolated/);
+});
+
+test("a cold start without a comparable warm baseline is unknown, not zero", () => {
+  const cold = { r: { id: "c" }, rows: Array.from({ length: 60 }, (_, i) => ({ t: i * 1000, coolant: i < 50 ? 20 + i : 85, speed: 40, rpm: 1500, fuelGs: 1 })) };
+  const warmFew = { r: { id: "w" }, rows: [{ t: 0, coolant: 85, speed: 40, rpm: 1500, fuelGs: 0.8 }, { t: 1000, coolant: 85, speed: 40, rpm: 1500, fuelGs: 0.8 }] };
+  const res = all.Costs.coldStarts([cold, warmFew]);
+  assert.equal(res.length, 0);
+  assert.equal(res.unmatched, 1);
+});
+
+test("unrelated loops from home aren't one leaderboard; a repeated loop is", () => {
+  const home = [38.6, -90.3];
+  const loop = (id, t, bend, far) => rec(id, t, Array.from({ length: 20 }, (_, i) => {
+    const f = Math.sin((i / 19) * Math.PI);
+    return [home[0] + far * f, home[1] + bend * f];
+  }));
+  const { journeys } = all.Repeats.journeys([loop("a", 1, 0.01, 0.01), loop("b", 2, -0.2, 0.3), loop("c", 3, 0.01, 0.01)]);
+  assert.equal(journeys.length, 1);
+  assert.deepEqual([...journeys[0].trips.map((r) => r.id)], ["a", "c"]);
+  assert.equal(journeys[0].routes[0].n, "A");
+});
+
+test("cvt: a press is timed from the second that shows it", () => {
+  const rows = [];
+  for (let i = 0; i < 40; i++) {
+    const pressed = i >= 10;
+    rows.push({ t: i * 1000, speed: 50 + (pressed ? (i - 10) * 2 : 0), rpm: pressed ? 2500 : 1500, pedal: pressed ? 50 : 25 });
+  }
+  const trips = [{ r: { id: "x" }, rows }];
+  const ev = all.Cvt.presses(trips, all.Cvt.seconds(trips).rest);
+  assert.equal(ev[0].t, 10000);
+  assert.equal(ev[0].trace.find((p) => p.dt === 0).drpm, 1000);
+  assert.equal(ev[0].trace.find((p) => p.dt === -1).drpm, 0);
+});

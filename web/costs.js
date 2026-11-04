@@ -2,13 +2,15 @@
 // value, and the carbon it emits. Every assumption is editable on the Costs page and saved on the
 // server (prefs "costs"), so they're the same in any browser.
 //
-// Per trip:   fuel     gallons (measured, see Engine.summary) × that week's regional gas price
+// Per trip:   fuel     gallons (from the engine: car-reported or an airflow estimate, see
+//                      Engine.summary) × that week's regional average gas price
 //             time     door-to-door minutes × your value of time
 //             wear     miles × maintenance, repairs and tires per mile
 //             value    miles × depreciation per mile (the part of a car's loss of value driving causes)
 //             carbon   gallons × kg CO2 per gallon × social cost of carbon
 //             other    miles × anything else per mile (pay-per-mile insurance, say)
-// "Out of pocket" is fuel + wear + value + other: what the car costs you in money.
+// "Car costs" is fuel + wear + value + other: what the car costs you in money, sooner (gas) or later
+// (repairs, a lower resale price). "All in" adds your time and carbon.
 
 const Costs = (() => {
   const DEFAULTS = {
@@ -36,13 +38,16 @@ const Costs = (() => {
 
   /**
    * Cost of one trip. `gal` may be null (no engine data): fuel is then left out unless `mpgGuess`
-   * (miles per gallon from other drives) is given, in which case it's estimated and marked.
+   * (miles per gallon from other drives) is given, in which case it's guessed and marked.
+   * `fuelSource` ("car" / "airflow") and `extrapolated` (part of `gal` was filled in at the drive's
+   * own mpg) are carried into the note and the `estimated` flag.
    */
-  function trip({ minutes, miles, gal, price, mpgGuess = null }, s = settings) {
-    let fuelGal = gal, estimated = false;
-    if (fuelGal == null && mpgGuess > 0) { fuelGal = miles / mpgGuess; estimated = true; }
+  function trip({ minutes, miles, gal, price, mpgGuess = null, fuelSource = "airflow", extrapolated = false }, s = settings) {
+    let fuelGal = gal, guessed = false;
+    if (fuelGal == null && mpgGuess > 0) { fuelGal = miles / mpgGuess; guessed = true; }
+    const how = guessed ? "guessed at this trip's usual mpg" : `${fuelSource === "car" ? "car-reported" : "airflow estimate"}${extrapolated ? ", partly extrapolated" : ""}`;
     const items = [
-      { key: "fuel", label: "Gas", amount: fuelGal != null && price != null ? fuelGal * price : null, note: fuelGal != null ? `${fmtGal(fuelGal)} gal${price != null ? ` at ${money(price)}` : ""}${estimated ? ", estimated" : ""}` : "no engine data" },
+      { key: "fuel", label: "Gas", amount: fuelGal != null && price != null ? fuelGal * price : null, note: fuelGal != null ? `${fmtGal(fuelGal)} gal (${how})${price != null ? ` at ${money(price)}, regional average` : ""}` : "no engine data" },
       { key: "time", label: "Your time", amount: (minutes / 60) * s.timePerHour, note: `${fmtMin(minutes)} at ${money(s.timePerHour)}/h` },
       { key: "wear", label: "Wear and repairs", amount: miles * s.wearPerMile, note: `${miles.toFixed(1)} mi at ${cents(s.wearPerMile)}/mi` },
       { key: "value", label: "Lost resale value", amount: miles * s.valuePerMile, note: `${cents(s.valuePerMile)}/mi` },
@@ -54,11 +59,12 @@ const Costs = (() => {
     return {
       items,
       total,
-      pocket: sum(["fuel", "wear", "value", "other"]),
+      car: sum(["fuel", "wear", "value", "other"]),
       perMile: miles > 0.05 ? total / miles : null,
       co2Kg: fuelGal != null ? fuelGal * s.co2KgPerGal : null,
       fuelKnown: fuelGal != null && price != null,
-      estimated,
+      guessed,
+      estimated: guessed || extrapolated,
     };
   }
 
@@ -91,9 +97,9 @@ const Costs = (() => {
     if (!host) return;
     const end = r.driveEndWallMs ?? r.endedWallMs ?? r.updatedAtMs;
     const minutes = Math.max(0, (end - r.startedWallMs) / 60000);
-    const c = trip({ minutes, miles: sm.miles, gal: e.galTrip ?? e.gal, price: gas?.price ?? null });
+    const c = trip({ minutes, miles: sm.miles, gal: e.galTrip ?? e.gal, price: gas?.price ?? null, fuelSource: e.fuelSource, extrapolated: e.extrapolated });
     host.hidden = false;
-    host.innerHTML = `<h2>What it cost <span>${money(c.total)} all in · ${money(c.pocket)} out of pocket${c.perMile ? ` · ${money(c.perMile)}/mi` : ""}</span></h2>
+    host.innerHTML = `<h2>What it cost <span>${money(c.total)} all in · ${money(c.car)} car costs${c.perMile ? ` · ${money(c.perMile)}/mi` : ""}</span></h2>
       ${breakdownHtml(c)}
       ${!c.fuelKnown ? `<p class="hint">Gas isn't counted yet: ${gas ? "no fuel readings" : "the gas price hasn't loaded"}.</p>` : ""}
       <p class="hint">Time is door to door. <a href="#/costs">Change what time, wear and carbon are worth →</a></p>`;
@@ -144,29 +150,46 @@ const Costs = (() => {
     return out;
   }
 
-  // Warm-engine fuel flow by 5-mph speed bin (0 = idling), to measure what a cold engine burns extra.
+  // What a cold engine burns beyond the same kind of driving warm. Warm-engine fuel flow is averaged
+  // per bin of 5 mph and accelerating / steady / slowing (0 mph is idling); each cold second is
+  // compared with its bin. A cold start only counts when at least MIN_MATCHED of its warm-up seconds
+  // have a bin backed by 30+ warm seconds: an unknown isn't reported as zero. It's still only a rough
+  // association (same speed and acceleration, not the same road, grade or load).
+  const MIN_MATCHED = 0.8;
   function coldStarts(trips) {
     const base = new Map();
-    const bin = (r) => (r.speed === 0 ? 0 : 1 + Math.floor((r.speed * MPH) / 5));
-    for (const { rows } of trips) for (const r of rows) {
+    const bin = (r, prev) => {
+      if (r.speed === 0) return "idle";
+      const a = prev && prev.speed != null && r.t - prev.t <= 2500 ? (r.speed - prev.speed) / 3.6 / ((r.t - prev.t) / 1000) : 0;
+      return `${Math.floor((r.speed * MPH) / 5)}|${a > 0.3 ? "up" : a < -0.3 ? "down" : "steady"}`;
+    };
+    for (const { rows } of trips) for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
       if (r.coolant == null || r.coolant < 80 || r.fuelGs == null || r.speed == null || r.rpm < 300) continue;
-      const b = base.get(bin(r)) || base.set(bin(r), [0, 0]).get(bin(r));
+      const k = bin(r, rows[i - 1]);
+      const b = base.get(k) || base.set(k, [0, 0]).get(k);
       b[0] += r.fuelGs; b[1]++;
     }
     const cold = [];
+    let unmatched = 0;
     for (const t of trips) {
       const rows = t.rows, first = rows.find((r) => r.coolant != null);
       if (!first || first.coolant >= 50) continue;
-      let extraG = 0, warmAt = null;
+      let extraG = 0, warmAt = null, secs = 0, matched = 0;
       for (let i = 1; i < rows.length; i++) {
         const r = rows[i], dt = (r.t - rows[i - 1].t) / 1000;
         if (r.coolant != null && r.coolant >= 80) { warmAt = r.t; break; }
         if (dt <= 0 || dt > 2.5 || r.fuelGs == null || r.speed == null) continue;
-        const b = base.get(bin(r));
-        if (b && b[1] >= 30) extraG += (r.fuelGs - b[0] / b[1]) * dt;
+        secs += dt;
+        const b = base.get(bin(r, rows[i - 1]));
+        if (b && b[1] >= 30) { extraG += (r.fuelGs - b[0] / b[1]) * dt; matched += dt; }
       }
-      if (warmAt) cold.push({ t, extraGal: Math.max(0, galOf(extraG)), warmMs: warmAt - rows[0].t, price: t.gas?.price });
+      if (!warmAt || !secs) continue;
+      if (matched / secs < MIN_MATCHED) { unmatched++; continue; }
+      // Scale the matched part up to the whole warm-up.
+      cold.push({ t, extraGal: Math.max(0, galOf(extraG * (secs / matched))), warmMs: warmAt - rows[0].t, price: t.gas?.price, matched: matched / secs });
     }
+    cold.unmatched = unmatched;
     return cold;
   }
 
@@ -179,19 +202,22 @@ const Costs = (() => {
    * The Costs page. `trips`: [{ r, rows, gas }] (every drive with engine data); `durationOf(r)` gives
    * door-to-door ms; `save(settings)` stores edited assumptions.
    */
-  function page(host, trips, { durationOf, save, otherTrips = 0 }) {
+  function page(host, trips, { durationOf, save, otherTrips = 0, onLeave = () => {} }) {
     const price = trips.findLast((t) => t.gas)?.gas.price ?? null;
-    const summaries = trips.map((t) => ({ t, e: Engine.summary(t.rows, { vehicle: t.r.meta.vehicle }) }));
+    const summaries = trips.map((t) => ({ t, e: Engine.summary(t.rows, { vehicle: t.r.meta.vehicle, ...t.scope }) }));
+    // The answer first; the assumptions behind it fold away under it.
     host.innerHTML = `
-      <section class="ins-sec">
-        <h2>What you count</h2>
-        <p class="lede">Gas comes from the engine and that week's prices. Everything else is an assumption: set it to what it's worth to you. It's saved for every browser.</p>
-        <form class="cost-form" id="cost-form">${FIELDS.map(([k, label, unit, help]) => `
-          <label><span>${esc(label)}</span><span class="cost-input"><input type="number" min="0" step="any" inputmode="decimal" name="${k}" value="${settings[k]}"><small>${esc(unit)}</small></span><small class="hint">${esc(help)}</small></label>`).join("")}
-          <button type="button" class="ghost" id="cost-reset">Back to defaults</button>
-        </form>
-      </section>
       <section class="ins-sec" id="cost-totals"></section>
+      <section class="ins-sec">
+        <details class="cost-assume" id="cost-assume">
+          <summary><h2>What these count</h2><span class="hint" id="cost-assume-line"></span></summary>
+          <p class="lede">Gas is from the engine (an airflow estimate on cars that don't report fuel use) at the regional average price for each week. Everything else is an assumption: set it to what it's worth to you. Changes are saved for every browser.</p>
+          <form class="cost-form" id="cost-form">${FIELDS.map(([k, label, unit, help]) => `
+            <label><span>${esc(label)}</span><span class="cost-input"><input type="number" min="0" step="any" inputmode="decimal" name="${k}" value="${settings[k]}"><small>${esc(unit)}</small></span><small class="hint">${esc(help)}</small></label>`).join("")}
+            <div class="cost-actions"><button type="button" class="ghost" id="cost-reset">Back to defaults</button><span class="save-state" id="cost-save" role="status" aria-live="polite"></span></div>
+          </form>
+        </details>
+      </section>
       <section class="ins-sec">
         <h2>The cheapest steady speed</h2>
         <p class="lede">Cost of each mile of steady driving at each speed, from your own fuel use while holding a speed. Faster costs more gas per mile but less of your time; wear and lost value are the same per mile at any speed.</p>
@@ -212,10 +238,11 @@ const Costs = (() => {
     const idleGph = median(idleRows.map((r) => r.gph));
 
     function render() {
+      host.querySelector("#cost-assume-line").textContent = `Your time ${money(settings.timePerHour)}/h · wear ${cents(settings.wearPerMile)}/mi · lost value ${cents(settings.valuePerMile)}/mi · carbon ${money(settings.carbonPerTonne)}/t. Change…`;
       // Totals over every drive with engine data.
       let sum = { minutes: 0, miles: 0 }, parts = {};
       for (const { t, e } of summaries) {
-        const c = trip({ minutes: durationOf(t.r) / 60000, miles: e.miles, gal: e.galTrip ?? e.gal, price: t.gas?.price ?? price });
+        const c = trip({ minutes: durationOf(t.r) / 60000, miles: e.miles, gal: e.galTrip ?? e.gal, price: t.gas?.price ?? price, fuelSource: e.fuelSource, extrapolated: e.extrapolated });
         sum.minutes += durationOf(t.r) / 60000;
         sum.miles += e.miles;
         for (const i of c.items) {
@@ -224,14 +251,15 @@ const Costs = (() => {
         }
       }
       const items = Object.values(parts);
-      const total = items.reduce((n, i) => n + i.amount, 0), pocket = items.filter((i) => ["fuel", "wear", "value", "other"].includes(i.key)).reduce((n, i) => n + i.amount, 0);
-      const noteFor = { fuel: "measured", time: fmtMin(sum.minutes), wear: `${sum.miles.toFixed(0)} mi`, value: "", carbon: "", other: "" };
+      const total = items.reduce((n, i) => n + i.amount, 0), carCost = items.filter((i) => ["fuel", "wear", "value", "other"].includes(i.key)).reduce((n, i) => n + i.amount, 0);
+      const fromCar = summaries.every(({ e }) => e.fuelSource === "car"), extrap = summaries.filter(({ e }) => e.extrapolated).length;
+      const noteFor = { fuel: `${fromCar ? "car-reported" : "airflow estimate"}${extrap ? `; ${extrap} drive${extrap === 1 ? "" : "s"} partly extrapolated` : ""}; regional average prices`, time: fmtMin(sum.minutes), wear: `${sum.miles.toFixed(0)} mi`, value: "", carbon: "", other: "" };
       items.forEach((i) => (i.note = noteFor[i.key] ?? ""));
       const fig = (v, l) => `<div class="fig"><b>${v}</b><span>${esc(l)}</span></div>`;
       host.querySelector("#cost-totals").innerHTML = `
         <h2>All your drives with engine data</h2>
         <p class="lede">${trips.length} drive${trips.length === 1 ? "" : "s"}${otherTrips ? `; ${otherTrips} without engine data aren't counted` : ""}.</p>
-        <div class="figs">${fig(money(total), "all in")}${fig(money(pocket), "out of pocket")}${fig(sum.miles > 0 ? money(total / sum.miles) : "–", "per mile, all in")}${fig(sum.miles > 0 ? money(pocket / sum.miles) : "–", "per mile, out of pocket")}</div>
+        <div class="figs">${fig(money(total), "all in")}${fig(money(carCost), "car costs: gas, wear, lost value")}${fig(sum.miles > 0 ? money(total / sum.miles) : "–", "per mile, all in")}${fig(sum.miles > 0 ? money(carCost / sum.miles) : "–", "per mile, car costs")}</div>
         ${breakdownHtml({ items })}`;
 
       // Cost per mile by steady speed.
@@ -274,14 +302,31 @@ const Costs = (() => {
         const extra = median(cold.map((x) => x.extraGal)), warm = median(cold.map((x) => x.warmMs));
         const each = extra * (price ?? 0);
         c.innerHTML = `<h2>Cold starts</h2>
-          <p class="lede">From a cold engine, warming up takes about ${fmtMin(warm / 60000)} and burns about ${extra.toFixed(3)} gal more than the same driving warm${price != null ? `: ${cents(each)} each time` : ""} (median of ${cold.length} cold start${cold.length === 1 ? "" : "s"}).
-          Errands chained into one outing pay this once; separate trips hours apart pay it each time.</p>`;
-      } else c.innerHTML = `<h2>Cold starts</h2><p class="lede">No cold starts with coolant readings yet.</p>`;
+          <p class="lede">From a cold engine, warming up takes about ${fmtMin(warm / 60000)} and burns roughly ${extra.toFixed(3)} gal more than driving at the same speeds warm${price != null ? `: about ${cents(each)} each time` : ""} (median of ${cold.length} cold start${cold.length === 1 ? "" : "s"}).
+          Errands chained into one outing pay this once; separate trips hours apart pay it each time.</p>
+          <p class="hint">A rough comparison: warm driving is matched by speed and whether you were speeding up or slowing, not by road, hill or load.${cold.unmatched ? ` ${cold.unmatched} cold start${cold.unmatched === 1 ? "" : "s"} had too little comparable warm driving and ${cold.unmatched === 1 ? "isn't" : "aren't"} counted.` : ""}</p>`;
+      } else c.innerHTML = `<h2>Cold starts</h2><p class="lede">${cold.unmatched ? `${plural(cold.unmatched, "cold start")} recorded, but not enough warm driving at the same speeds to compare against yet.` : "No cold starts with coolant readings yet."}</p>`;
     }
     render();
 
-    const form = host.querySelector("#cost-form");
+    // Saving: the numbers update at once; the save state says whether other browsers will see it.
+    const form = host.querySelector("#cost-form"), stateEl = host.querySelector("#cost-save");
     let timer = 0;
+    const setState = (text, cls = "") => { stateEl.className = `save-state ${cls}`; stateEl.innerHTML = text; };
+    async function persist() {
+      clearTimeout(timer);
+      timer = 0;
+      const value = { ...settings };
+      setState("Saving…");
+      try {
+        await save(value);
+        if (JSON.stringify(value) === JSON.stringify(settings)) setState("Saved", "ok");
+      } catch (e) {
+        if (e.message === "unauthorized") return;
+        setState(`Couldn't save (${esc(e.message)}). These numbers apply here only until it's saved. <button type="button" class="link" id="cost-retry">Try again</button>`, "bad");
+        host.querySelector("#cost-retry").onclick = persist;
+      }
+    }
     form.addEventListener("input", () => {
       const next = { ...settings };
       for (const [k] of FIELDS) {
@@ -290,16 +335,21 @@ const Costs = (() => {
       }
       use(next);
       render();
+      setState("Not saved yet");
       clearTimeout(timer);
-      timer = setTimeout(() => save(settings), 600);
+      timer = setTimeout(persist, 600);
     });
     host.querySelector("#cost-reset").onclick = () => {
       use({});
       for (const [k] of FIELDS) form.elements[k].value = settings[k];
       render();
-      save(settings);
+      persist();
     };
+    // Leaving with an edit still waiting: save it now rather than drop it.
+    onLeave(() => { if (timer) { clearTimeout(timer); timer = 0; save({ ...settings }).catch(() => {}); } });
   }
+
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
   return { DEFAULTS, FIELDS, get, use, trip, perMileAt, breakdownHtml, tripPanel, page, money, cents, steadyBins, galPerMileCurve, coldStarts };
 })();

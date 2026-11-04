@@ -13,6 +13,8 @@ private val CONFLICT = UploadResult.Retry("conflict", 0)
 
 sealed class UploadResult {
     data class Done(val chunks: Int) : UploadResult()
+    /** Everything sendable was sent, but the server lacks chunks the phone no longer has: id -> seqs. */
+    data class Incomplete(val chunks: Int, val missing: Map<String, List<Int>>) : UploadResult()
     /** Bad token or URL: retrying will not help until settings change. */
     data class Fatal(val message: String) : UploadResult()
     /** Network or server trouble: retry later with backoff. */
@@ -75,7 +77,8 @@ class Uploader(
         // A conflict means the server holds different bytes for that seq. Never overwrite;
         // keep the local copy and keep reporting it, without blocking other chunks.
         if (conflicts.isNotEmpty()) return UploadResult.Retry("server has different content for chunks $conflicts", uploaded)
-        return UploadResult.Done(uploaded)
+        val lost = store.needsAttention()
+        return if (lost.isEmpty()) UploadResult.Done(uploaded) else UploadResult.Incomplete(uploaded, lost)
     }
 
     private fun classify(r: Response, what: String): UploadResult? = when (r.code) {
@@ -99,7 +102,9 @@ class Uploader(
     /**
      * Once a finished recording's chunks and final metadata are all acknowledged, asks the server
      * whether it really holds every chunk 0 until chunkCount. Only its yes lets the phone delete
-     * the recording. A missing chunk the phone no longer has is reported, not retried forever.
+     * the recording. A chunk the server lacks is sent again if the phone still has it (returned as a
+     * retry, so it goes out soon); one the phone no longer has is recorded for the UI to show, not
+     * retried forever.
      */
     private fun verifyIfFinished(id: String): UploadResult? {
         if (store.serverComplete(id)) return null
@@ -110,8 +115,14 @@ class Uploader(
         if (r.code == 404) return null // an older server without /verify: keep the local copy
         classify(r, "verify $id")?.let { return it }
         val body = runCatching { org.json.JSONObject(r.body) }.getOrNull() ?: return null
-        if (body.optBoolean("complete")) store.markServerComplete(id)
-        return null
+        if (body.optBoolean("complete")) {
+            store.markServerComplete(id)
+            return null
+        }
+        val missing = body.optJSONArray("missing")?.let { a -> (0 until a.length()).map { a.getInt(it) } } ?: emptyList()
+        val resent = missing.filter { store.resend(id, it) }
+        store.markServerMissing(id, missing - resent.toSet())
+        return if (resent.isNotEmpty()) UploadResult.Retry("server was missing chunks $resent of $id; sending them again", 0) else null
     }
 
     private fun putChunk(id: String, seq: Int): UploadResult? {

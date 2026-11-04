@@ -118,7 +118,12 @@ stop also records when the drive itself ended, before the stop wait: `driveEndWa
   conflicting uploads of one seq can't overwrite each other's bytes; the loser's object is removed.
 - `complete` means every seq 0..chunkCount-1 is present, not just that many chunks. Chunks past a
   final chunkCount are refused.
-- `GET /recordings` is paged, newest first: pass the previous page's `next` as `?before=`.
-- `prefs` (D1): small JSON settings the web page edits (place names, trip-cost assumptions),
-  `GET /prefs`, `PUT /prefs/<key>` with the web token.
+- `GET /recordings` is paged, newest first by (start time, id): pass the previous page's `next`
+  (`"<startMs>:<id>"`) as `?before=`.
+- `prefs` (D1): small JSON settings the web page edits, `GET /prefs`, `PUT /prefs/<key>` with the
+  web token. Only known keys with the right shape are accepted: `places` (a list of
+  `{ lat, lon, name }`, names 1–80 characters) and `costs` (`timePerHour`, `wearPerMile`,
+  `valuePerMile`, `co2KgPerGal`, `carbonPerTonne`, `otherPerMile`, each a number ≥ 0).
+- `POST /recordings/<id>/verify` answers `{ complete, missing }`. The phone re-sends any missing
+  chunk it still has; one it no longer has is kept in `server.missing` and shown on the main screen.
 - Upload is idempotent on `(recording id, seq)` with sha256 verification.

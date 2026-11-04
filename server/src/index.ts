@@ -167,23 +167,31 @@ async function readBounded(req: Request, max: number, what: string): Promise<Arr
   const declared = Number(req.headers.get("Content-Length"));
   if (Number.isFinite(declared) && declared > max) throw new HttpError(413, `${what} too large`);
   if (!req.body) return new ArrayBuffer(0);
+  // With a declared length (the phone always sends one) the body goes straight into one buffer of
+  // that size, so a large chunk is never held twice. Without one, the pieces are joined at the end.
+  const known = Number.isFinite(declared) && declared >= 0 ? declared : null;
+  const out = known != null ? new Uint8Array(known) : null;
   const parts: Uint8Array[] = [];
   let n = 0;
   const reader = req.body.getReader();
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
-    n += value.byteLength;
-    if (n > max) {
+    if (n + value.byteLength > (known ?? max)) {
       await reader.cancel();
-      throw new HttpError(413, `${what} too large`);
+      throw new HttpError(known != null && known <= max ? 400 : 413, known != null && known <= max ? `${what} longer than its Content-Length` : `${what} too large`);
     }
-    parts.push(value);
+    if (out) out.set(value, n); else parts.push(value);
+    n += value.byteLength;
   }
-  const out = new Uint8Array(n);
+  if (out) {
+    if (n !== known) throw new HttpError(400, `${what} shorter than its Content-Length`);
+    return out.buffer;
+  }
+  const joined = new Uint8Array(n);
   let o = 0;
-  for (const p of parts) { out.set(p, o); o += p.byteLength; }
-  return out.buffer;
+  for (const p of parts) { joined.set(p, o); o += p.byteLength; }
+  return joined.buffer;
 }
 
 // Metadata arrives in the order requests finish, not the order the phone wrote it, so each copy
@@ -296,26 +304,37 @@ async function putChunk(req: Request, id: string, seq: number, env: Env): Promis
 
 // ---------- read ----------
 
-// Newest first, a page at a time: `before` (a start time, from the previous page's `next`) continues.
+// Newest first, a page at a time, ordered by (start time, id) so recordings sharing a start time are
+// neither skipped nor repeated. `before` continues from the previous page's `next`: "<startMs>:<id>"
+// (a bare start time, from older clients, is read as "everything that started earlier").
+export function parseCursor(before: string | null): { ms: number; id: string } {
+  if (!before) return { ms: Number.MAX_SAFE_INTEGER, id: "" };
+  const m = /^(\d{1,16})(?::([A-Za-z0-9_-]{1,64}))?$/.exec(before);
+  if (!m) throw new HttpError(400, "bad cursor");
+  return { ms: Number(m[1]), id: m[2] ?? "" };
+}
+
 async function listRecordings(url: URL, env: Env): Promise<Response> {
-  const before = Number(url.searchParams.get("before") ?? Infinity);
+  const { ms, id } = parseCursor(url.searchParams.get("before"));
   const { results } = await env.DB.prepare(
     `SELECT r.id, r.device_id, r.status, r.started_at_ms, r.ended_at_ms, r.chunk_count, r.meta_json, r.updated_at_ms,
             COUNT(c.seq) AS chunks_received, COUNT(CASE WHEN c.seq < r.chunk_count THEN 1 END) AS chunks_in_range,
             COALESCE(SUM(c.bytes), 0) AS bytes,
             json_group_array(json_extract(c.meta_json, '$.track')) AS tracks
-     FROM (SELECT * FROM recordings WHERE started_at_ms < ?1 ORDER BY started_at_ms DESC LIMIT ?2) r
+     FROM (SELECT * FROM recordings WHERE started_at_ms < ?1 OR (started_at_ms = ?1 AND id < ?2)
+           ORDER BY started_at_ms DESC, id DESC LIMIT ?3) r
      LEFT JOIN (SELECT * FROM chunks ORDER BY seq) c ON c.recording_id = r.id
-     GROUP BY r.id ORDER BY r.started_at_ms DESC`,
+     GROUP BY r.id ORDER BY r.started_at_ms DESC, r.id DESC`,
   )
-    .bind(Number.isFinite(before) ? before : Number.MAX_SAFE_INTEGER, PAGE_SIZE)
+    .bind(ms, id, PAGE_SIZE)
     .all<any>();
+  const last = results.at(-1);
   return json({
     recordings: results.map((r) => {
       const row = recordingRow(r);
       return { ...row, trip: tripSummary(r.tracks, row.driveEndWallMs) };
     }),
-    next: results.length === PAGE_SIZE ? results.at(-1).started_at_ms : null,
+    next: results.length === PAGE_SIZE ? `${last.started_at_ms}:${last.id}` : null,
   });
 }
 
@@ -439,14 +458,41 @@ async function getPrefs(env: Env): Promise<Response> {
   return json({ prefs: Object.fromEntries(results.map((r) => [r.key, JSON.parse(r.value_json)])) });
 }
 
+// What each setting may hold, so a malformed value can't break the pages that read it.
+export function validPref(key: string, v: any): string | null {
+  const num = (x: any, max: number) => typeof x === "number" && Number.isFinite(x) && x >= 0 && x <= max;
+  if (key === "places") {
+    if (!Array.isArray(v) || v.length > 500) return "places must be a list of at most 500";
+    for (const p of v) {
+      if (!p || typeof p !== "object" || !num(Math.abs(p.lat), 90) || !num(Math.abs(p.lon), 180) || typeof p.name !== "string" || !p.name.trim() || p.name.length > 80) {
+        return "each place needs lat, lon and a name of 1-80 characters";
+      }
+    }
+    return null;
+  }
+  if (key === "costs") {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return "costs must be an object";
+    const limits: Record<string, number> = { timePerHour: 10000, wearPerMile: 100, valuePerMile: 100, co2KgPerGal: 100, carbonPerTonne: 100000, otherPerMile: 100 };
+    for (const [k, x] of Object.entries(v)) {
+      if (!(k in limits)) return `unknown cost setting ${k}`;
+      if (!num(x, limits[k])) return `${k} must be a number from 0 to ${limits[k]}`;
+    }
+    return null;
+  }
+  return `unknown setting ${key}`;
+}
+
 async function putPref(req: Request, key: string, env: Env): Promise<Response> {
   if (!PREF_RE.test(key)) throw new HttpError(400, "bad pref key");
   const text = new TextDecoder().decode(await readBounded(req, MAX_PREF_BYTES, "pref"));
+  let value: unknown;
   try {
-    JSON.parse(text);
+    value = JSON.parse(text);
   } catch {
     throw new HttpError(400, "pref value is not JSON");
   }
+  const bad = validPref(key, value);
+  if (bad) throw new HttpError(400, bad);
   await env.DB.prepare(
     `INSERT INTO prefs (key, value_json, updated_at_ms) VALUES (?1, ?2, ?3)
      ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,

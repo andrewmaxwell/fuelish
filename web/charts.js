@@ -199,14 +199,16 @@ const Charts = (() => {
 
   // Small route outline for the trip list, from [[lat, lon], ...].
   // One route outline ([[lat, lon], ...]) or several (an outing: [[[lat, lon], ...], ...]).
-  function thumbnail(paths, w = 320, h = 132) {
+  // `frame` (optional [lat, lon] points): fit to these instead, so several thumbnails share a scale.
+  function thumbnail(paths, w = 320, h = 132, frame = null) {
     if (paths?.[0]?.[0] != null && typeof paths[0][0] === "number") paths = [paths];
     paths = (paths || []).filter((p) => p && p.length >= 2);
     if (!paths.length) return "";
     const path = paths.flat();
     const k = Math.cos((path[0][0] * Math.PI) / 180);
     const xs = path.map((p) => p[1] * k), ys = path.map((p) => -p[0]);
-    const [[x0, x1], [y0, y1]] = [extent(xs), extent(ys)];
+    const fit = frame?.length ? frame : path;
+    const [[x0, x1], [y0, y1]] = [extent(fit, (p) => p[1] * k), extent(fit, (p) => -p[0])];
     const pad = 18, span = Math.max(x1 - x0, y1 - y0, 1e-6);
     const s = Math.min((w - 2 * pad) / Math.max(x1 - x0, span * 0.05), (h - 2 * pad) / Math.max(y1 - y0, span * 0.05));
     const ox = (w - (x1 - x0) * s) / 2, oy = (h - (y1 - y0) * s) / 2;

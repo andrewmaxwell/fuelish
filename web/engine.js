@@ -95,9 +95,9 @@ const Engine = (() => {
 
   // Same per-second values as the phone, from the raw `obd` records of the engine ECU, including
   // the per-sample fuel estimate (airflow over the air-fuel target read within the last second).
-  async function fromRaw(chunks, urls, onProgress) {
+  async function fromRaw(chunks, urls, onProgress, { ecu: knownEcu = null } = {}) {
     const bins = new Map(); // second -> { key: [sum, n, last] }
-    let ecu = null, lambda = null, lambdaT = -Infinity;
+    let ecu = knownEcu, lambda = null, lambdaT = -Infinity;
     const add = (sec, key, v) => {
       const b = bins.get(sec) || bins.set(sec, {}).get(sec);
       const acc = b[key] || (b[key] = [0, 0, 0]);
@@ -124,7 +124,7 @@ const Engine = (() => {
             const h = JSON.parse(line);
             m.firstNs = h.rx;
             m.wallStartMs = h.wall;
-          } else if (line.startsWith('{"k":"obd_discovery"')) {
+          } else if (!knownEcu && line.startsWith('{"k":"obd_discovery"')) {
             const d = JSON.parse(line).d, ecus = Object.keys(d.supportedByEcu || {});
             ecu = d.mainEcu || ecus.find((e) => e === "7E8" || e === "18DAF110") ||
               ecus.sort((a, b) => d.supportedByEcu[b].length - d.supportedByEcu[a].length)[0] || null;
@@ -182,17 +182,27 @@ const Engine = (() => {
 
   // Totals for a set of rows.
   //
-  // Miles per gallon only counts seconds that have both a speed and a fuel reading, so a stretch
-  // where fuel readings dropped out can't add miles without fuel (the review's 35 → 67 mpg case).
-  // `miles` is every second with a speed; `coverage` is the share of driving time with fuel readings.
+  // Fuel and distance are only counted together: miles per gallon, the highway/town split, idling
+  // and enrichment all use just the seconds that have both a speed and a fuel reading (`gal`,
+  // `fuelMiles`). A second with only one of them adds to neither, so a dropout of either signal
+  // can't skew mpg.
   //
-  // Where the fuel went: idling (fuel burned at 0 mph, measured) and enrichment (fuel beyond the
-  // ideal air-fuel ratio, from the commanded ratio). Braking is reported apart, as a rough energy
-  // estimate in gallons-equivalent: it isn't measured fuel, it assumes level road, and it can't tell
-  // the brakes from engine braking.
-  function summary(rows, { vehicle = "" } = {}) {
+  // Coverage is measured against the whole drive, not just the seconds the adapter was answering:
+  // the share of the drive's miles (GPS `tripMiles`, or at least what the car's speed covered) that
+  // have fuel readings; for a drive that barely moved, the share of its duration (`tripMs`, else
+  // the rows' own span).
+  // An adapter outage or a late start therefore lowers coverage instead of vanishing.
+  // `galTrip` is the whole drive's fuel: `gal` plus the uncovered miles at this drive's own mpg
+  // (`extrapolated` says whether any was added).
+  //
+  // `fuelSource`: "car" (the car reports fuel rate) or "airflow" (estimated from airflow and the
+  // commanded air-fuel ratio). Neither is a receipt.
+  //
+  // Braking is reported apart, as a rough energy estimate in gallons-equivalent: it isn't measured
+  // fuel, it assumes level road, and it can't tell the brakes from engine braking.
+  function summary(rows, { vehicle = "", tripMiles = null, tripMs = null } = {}) {
     const mass = massKg(vehicle);
-    let fuelG = 0, meters = 0, fuelMeters = 0, idleMs = 0, cutMs = 0, fuelSecs = 0, speedSecs = 0, idleG = 0, richG = 0, brakeJ = 0;
+    let fuelG = 0, meters = 0, fuelMeters = 0, idleMs = 0, cutMs = 0, bothSecs = 0, idleG = 0, richG = 0, brakeJ = 0;
     // Highway (45 mph and up) vs town (everything slower, idling included): miles and fuel each.
     const split = { highway: { meters: 0, fuelG: 0 }, town: { meters: 0, fuelG: 0 } };
     // A second without a value (a stalled poll) uses the last one seen, up to 3 s old.
@@ -208,17 +218,18 @@ const Engine = (() => {
       const a = rows[i - 1], dt = (b.t - a.t) / 1000;
       if (dt <= 0 || dt > 2.5) continue; // a gap (adapter dropped, engine off): don't integrate across it
       const fuelOk = fuel != null && b.t - fuelT <= 3000, speedOk = speed != null && b.t - speedT <= 3000;
-      if (speedOk) { meters += (speed / 3.6) * dt; speedSecs += dt; }
-      if (fuelOk) { fuelG += fuel * dt; fuelSecs += dt; }
+      if (speedOk) meters += (speed / 3.6) * dt;
       if (fuelOk && speedOk) {
+        fuelG += fuel * dt;
         fuelMeters += (speed / 3.6) * dt;
+        bothSecs += dt;
         const g = speed * KMH_TO_MPH >= HIGHWAY_MPH ? split.highway : split.town;
         g.meters += (speed / 3.6) * dt;
         g.fuelG += fuel * dt;
-      }
-      if (fuelOk && b.speed === 0 && b.rpm > 300) idleG += fuel * dt;
-      if (b.fuelRateLph == null && b.maf != null && b.lambda != null && !b.cut && b.lambda < 0.99) {
-        richG += (b.maf / AFR) * (1 / b.lambda - 1) * dt;
+        if (speed === 0 && b.rpm > 300) idleG += fuel * dt;
+        if (b.fuelRateLph == null && b.maf != null && b.lambda != null && !b.cut && b.lambda < 0.99) {
+          richG += (b.maf / AFR) * (1 / b.lambda - 1) * dt;
+        }
       }
       if (a.speed != null && b.speed != null) {
         const v0 = a.speed / 3.6, v1 = b.speed / 3.6, vm = (v0 + v1) / 2;
@@ -226,7 +237,8 @@ const Engine = (() => {
         if (decel > coast) brakeJ += mass * (decel - coast) * vm * dt;
       }
       if (b.speed === 0 && b.rpm > 300) idleMs += dt * 1000;
-      if (b.cut) cutMs += dt * 1000;
+      // The phone's fuel-cut share is fractional; older rows only say cut or not.
+      cutMs += (b.cutFrac ?? (b.cut ? 1 : 0)) * dt * 1000;
     }
     let first = {}, last = {};
     for (const r of rows) for (const k of ["coolant", "fuelLevel", "dtcs", "mil"]) if (r[k] != null) { if (first[k] == null) first[k] = r[k]; last[k] = r[k]; }
@@ -242,16 +254,25 @@ const Engine = (() => {
       const w = rows.find((r) => r.coolant != null && r.coolant >= 80);
       if (w) warmMs = w.t - rows[0].t;
     }
-    const coverage = speedSecs > 0 ? Math.min(1, fuelSecs / speedSecs) : fuelSecs > 0 ? 1 : 0;
-    const mpg = fuelSecs && gal > 0 && fuelMiles > 0 ? fuelMiles / gal : null;
+    const mpg = bothSecs && gal > 0 && fuelMiles > 0 ? fuelMiles / gal : null;
+    // The drive's distance: GPS when known, never less than what the car's own speed shows.
+    const totalMiles = Math.max(tripMiles > 0 ? tripMiles : 0, meters / 1609.344, fuelMiles) || null;
+    const spanS = (tripMs ?? (rows.length > 1 ? rows.at(-1).t - rows[0].t : 0)) / 1000;
+    // By distance when the drive moved and its GPS distance is known; else by time.
+    const coverage = !bothSecs ? 0
+      : totalMiles != null && totalMiles >= 0.2 ? Math.min(1, fuelMiles / totalMiles)
+      : spanS > 0 ? Math.min(1, bothSecs / spanS) : 1;
+    const missingMiles = totalMiles != null ? Math.max(0, totalMiles - fuelMiles) : 0;
+    const extrapolated = mpg != null && missingMiles > 0.02 * (totalMiles || 1);
     return {
-      gal: fuelSecs ? gal : null,
+      gal: bothSecs ? gal : null,
       mpg,
-      miles: meters / 1609.344,
+      miles: totalMiles ?? meters / 1609.344,
       fuelMiles,
       coverage,
-      // Whole-drive fuel: measured where readings exist, the drive's own mpg for the rest.
-      galTrip: mpg && coverage < 0.999 ? gal + Math.max(0, meters / 1609.344 - fuelMiles) / mpg : fuelSecs ? gal : null,
+      galTrip: !bothSecs ? null : extrapolated ? gal + missingMiles / mpg : gal,
+      extrapolated,
+      fuelSource: rows.some((r) => r.fuelRateLph != null) ? "car" : "airflow",
       idleMs,
       cutMs,
       maxRpm,
@@ -262,7 +283,7 @@ const Engine = (() => {
       mil: last.mil,
       fromCar: rows.some((r) => r.fuelRateLph != null),
       perSample: rows.some((r) => r.fuelEstGs != null),
-      fuelUse: fuelSecs ? { idle: galOf(idleG), rich: galOf(richG) } : null,
+      fuelUse: bothSecs ? { idle: galOf(idleG), rich: galOf(richG) } : null,
       brakingGalEq: brakeJ / J_PER_GAL / ENGINE_EFF,
       massKg: mass,
       speedFactor: rows.calibrated ?? 1,
@@ -271,6 +292,9 @@ const Engine = (() => {
       warmMs,
     };
   }
+
+  /** A short label for where a fuel figure comes from. */
+  const fuelLabel = (e) => `${e.fuelSource === "car" ? "car-reported" : "airflow estimate"}${e.coverage < 0.995 ? ` · ${Math.round(e.coverage * 100)}% of the drive` : ""}`;
 
   // Economy over a short window around each second (instant mpg jumps too much to color a map):
   // miles over gallons within ±3 s, capped at 99 (fuel cut while moving reads as 99).
@@ -300,7 +324,7 @@ const Engine = (() => {
   const cToF = (c) => (c * 9) / 5 + 32;
   const mph = (kmh) => kmh * KMH_TO_MPH;
 
-  return { recorded, rawOnly, hasSummary, merge, fromChunks, fromRaw, derive, calibrate, summary, smoothMpg, HIGHWAY_MPH, attach, cToF, mph, galOf, FUEL_G_PER_L, L_PER_GAL };
+  return { fuelLabel, recorded, rawOnly, hasSummary, merge, fromChunks, fromRaw, derive, calibrate, summary, smoothMpg, HIGHWAY_MPH, attach, cToF, mph, galOf, FUEL_G_PER_L, L_PER_GAL };
 })();
 
 // Average regular gas price for a trip's week and region (U.S. EIA weekly survey, via /api/v1/gas-prices).

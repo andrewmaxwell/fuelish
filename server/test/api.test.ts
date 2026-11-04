@@ -1,4 +1,4 @@
-import { exports } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
 const BASE = "https://fuelish.test/api/v1";
@@ -162,13 +162,38 @@ describe("integrity", () => {
   });
 });
 
+describe("paging", () => {
+  it("doesn't skip recordings that share a start time at a page boundary", async () => {
+    // 501 recordings started at the same moment: the second page must hold the last one.
+    const stmts = Array.from({ length: 501 }, (_, i) =>
+      env.DB.prepare("INSERT INTO recordings (id, device_id, status, started_at_ms, meta_json, created_at_ms, updated_at_ms) VALUES (?, 'd', 'stopped', 5, '{}', 0, 0)").bind(`same-${String(i).padStart(3, "0")}`));
+    await env.DB.batch(stmts);
+    const seen = new Set<string>();
+    let before: string | null = null;
+    for (let k = 0; k < 5; k++) {
+      const page: any = await (await call(`/recordings${before ? `?before=${before}` : ""}`, { headers: WEB })).json();
+      for (const r of page.recordings) if (r.id.startsWith("same-")) seen.add(r.id);
+      if (!page.next) break;
+      before = page.next;
+    }
+    expect(seen.size).toBe(501);
+  });
+});
+
 describe("prefs", () => {
   it("stores small JSON settings for the web page", async () => {
     expect((await call("/prefs/places", { method: "PUT", headers: DEVICE, body: "{}" })).status).toBe(403);
-    expect((await call("/prefs/places", { method: "PUT", headers: WEB, body: JSON.stringify({ a: "Home" }) })).status).toBe(200);
+    const places = [{ lat: 38.6, lon: -90.3, name: "Home" }];
+    expect((await call("/prefs/places", { method: "PUT", headers: WEB, body: JSON.stringify(places) })).status).toBe(200);
     expect((await call("/prefs/places", { method: "PUT", headers: WEB, body: "not json" })).status).toBe(400);
+    // Shapes are checked: the pages rely on them.
+    expect((await call("/prefs/places", { method: "PUT", headers: WEB, body: JSON.stringify({ a: "Home" }) })).status).toBe(400);
+    expect((await call("/prefs/costs", { method: "PUT", headers: WEB, body: JSON.stringify({ timePerHour: -1 }) })).status).toBe(400);
+    expect((await call("/prefs/costs", { method: "PUT", headers: WEB, body: JSON.stringify({ timePerHour: 25 }) })).status).toBe(200);
+    expect((await call("/prefs/whatever", { method: "PUT", headers: WEB, body: "{}" })).status).toBe(400);
     const got: any = await (await call("/prefs", { headers: WEB })).json();
-    expect(got.prefs.places).toEqual({ a: "Home" });
+    expect(got.prefs.places).toEqual(places);
+    expect(got.prefs.costs).toEqual({ timePerHour: 25 });
   });
 });
 
