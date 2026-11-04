@@ -49,6 +49,9 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
     return download(p, env, ctx);
   }
 
+  // Public data, no token: weekly average gas prices (for trip cost).
+  if (m === "GET" && p[0] === "gas-prices" && p.length === 1) return gasPrices(ctx);
+
   // Share links work without a token: one recording, trimmed, read-only.
   if (m === "GET" && p[0] === "shared" && p.length === 2) return getShared(p[1], env);
 
@@ -480,4 +483,71 @@ function b64urlDecode(s: string): string {
   const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
   const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
   return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+}
+
+// ---------- gas prices ----------
+
+// EIA weekly retail prices, regular gasoline (all formulations), dollars per gallon: the U.S. and its
+// five PADD regions. EIA's API needs a key; its public history pages don't, so those are parsed.
+export const GAS_REGIONS: Record<string, { name: string; series: string }> = {
+  us: { name: "U.S.", series: "EMM_EPMR_PTE_NUS_DPG" },
+  east: { name: "East Coast", series: "EMM_EPMR_PTE_R10_DPG" },
+  midwest: { name: "Midwest", series: "EMM_EPMR_PTE_R20_DPG" },
+  gulf: { name: "Gulf Coast", series: "EMM_EPMR_PTE_R30_DPG" },
+  rockies: { name: "Rocky Mountain", series: "EMM_EPMR_PTE_R40_DPG" },
+  west: { name: "West Coast", series: "EMM_EPMR_PTE_R50_DPG" },
+};
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const GAS_CACHE_S = 12 * 3600;
+
+/** [week start (UTC ms), $/gal] from an EIA weekly history page, oldest first, from sinceMs on. */
+export function parseEiaWeekly(html: string, sinceMs = 0): [number, number][] {
+  const out: [number, number][] = [];
+  const row = /(\d{4})-([A-Z][a-z]{2})<\/td>([\s\S]*?)<\/tr>/g;
+  const cell = /class='B5'>(\d{2})\/(\d{2})&nbsp;<\/td>\s*<td class='B3'>\s*([\d.]+)/g;
+  for (const r of html.matchAll(row)) {
+    const year = +r[1], month = MONTHS.indexOf(r[2]);
+    if (month < 0) continue;
+    for (const c of r[3].matchAll(cell)) {
+      const mm = +c[1] - 1, dd = +c[2];
+      const y = month === 0 && mm === 11 ? year - 1 : year; // a late-December week listed under January
+      const t = Date.UTC(y, mm, dd);
+      if (t >= sinceMs) out.push([t, +c[3]]);
+    }
+  }
+  return out.sort((a, b) => a[0] - b[0]);
+}
+
+async function gasPrices(ctx: ExecutionContext): Promise<Response> {
+  const key = new Request("https://fuelish.internal/gas-prices/v1");
+  const cache = (caches as unknown as { default: Cache }).default;
+  const hit = await cache.match(key);
+  if (hit) return hit;
+  const since = Date.now() - 3 * 365 * 86400_000;
+  const regions: Record<string, { name: string; weeks: [number, number][] }> = {};
+  const failures: string[] = [];
+  await Promise.all(
+    Object.entries(GAS_REGIONS).map(async ([k, { name, series }]) => {
+      try {
+        const res = await fetch(`https://www.eia.gov/dnav/pet/hist/LeafHandler.ashx?n=PET&s=${series}&f=W`, {
+          headers: { "User-Agent": "fuelish (personal driving log)" },
+        });
+        if (!res.ok) return void failures.push(`${k}: HTTP ${res.status}`);
+        const weeks = parseEiaWeekly(await res.text(), since);
+        if (weeks.length) regions[k] = { name, weeks };
+        else failures.push(`${k}: no prices on the page`);
+      } catch (e) {
+        failures.push(`${k}: ${e}`);
+      }
+    }),
+  );
+  if (failures.length) console.error("gas prices:", failures.join("; "));
+  if (!Object.keys(regions).length) throw new HttpError(502, `couldn't fetch gas prices (${failures[0]})`);
+  const res = new Response(
+    JSON.stringify({ source: "U.S. EIA weekly retail price, regular gasoline", regions }),
+    // A partial result (some regions failed) is kept only an hour, so they're retried soon.
+    { headers: { "Content-Type": "application/json", "Cache-Control": `public, max-age=${failures.length ? 3600 : GAS_CACHE_S}` } },
+  );
+  ctx.waitUntil(cache.put(key, res.clone()));
+  return res;
 }

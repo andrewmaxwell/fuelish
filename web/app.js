@@ -152,13 +152,15 @@ async function route() {
   if (!token()) return showLogin();
   document.getElementById("logout").hidden = false;
   const h = location.hash;
-  const trip = h.match(/^#\/r\/([A-Za-z0-9_-]+)/);
+  const trip = h.match(/^#\/r\/([A-Za-z0-9_-]+)(?:\/(\d+))?/);
+  const insights = h.startsWith("#/insights");
   const many = h.match(/^#\/(day|week)\/(\d{4}-\d{2}-\d{2})/) || h.match(/^#\/(outing)\/([A-Za-z0-9_-]+)/);
   document.body.classList.toggle("page-trip", !!(trip || many));
   window.scrollTo(0, 0);
   app.innerHTML = `<p class="muted loading">Loading…</p>`;
   try {
-    if (trip) await showTrip(trip[1]);
+    if (trip) await showTrip(trip[1], null, trip[2] ? +trip[2] : null);
+    else if (insights) await showInsights();
     else if (many) await showMany(many[1], many[2]);
     else await showList();
   } catch (e) {
@@ -189,7 +191,10 @@ async function showList() {
     <div class="list-head">
       <div>
         <h1>Trips</h1>
-        <a class="see-map" href="#/week/${ymd(thisWeek)}">This week on a map →</a>
+        <div class="head-links">
+          <a class="see-map" href="#/week/${ymd(thisWeek)}">This week on a map →</a>
+          <a class="see-map" href="#/insights">Insights →</a>
+        </div>
       </div>
       <div class="week">
         <div><b>${wk.trips}</b><span>trips this week</span></div>
@@ -313,7 +318,7 @@ const frictionCard = (what) => `
 // ---------- one trip ----------
 
 // `share` is a share-link token: the trip is shown read-only, without anything that needs signing in.
-async function showTrip(id, share = null) {
+async function showTrip(id, share = null, focusT = null) {
   // The list is only needed to find the other trips of this one's outing; the page works without it.
   const [detail, list] = share
     ? [await api(`/shared/${share}`), null]
@@ -386,15 +391,30 @@ async function showTrip(id, share = null) {
     stat("Stops", sm.stops.length) +
     stat("Hardest brake", Math.abs(sm.peak.brake).toFixed(2), "g");
   const view = drawRoute(pts, sm, { timeline: true });
-  if (pts.engine.length) view.setEngine(pts.engine);
-  else if (pts.engineRaw.length) {
+  if (focusT != null) {
+    // Opened at a moment (from Insights): zoom there and hold the cursor on it.
+    let best = 0;
+    pts.forEach((p, i) => { if (Math.abs(p.t - focusT) < Math.abs(pts[best].t - focusT)) best = i; });
+    view.map.setView([pts[best].lat, pts[best].lon], 17);
+    view.focusAt = best;
+  }
+  const gas = await Gas.forTrip(pts[0].lat, pts[0].lon, r.startedWallMs);
+  const engineOpts = { gas, vehicle: m.vehicle };
+  if (view.focusAt != null) view.pick(view.focusAt);
+  if (pts.engine.length) {
+    view.setEngine(pts.engine, engineOpts);
+    if (view.focusAt != null) view.pick(view.focusAt); // again, now with engine values in the readout
+  } else if (pts.engineRaw.length) {
     const card = document.getElementById("engine-card"), body = document.getElementById("engine-body");
     card.hidden = false;
     try {
       const rows = await rawEngine(id, pts, (i, n) => {
         body.innerHTML = `<p class="hint">Reading engine data from the raw recording… <progress max="${n}" value="${i}"></progress></p>`;
       });
-      if (document.getElementById("engine-card") === card) view.setEngine(rows);
+      if (document.getElementById("engine-card") === card) {
+        view.setEngine(rows, engineOpts);
+        if (view.focusAt != null) view.pick(view.focusAt);
+      }
     } catch (e) {
       if (e.message !== "unauthorized") body.innerHTML = `<p class="bad">Couldn't read the engine data: ${esc(e.message)}</p>`;
     }
@@ -438,6 +458,51 @@ async function shareControls(id) {
   } catch {
     box.innerHTML = "";
   }
+}
+
+// ---------- insights across all drives ----------
+
+async function showInsights() {
+  const { recordings } = await api("/recordings");
+  app.innerHTML = `
+    <div class="insights">
+      <a href="#/" class="back">← Trips</a>
+      <h1>Insights</h1>
+      <p class="muted" id="ins-sub">Loading engine data…</p>
+      <div id="ins"></div>
+    </div>`;
+  const sub = document.getElementById("ins-sub");
+  const trips = [];
+  const asc = [...recordings].sort((a, b) => a.startedWallMs - b.startedWallMs);
+  for (let i = 0; i < asc.length; i++) {
+    const r = asc[i];
+    if (sub) sub.textContent = `Loading engine data… ${i + 1} of ${asc.length} trips`;
+    try {
+      // Only engine data is needed here, not the route; the list's outline gives the start for gas prices.
+      const { chunks } = await api(`/recordings/${r.id}`);
+      if (!Engine.recorded(chunks)) continue;
+      const end = r.driveEndWallMs;
+      let rows = Engine.derive(Engine.fromChunks(chunks)).filter((e) => end == null || e.t <= end);
+      if (!rows.length) {
+        rows = await rawEngine(r.id, { engineRaw: Engine.rawOnly(chunks), end }, (k, n) => {
+          if (sub) sub.textContent = `Reading engine data from an older drive's raw recording… ${k} of ${n}`;
+        });
+      }
+      const start = r.trip?.path?.[0];
+      if (rows.length) trips.push({ r, rows, gas: await Gas.forTrip(start?.[0], start?.[1], r.startedWallMs) });
+    } catch (e) {
+      if (e.message === "unauthorized") throw e;
+    }
+  }
+  if (!document.getElementById("ins")) return;
+  if (!trips.length) {
+    sub.textContent = "No drives with engine data yet. They show up here once the phone records with the OBD adapter connected.";
+    return;
+  }
+  const first = trips[0].r.startedWallMs, last = trips.at(-1).r.startedWallMs;
+  const d = (ms) => new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
+  sub.textContent = `${plural(trips.length, "drive")} with engine data${first === last ? `, ${d(first)}` : `, ${d(first)} – ${d(last)}`}.`;
+  Insights.render(document.getElementById("ins"), trips);
 }
 
 // ---------- several trips: a day, a week, or an outing ----------
@@ -553,7 +618,10 @@ async function showMany(kind, key) {
     stat("Hardest brake", Math.abs(sm.peak.brake).toFixed(2), "g");
   const view = drawRoute(pts, sm, { withDay: kind === "week" });
   const engineRows = engines.flat();
-  if (engineRows.length) view.setEngine(engineRows, { partial: engines.some((e, i) => !e.length && lists[i].length) });
+  if (engineRows.length) {
+    const gas = await Gas.forTrip(pts[0].lat, pts[0].lon, shown[0].startedWallMs);
+    view.setEngine(engineRows, { partial: engines.some((e, i) => !e.length && lists[i].length), gas, vehicle: shown[0].meta.vehicle });
+  }
 
   // Hovering a trip in the list brings it forward on the map.
   const index = new Map(shown.map((r, i) => [r.id, i]));
@@ -564,6 +632,25 @@ async function showMany(kind, key) {
     a.addEventListener("mouseleave", () => view.focus(null));
     a.addEventListener("blur", () => view.focus(null));
   });
+}
+
+// Small amounts of fuel and money need more digits than big ones.
+const gallons = (g) => (g < 0.1 ? g.toFixed(3) : g < 10 ? g.toFixed(2) : g.toFixed(1));
+const money = (d) => (d < 10 ? "$" + d.toFixed(2) : "$" + Math.round(d).toLocaleString());
+
+function wasteHtml(e, gas) {
+  if (!e.waste || !e.gal) return "";
+  const w = e.waste, total = w.idle + w.braking + w.rich;
+  const cost = (g) => (gas ? ` · ${money(g * gas.price)}` : "");
+  const line = (label, g, note) => `<div><dt>${label}<small>${note}</small></dt><dd>${gallons(g)} gal${cost(g)}</dd></div>`;
+  return `
+    <h3 class="sub">Wasted fuel <span>${gallons(total)} gal${cost(total)} · ${Math.round((total / e.gal) * 100)}% of the fuel</span></h3>
+    <dl class="engine-list waste-list">
+      ${line("Braking", w.braking, "speed you built up, then braked away")}
+      ${line("Idling", w.idle, "engine running at 0 mph")}
+      ${line("Running rich", w.rich, "extra fuel at full throttle")}
+    </dl>
+    <p class="hint">Braking is an estimate: the energy your brakes turned into heat, beyond what air and tires would have taken anyway, as the fuel it took to build that speed (${Math.round(e.massKg)} kg, 25% engine efficiency).</p>`;
 }
 
 // ---------- map, charts and controls (shared) ----------
@@ -636,7 +723,7 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
   new ResizeObserver(() => view.map.invalidateSize()).observe(mapEl);
 
   // Engine data arrives with the route, or later for older drives read from raw chunks.
-  function setEngine(rows, { partial = false } = {}) {
+  function setEngine(rows, { partial = false, gas = null, vehicle = "" } = {}) {
     if (!rows.length || !document.getElementById("map")) return;
     Engine.attach(pts, rows);
     hasEngine = true;
@@ -651,17 +738,20 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
     const card = document.getElementById("engine-card");
     if (!card) return;
     card.hidden = false;
-    const e = Engine.summary(rows);
+    const e = Engine.summary(rows, { vehicle });
     const temp = (c) => (c == null ? "–" : Engine.cToF(c).toFixed(0));
     const row = (label, value) => `<div><dt>${label}</dt><dd>${value}</dd></div>`;
     const light = e.mil == null ? "–" : `${e.mil ? "On" : "Off"}${e.dtcs != null ? `, ${e.dtcs ? plural(e.dtcs, "code") : "no codes"}` : ""}`;
     document.getElementById("engine-body").innerHTML = `
       <div class="stats engine-stats">
-        ${stat("Fuel used", e.gal != null ? e.gal.toFixed(e.gal < 1 ? 2 : 1) : "–", "gal")}
+        ${stat("Fuel used", e.gal != null ? gallons(e.gal) : "–", "gal")}
         ${stat("Fuel economy", e.mpg != null ? e.mpg.toFixed(0) : "–", "mpg")}
-        ${stat("Top RPM", e.maxRpm ? Math.round(e.maxRpm).toLocaleString() : "–")}
+        ${stat("Cost", e.gal != null && gas ? money(e.gal * gas.price) : "–")}
       </div>
+      ${gas ? `<p class="hint gas-note">Gas at ${money(gas.price)}/gal: the ${esc(gas.regionName)} average for the week of ${new Date(gas.weekMs).toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" })} (U.S. EIA).</p>` : ""}
+      ${wasteHtml(e, gas)}
       <dl class="engine-list">
+        ${row("Top RPM", e.maxRpm ? Math.round(e.maxRpm).toLocaleString() : "–")}
         ${row("Idling", fmtDur(e.idleMs))}
         ${row("Coasting with fuel cut", fmtDur(e.cutMs))}
         ${row("Coolant", e.coolant[0] != null ? `${temp(e.coolant[0])} → ${temp(e.coolant[1])} °F` : "–")}
@@ -673,7 +763,7 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
         Economy uses the car's own speed.${partial ? " Some of these trips have no engine data and aren't counted." : ""}</p>`;
   }
 
-  return { ...view, setEngine };
+  return { ...view, setEngine, pick };
 }
 
 window.addEventListener("hashchange", route);

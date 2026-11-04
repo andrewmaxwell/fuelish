@@ -7,6 +7,14 @@ const Engine = (() => {
   const FUEL_G_PER_L = 745;
   const L_PER_GAL = 3.78541;
   const KMH_TO_MPH = 0.621371;
+  // For the braking estimate: energy in a gallon of E10, a typical engine's efficiency turning it into
+  // motion, and what slows a coasting car (tire rolling resistance, air drag).
+  const J_PER_GAL = 32.9 * 3.6e6;
+  const ENGINE_EFF = 0.25;
+  const CRR = 0.012, CDA = 0.68, AIR = 1.2; // CdA ≈ 0.30 × 2.25 m² for a compact sedan
+  /** Rough loaded weight (car, driver, fuel) by vehicle name; braking waste scales with it. */
+  const massKg = (vehicle = "") => (/civic/i.test(vehicle) ? 1360 : /truck|f-?150|silverado|ram|tundra|sierra/i.test(vehicle) ? 2600 : 1500);
+  const galOf = (g) => g / FUEL_G_PER_L / L_PER_GAL;
 
   // Row: { t: wall ms, rpm, speed (km/h), pedal %, load %, maf g/s, lambda, coolant °C, ... ,
   //        fuelGs: fuel g/s (estimated), gph: gallons/hour, cut: true during fuel cut }
@@ -83,7 +91,18 @@ const Engine = (() => {
 
   // Fuel flow for each row. The car's own fuel rate if it reports one; otherwise airflow divided by
   // the air-fuel ratio it's commanding. Commanded lambda at its maximum (2.0) is fuel cut: no fuel.
+  // Values the car is polled for only every few seconds (they change slowly) carry forward up to
+  // 12 s, so per-second charts and comparisons don't miss most seconds.
+  const SLOW = ["coolant", "iat", "volts", "fuelLevel", "dtcs", "mil", "fuelSys", "ltft"];
+
   function derive(rows) {
+    const last = {};
+    for (const r of rows) {
+      for (const k of SLOW) {
+        if (r[k] != null) last[k] = [r[k], r.t];
+        else if (last[k] && r.t - last[k][1] <= 12000) r[k] = last[k][0];
+      }
+    }
     for (const r of rows) {
       r.cut = r.lambda != null && r.lambda >= 1.99;
       if (r.fuelRateLph != null) r.fuelGs = (r.fuelRateLph * FUEL_G_PER_L) / 3600;
@@ -94,8 +113,12 @@ const Engine = (() => {
     return rows;
   }
 
-  function summary(rows) {
-    let fuelG = 0, meters = 0, idleMs = 0, cutMs = 0, fuelSecs = 0;
+  // Totals for a set of rows. Wasted fuel has three parts, each measured or estimated per second:
+  // idling (fuel burned at 0 mph), braking (speed built up then braked away beyond what drag would
+  // take anyway, as the fuel it took to build), and running rich (fuel beyond the ideal ratio).
+  function summary(rows, { vehicle = "" } = {}) {
+    const mass = massKg(vehicle);
+    let fuelG = 0, meters = 0, idleMs = 0, cutMs = 0, fuelSecs = 0, idleG = 0, richG = 0, brakeJ = 0;
     // A second without a value (a stalled poll) uses the last one seen, up to 3 s old.
     let fuel = null, fuelT = -Infinity, speed = null, speedT = -Infinity;
     for (let i = 1; i < rows.length; i++) {
@@ -105,6 +128,15 @@ const Engine = (() => {
       if (dt > 2.5) continue; // a gap (adapter dropped, engine off): don't integrate across it
       if (fuel != null && b.t - fuelT <= 3000) { fuelG += fuel * dt; fuelSecs += dt; }
       if (speed != null && b.t - speedT <= 3000) meters += (speed / 3.6) * dt;
+      if (fuel != null && b.t - fuelT <= 3000 && b.speed === 0 && b.rpm > 300) idleG += fuel * dt;
+      if (b.fuelRateLph == null && b.maf != null && b.lambda != null && !b.cut && b.lambda < 0.99) {
+        richG += (b.maf / AFR) * (1 / b.lambda - 1) * dt;
+      }
+      if (a.speed != null && b.speed != null) {
+        const v0 = a.speed / 3.6, v1 = b.speed / 3.6, vm = (v0 + v1) / 2;
+        const decel = (v0 - v1) / dt, coast = 9.81 * CRR + (0.5 * AIR * CDA * vm * vm) / mass;
+        if (decel > coast) brakeJ += mass * (decel - coast) * vm * dt;
+      }
       if (b.speed === 0 && b.rpm > 300) idleMs += dt * 1000;
       if (b.cut) cutMs += dt * 1000;
     }
@@ -125,6 +157,8 @@ const Engine = (() => {
       dtcs: last("dtcs"),
       mil: last("mil"),
       fromCar: rows.some((r) => r.fuelRateLph != null),
+      waste: fuelSecs ? { idle: galOf(idleG), braking: brakeJ / J_PER_GAL / ENGINE_EFF, rich: galOf(richG) } : null,
+      massKg: mass,
     };
   }
 
@@ -141,4 +175,33 @@ const Engine = (() => {
   const mph = (kmh) => kmh * KMH_TO_MPH;
 
   return { recorded, rawOnly, fromChunks, fromRaw, derive, summary, attach, cToF, mph };
+})();
+
+// Average regular gas price for a trip's week and region (U.S. EIA weekly survey, via /api/v1/gas-prices).
+const Gas = (() => {
+  let data = null;
+  const load = () => (data ||= fetch("/api/v1/gas-prices").then((r) => (r.ok ? r.json() : null)).catch(() => null));
+
+  // EIA's five regions (PADDs), roughly by where a trip starts. Outside the lower 48: the U.S. average.
+  function region(lat, lon) {
+    if (lat == null || lon == null || lat < 24 || lat > 50 || lon < -125 || lon > -66) return "us";
+    if (lon < -114 || (lon < -109 && lat < 37)) return "west";
+    if (lon < -102 && lat >= 37) return "rockies";
+    if (lat < 33.5 && lon < -85 && lon > -107) return "gulf";
+    if (lat < 36.5 && lon < -89.5 && lon > -94.5) return "gulf"; // Arkansas, Louisiana, Mississippi
+    if (lon > -80.5 || (lon > -85 && lat < 34.5)) return "east";
+    return "midwest";
+  }
+
+  /** { price, weekMs, regionName } for the week a trip started, or null when prices aren't available. */
+  async function forTrip(lat, lon, ms) {
+    const d = await load();
+    const r = d?.regions[region(lat, lon)] || d?.regions.us;
+    if (!r?.weeks.length) return null;
+    let w = r.weeks[0];
+    for (const x of r.weeks) if (x[0] <= ms) w = x;
+    return { price: w[1], weekMs: w[0], regionName: r.name };
+  }
+
+  return { forTrip, region };
 })();

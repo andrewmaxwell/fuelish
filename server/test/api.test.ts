@@ -174,3 +174,21 @@ describe("drive end", () => {
     expect(driveEndMs({ stopReason: "car_disconnected", config }, null)).toBeNull();
   });
 });
+
+describe("gas prices", () => {
+  it("parses EIA weekly history rows, including a December week listed under January", async () => {
+    const { parseEiaWeekly } = await import("../src/index");
+    const html = `<tr> <td class='B6'>&nbsp;&nbsp;2026-Oct</td>
+      <td class='B5'>10/26&nbsp;</td> <td class='B3'>4.269&nbsp;&nbsp;&nbsp;</td>
+      <td class='B5'>&nbsp;</td> <td class='B3'>&nbsp;&nbsp;&nbsp;</td> </tr>
+      <tr> <td class='B6'>&nbsp;&nbsp;2026-Jan</td>
+      <td class='B5'>12/29&nbsp;</td> <td class='B3'>3.901&nbsp;</td>
+      <td class='B5'>01/05&nbsp;</td> <td class='B3'>3.950&nbsp;</td> </tr>`;
+    expect(parseEiaWeekly(html)).toEqual([
+      [Date.UTC(2025, 11, 29), 3.901],
+      [Date.UTC(2026, 0, 5), 3.95],
+      [Date.UTC(2026, 9, 26), 4.269],
+    ]);
+    expect(parseEiaWeekly(html, Date.UTC(2026, 0, 1)).length).toBe(2);
+  });
+});
