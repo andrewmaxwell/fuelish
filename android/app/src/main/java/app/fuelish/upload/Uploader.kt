@@ -6,6 +6,8 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Base64
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 private val CONFLICT = UploadResult.Retry("conflict", 0)
 
@@ -28,23 +30,35 @@ class Uploader(
     private val token: String,
     /** Delete each chunk once the server has it, and the whole recording once it is complete there. */
     private val deleteAfterUpload: Boolean = false,
+    /** Checked between requests: true once the job was cancelled, so it stops at the next safe point. */
+    private val cancelled: () -> Boolean = { false },
 ) {
     class Response(val code: Int, val body: String)
 
     private fun UploadResult.withChunks(n: Int) = if (this is UploadResult.Retry) copy(chunks = n) else this
 
-    fun uploadAll(): UploadResult {
+    /**
+     * Uploads everything pending. Only one upload runs at a time in the whole app (the periodic job,
+     * an immediate one and a manual one can all be started at once): a second caller waits for the
+     * first to finish, then finds little or nothing left to do.
+     */
+    fun uploadAll(): UploadResult = LOCK.withLock { uploadAllLocked() }
+
+    private fun uploadAllLocked(): UploadResult {
         if (baseUrl.isBlank() || token.isBlank()) return UploadResult.Fatal("server URL or device token not set")
         var uploaded = 0
         val conflicts = mutableListOf<String>()
+        val stopped = UploadResult.Retry("cancelled", 0)
         try {
             for (id in store.ids()) {
+                if (cancelled()) return stopped.withChunks(uploaded)
                 if (store.fullyUploaded(id)) {
                     if (deleteAfterUpload) store.dir(id).deleteRecursively()
                     continue
                 }
                 putMetaIfChanged(id)?.let { return it.withChunks(uploaded) }
                 for (seq in store.pendingChunks(id)) {
+                    if (cancelled()) return stopped.withChunks(uploaded)
                     when (val r = putChunk(id, seq)) {
                         null -> uploaded++
                         CONFLICT -> conflicts += "$id/$seq"
@@ -52,6 +66,7 @@ class Uploader(
                     }
                 }
                 putMetaIfChanged(id)?.let { return it.withChunks(uploaded) }
+                verifyIfFinished(id)?.let { return it.withChunks(uploaded) }
                 if (deleteAfterUpload && store.fullyUploaded(id)) store.dir(id).deleteRecursively()
             }
         } catch (e: IOException) {
@@ -81,14 +96,37 @@ class Uploader(
         return null
     }
 
+    /**
+     * Once a finished recording's chunks and final metadata are all acknowledged, asks the server
+     * whether it really holds every chunk 0 until chunkCount. Only its yes lets the phone delete
+     * the recording. A missing chunk the phone no longer has is reported, not retried forever.
+     */
+    private fun verifyIfFinished(id: String): UploadResult? {
+        if (store.serverComplete(id)) return null
+        val meta = store.readMeta(id)
+        if (meta.optString("status") == "recording" || store.pendingChunks(id).isNotEmpty() ||
+            store.unfinishedFiles(id).isNotEmpty() || store.uploadedMetaHash(id) != store.metaHash(id)) return null
+        val r = request("POST", "$baseUrl/api/v1/recordings/$id/verify", emptyMap(), ByteArray(0), null)
+        if (r.code == 404) return null // an older server without /verify: keep the local copy
+        classify(r, "verify $id")?.let { return it }
+        val body = runCatching { org.json.JSONObject(r.body) }.getOrNull() ?: return null
+        if (body.optBoolean("complete")) store.markServerComplete(id)
+        return null
+    }
+
     private fun putChunk(id: String, seq: Int): UploadResult? {
         val meta = store.chunkMeta(id, seq)
         var metaJson = meta.toString()
         // Headers up to 64 KB were verified against Cloudflare; a 60 s chunk's 1 Hz track is ~5 KB.
-        // The engine summary is ~8 KB a minute. Too big: drop it first, then the track (raw data has both).
-        for (key in listOf("engine", "engineCols", "engineFormat", "track")) {
-            if (metaJson.length <= 40_000) break
-            meta.remove(key)
+        // The engine summary is ~8 KB a minute. Too big: drop it first, then the track (raw data has
+        // both). Each summary goes with every key that describes it, so nothing claims a summary
+        // that isn't there, and `summaryOmitted` tells the web page to rebuild it from the raw chunk.
+        val omitted = org.json.JSONArray()
+        for ((name, keys) in SUMMARY_GROUPS) {
+            if (metaJson.length <= MAX_META_HEADER) break
+            keys.forEach { meta.remove(it) }
+            omitted.put(name)
+            meta.put("summaryOmitted", omitted)
             metaJson = meta.toString()
         }
         val headers = mapOf(
@@ -101,6 +139,15 @@ class Uploader(
         classify(r, "chunk $id/$seq")?.let { return it }
         store.markChunkUploaded(id, seq, deleteAfterUpload)
         return null
+    }
+
+    companion object {
+        private val LOCK = ReentrantLock()
+        const val MAX_META_HEADER = 40_000
+        val SUMMARY_GROUPS = listOf(
+            "engine" to listOf("engine", "engineCols", "engineFormat", "fuelEstVersion"),
+            "track" to listOf("track", "trackFormat"),
+        )
     }
 
     private fun request(method: String, url: String, headers: Map<String, String>, body: ByteArray?, file: File?): Response {

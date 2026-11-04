@@ -26,7 +26,7 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params)
         var result: UploadResult
         // Loop so chunks that close while we upload are picked up in the same run.
         do {
-            result = Uploader(store, cfg.serverUrl, cfg.deviceToken, cfg.upload.optBoolean("deleteAfterUpload", true)).uploadAll()
+            result = Uploader(store, cfg.serverUrl, cfg.deviceToken, cfg.upload.optBoolean("deleteAfterUpload", true)) { isStopped }.uploadAll()
             if (result is UploadResult.Done) total += result.chunks
         } while (result is UploadResult.Done && result.chunks > 0 && !isStopped)
         val text = when (result) {
@@ -58,8 +58,9 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params)
                 .setConstraints(constraints(c, cellular))
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .build()
-            // A manual request replaces one still waiting for Wi-Fi (uploads are idempotent, so
-            // interrupting a running one is harmless).
+            // A manual request replaces one still waiting for Wi-Fi. Uploads are idempotent, a
+            // replaced job stops at its next safe point, and Uploader lets only one run at a time
+            // (this queue and the periodic one are separate WorkManager names).
             WorkManager.getInstance(c).enqueueUniqueWork("upload", if (cellular) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP, req)
         }
 

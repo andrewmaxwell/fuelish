@@ -21,7 +21,7 @@ const Charts = (() => {
     tip.hidden = true;
     host.appendChild(tip);
     const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
-    const vmax = Math.max(30, ...pts.map((p) => (p.v ?? 0) * Route.MPH));
+    const vmax = Math.max(30, extent(pts, (p) => (p.v ?? 0) * Route.MPH)[1]);
     const ymax = Math.ceil(vmax / 20) * 20;
     let W = 0, H = 0, x = () => 0, colors = () => "#888", hover = -1, rows = extraRows, cross = null, dot = null;
     const plotB = top + SPEED_H - 6;
@@ -85,7 +85,7 @@ const Charts = (() => {
       rows.forEach((r, k) => {
         const rt = rowTop(k), rb = rt + ROW_H - 12;
         const vs = pts.map(r.get).filter((v) => v != null && Number.isFinite(v));
-        const lo = r.min ?? 0, hi = Math.max(r.max ?? 0, ...vs, lo + 1e-9);
+        const lo = r.min ?? 0, hi = Math.max(r.max ?? 0, extent(vs)[1], lo + 1e-9);
         r._y = (v) => rb - ((Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo)) * (rb - rt);
         el("line", { x1: left, x2: W - right, y1: rb, y2: rb, class: "axis" }, svg);
         el("line", { x1: left, x2: W - right, y1: rt, y2: rt, class: "grid" }, svg);
@@ -206,7 +206,7 @@ const Charts = (() => {
     const path = paths.flat();
     const k = Math.cos((path[0][0] * Math.PI) / 180);
     const xs = path.map((p) => p[1] * k), ys = path.map((p) => -p[0]);
-    const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    const [[x0, x1], [y0, y1]] = [extent(xs), extent(ys)];
     const pad = 18, span = Math.max(x1 - x0, y1 - y0, 1e-6);
     const s = Math.min((w - 2 * pad) / Math.max(x1 - x0, span * 0.05), (h - 2 * pad) / Math.max(y1 - y0, span * 0.05));
     const ox = (w - (x1 - x0) * s) / 2, oy = (h - (y1 - y0) * s) / 2;

@@ -268,11 +268,19 @@ class RecorderService : Service() {
             sensors.stop()
             obd?.stop()
             power.sample()
-            val chunkCount = writer.stop()
+            var chunkCount = writer.stop()
             sensorThread.quitSafely()
+            if (writer.error != null) {
+                // The writer gave up mid-chunk: keep what it wrote, as its own chunk, so it is uploaded
+                // and counted instead of sitting unfinished (or being deleted with the recording).
+                runCatching { store.finalizeLeftovers(id) }.onFailure { problems += "couldn't finish the last chunk: $it" }
+                store.finishedChunks(id).lastOrNull()?.let { chunkCount = maxOf(chunkCount, it + 1) }
+            }
+            val endedNs = SystemClock.elapsedRealtimeNanos()
+            val endedWall = System.currentTimeMillis()
             synchronized(meta) {
-                meta.put("status", "stopped").put("stopReason", reason).put("endedWallMs", System.currentTimeMillis())
-                    .put("endedElapsedNs", SystemClock.elapsedRealtimeNanos()).put("chunkCount", chunkCount)
+                meta.put("status", "stopped").put("stopReason", reason).put("endedWallMs", endedWall)
+                    .put("endedElapsedNs", endedNs).put("chunkCount", chunkCount)
                     .put("summary", JSONObject()
                         .put("records", writer.written.get()).put("drops", writer.dropped.get())
                         .put("rawBytes", writer.rawBytesTotal.get()).put("gzBytes", writer.gzBytesTotal.get())
@@ -281,6 +289,10 @@ class RecorderService : Service() {
                         .put("problems", JSONArray(problems + sensors.problems))
                         .put("writerError", writer.error?.toString()))
                 meta.remove("chunksSoFar")
+                // The drive itself ended at the disconnect / engine-off, before the auto-stop wait.
+                autoStop?.driveEndNs(reason)?.let { ns ->
+                    meta.put("driveEndElapsedNs", ns).put("driveEndWallMs", endedWall - (endedNs - ns) / 1_000_000)
+                }
                 store.writeMeta(id, meta)
             }
             RecorderService.activeId = null

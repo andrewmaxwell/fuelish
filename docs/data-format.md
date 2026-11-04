@@ -76,15 +76,34 @@ Android/data/app.fuelish/files/recordings/<id>/
                              second, or null], for about 20 engine fields (rpm, speed, pedal, load, maf,
                              commanded_lambda, coolant_temp, ...). ~8 KB a minute. Older chunks don't have it;
                              the web app reads their engine data from the raw chunks.
+                             Status fields (mil_on, dtc_count, fuel_sys1) hold the second's last reading,
+                             not a mean. Since late 2026 two derived columns ride along (`fuelEstVersion` 1):
+                             `fuel_est_gs`, fuel g/s computed per airflow sample from the air-fuel target
+                             read within the last second (0 in fuel cut), and `fuel_cut`, the share of
+                             those samples in fuel cut.
+                             If a sidecar is too big for the upload header, the phone drops a whole
+                             summary (rows and format keys together) and lists it in `summaryOmitted`;
+                             the web app rebuilds that chunk's summary from its raw data.
+                             A chunk recovered after a crash has `recovered: true`, no summaries, and its
+                             clock (`firstNs`, `wallStartMs`, `lastNs`, `wallEndMs`) and per-stream counts
+                             read back from the raw file.
   chunk-000000.uploaded      server acknowledged this chunk
   meta.uploaded              sha256 of the last recording.json the server accepted
+  server.complete            the server confirmed it holds every chunk 0..chunkCount-1
 ```
 
-With `upload.deleteAfterUpload` on (the default), a recording's whole folder is deleted once it
-is stopped and every chunk plus the final metadata has been acknowledged by the server.
+With `upload.deleteAfterUpload` on (the default), a recording's whole folder is deleted only once it
+is stopped, its chunk count is known, every chunk 0..chunkCount-1 is finished and acknowledged,
+nothing is left half-written, the final metadata is acknowledged, and the server answered
+`POST /recordings/<id>/verify` with `complete: true`. One uploader runs at a time.
+
+`recording.json` carries `rev`, raised on every write. The server never lets a lower `rev` replace a
+higher one, and never lets a `recording` snapshot reopen a stopped or interrupted recording.
 
 `recording.json` also has `trigger` (`manual`, `car_bluetooth`, `car_bluetooth_notification`) and, once
-stopped, `stopReason` (`manual`, `car_disconnected`, `engine_off`, `service_destroyed`).
+stopped, `stopReason` (`manual`, `car_disconnected`, `engine_off`, `service_destroyed`). An automatic
+stop also records when the drive itself ended, before the stop wait: `driveEndWallMs` and
+`driveEndElapsedNs` (the Bluetooth disconnect, or when the engine stopped answering).
 
 `recording.json` `status`: `recording`, `stopped` (normal stop), or `interrupted`
 (the app was killed; recovered at next launch with whatever reached disk, at most
@@ -94,5 +113,12 @@ stopped, `stopReason` (`manual`, `car_disconnected`, `engine_off`, `service_dest
 
 - D1 `recordings` and `chunks` tables hold the phone's metadata JSON verbatim plus a
   few columns for listing.
-- R2 key: `recordings/<id>/chunk-<seq:06>.ndjson.gz`, byte-identical to the phone's file.
+- R2 key: `recordings/<id>/chunk-<seq:06>-<sha256>.ndjson.gz` (older chunks: without the sha), byte-identical
+  to the phone's file; D1's `r2_key` names the accepted object. Naming objects by content means two
+  conflicting uploads of one seq can't overwrite each other's bytes; the loser's object is removed.
+- `complete` means every seq 0..chunkCount-1 is present, not just that many chunks. Chunks past a
+  final chunkCount are refused.
+- `GET /recordings` is paged, newest first: pass the previous page's `next` as `?before=`.
+- `prefs` (D1): small JSON settings the web page edits (place names, trip-cost assumptions),
+  `GET /prefs`, `PUT /prefs/<key>` with the web token.
 - Upload is idempotent on `(recording id, seq)` with sha256 verification.

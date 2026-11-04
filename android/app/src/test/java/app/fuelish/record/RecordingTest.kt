@@ -126,4 +126,42 @@ class RecordingTest {
         assertEquals(emptyList<String>(), store.recover { "active" })
         assertEquals("recording", store.readMeta("active").getString("status"))
     }
+
+    @Test
+    fun recoveryKeepsClockAndStreamInventory() {
+        val store = RecordingStore(tmp.newFolder())
+        store.writeMeta("r", JSONObject().put("id", "r").put("status", "recording").put("startedWallMs", 1000))
+        File(store.dir("r"), RecordingWriter.chunkName(0, ".ndjson")).writeText(
+            "{\"k\":\"chunk\",\"v\":1,\"rec\":\"r\",\"seq\":0,\"rx\":5000000,\"wall\":1700000000000}\n" +
+                "{\"k\":\"obd\",\"tx\":5100000,\"rx\":6000000,\"ecu\":\"7E8\",\"pid\":\"0C\",\"f\":\"rpm\",\"val\":800}\n" +
+                "{\"k\":\"loc\",\"p\":\"gps\",\"et\":7000000,\"time\":1700000000002}\n" +
+                "{\"k\":\"obd\",\"rx\":90", // torn by the crash
+        )
+        assertEquals(listOf("r"), store.recover { null })
+        val m = store.chunkMeta("r", 0)
+        assertEquals(5000000L, m.getLong("firstNs"))
+        assertEquals(1700000000000L, m.getLong("wallStartMs"))
+        assertTrue(m.getJSONObject("streams").has("obd:rpm"))
+        assertTrue(m.getJSONObject("streams").has("loc:gps"))
+        assertEquals(1, store.readMeta("r").getInt("chunkCount"))
+    }
+
+    @Test
+    fun engineSummaryEstimatesFuelPerSample() {
+        // Half a second fueling at lambda 1, half in fuel cut (lambda 2), constant airflow.
+        val e = EngineSummary()
+        e.add("commanded_lambda", 0, 1.0)
+        e.add("maf", 100, 14.08)
+        e.add("maf", 200, 14.08)
+        e.add("commanded_lambda", 500, 2.0)
+        e.add("maf", 600, 14.08)
+        e.add("maf", 700, 14.08)
+        e.add("mil_on", 100, 1.0)
+        e.add("mil_on", 900, 0.0)
+        val cols = (0 until e.columns().length()).map { e.columns().getString(it) }
+        val row = e.rows().getJSONArray(0)
+        assertEquals(0.5, row.getDouble(1 + cols.indexOf("fuel_est_gs")), 1e-9) // not 0.667 from averaged inputs
+        assertEquals(0.5, row.getDouble(1 + cols.indexOf("fuel_cut")), 1e-9)
+        assertEquals(0.0, row.getDouble(1 + cols.indexOf("mil_on")), 1e-9) // last state, not a mean
+    }
 }

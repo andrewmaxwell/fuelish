@@ -2,6 +2,19 @@
 // colored and sized by a chosen metric. Points come from chunk summaries (phone-computed,
 // trackFormat 2) or, for older recordings, are rebuilt in the browser from the raw chunks.
 
+// Extremes of a long list without spreading it into arguments (engines cap argument counts, and a
+// long history of one-second rows passes that).
+function extent(list, f = (x) => x) {
+  let lo = Infinity, hi = -Infinity;
+  for (const x of list) {
+    const v = f(x);
+    if (v == null || !Number.isFinite(v)) continue;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  return [lo, hi];
+}
+
 const Route = (() => {
   const G = 9.80665;
   const MPH = 2.236936;
@@ -10,12 +23,24 @@ const Route = (() => {
 
   // Point: { t: wall ms, lat, lon, v: m/s|null, acc: m|null, brg: deg|null, jolt: m/s²|null,
   //          a: forward accel m/s²|null, side: sideways accel m/s² (+ = turning right)|null }
+  // A chunk's summarized track is used only when it's really there (an oversized sidecar can have
+  // had it dropped on the phone); the rest are rebuilt from their raw data (see rawChunks).
+  const hasTrack = (c) => c.meta.trackFormat === 2 && Array.isArray(c.meta.track);
+  /** Chunks whose GPS fixes are only in the raw file. */
+  const rawChunks = (chunks) => chunks.filter((c) => !hasTrack(c));
+
   function fromChunks(chunks) {
-    if (!chunks.length || chunks.some((c) => c.meta.trackFormat !== 2)) return null;
-    const pts = chunks.flatMap((c) => c.meta.track || []).map((p) => ({
+    const pts = chunks.filter(hasTrack).flatMap((c) => c.meta.track).map((p) => ({
       t: p[0], lat: p[1], lon: p[2], v: p[3], acc: p[4], brg: p[5], jolt: p[6],
     }));
     return derive(pts);
+  }
+
+  /** Points from summaries and from a raw rebuild of other chunks, in time order. */
+  function merge(a, b) {
+    if (!b?.length) return a;
+    const seen = new Set(a.map((p) => p.t));
+    return derive([...a, ...b.filter((p) => !seen.has(p.t))]);
   }
 
   // Older recordings only kept a 5 s preview, so read the raw chunks once in the browser.
@@ -113,25 +138,42 @@ const Route = (() => {
     return out;
   }
 
+  // Distance policy, the same as the server's list (server/src/index.ts, segmentMeters): a step
+  // counts unless it bridges a gap, the car stood still (GPS speed under 0.5 m/s at both ends:
+  // position wander while parked), or it's an impossible jump. Without speeds, only steps longer
+  // than the fixes' own uncertainty count.
+  const MAX_GAP_MS = 30000;
+  function segmentMeters(dtMs, d, v0, v1, acc0, acc1) {
+    if (dtMs <= 0 || dtMs > MAX_GAP_MS) return 0;
+    if (d / (dtMs / 1000) > 90) return 0;
+    if (v0 != null && v1 != null) return v0 > 0.5 || v1 > 0.5 ? d : 0;
+    return d > Math.max(acc0 ?? 0, acc1 ?? 0, 10) ? d : 0;
+  }
+  function haversine(la1, lo1, la2, lo2) {
+    const r = Math.PI / 180, dLa = (la2 - la1) * r, dLo = (lo2 - lo1) * r;
+    const a = Math.sin(dLa / 2) ** 2 + Math.cos(la1 * r) * Math.cos(la2 * r) * Math.sin(dLo / 2) ** 2;
+    return 2 * 6371000 * Math.asin(Math.sqrt(a));
+  }
+
   function summary(pts) {
-    let dist = 0, moving = 0, peak = { brake: 0, accel: 0, corner: 0 };
+    let dist = 0, moving = 0, peak = { brake: 0, accel: 0, corner: 0 }, maxV = null;
     for (let i = 1; i < pts.length; i++) {
       const p = pts[i - 1], q = pts[i];
-      if (q.t - p.t > 5000 || q.trip !== p.trip) continue;
-      dist += L.latLng(p.lat, p.lon).distanceTo([q.lat, q.lon]);
-      if ((p.v ?? 0) > 0.45 || (q.v ?? 0) > 0.45) moving += q.t - p.t;
+      if (q.trip !== p.trip) continue;
+      dist += segmentMeters(q.t - p.t, haversine(p.lat, p.lon, q.lat, q.lon), p.v, q.v, p.acc, q.acc);
+      if (q.t - p.t <= MAX_GAP_MS && ((p.v ?? 0) > 0.45 || (q.v ?? 0) > 0.45)) moving += q.t - p.t;
     }
     for (const p of pts) {
       if (p.a != null) { peak.brake = Math.min(peak.brake, p.a / G); peak.accel = Math.max(peak.accel, p.a / G); }
       if (p.side != null) peak.corner = Math.max(peak.corner, Math.abs(p.side) / G);
+      if (p.v != null && (maxV == null || p.v > maxV)) maxV = p.v;
     }
-    const mph = pts.filter((p) => p.v != null).map((p) => p.v * MPH);
     return {
       miles: dist / 1609.344,
       movingMs: moving,
       durMs: pts[pts.length - 1].t - pts[0].t,
       avgMph: moving > 0 ? (dist / (moving / 1000)) * MPH : null,
-      maxMph: mph.length ? Math.max(...mph) : null,
+      maxMph: maxV != null ? maxV * MPH : null,
       stops: stops(pts),
       peak,
     };
@@ -359,5 +401,5 @@ const Route = (() => {
       (m.note ? `<p class="hint">${m.note}</p>` : "");
   }
 
-  return { fromChunks, fromRaw, render, tripRanges, legendHtml, summary, segmentColors, METRICS, WIDTHS, G, MPH };
+  return { fromChunks, rawChunks, merge, segmentMeters, haversine, fromRaw, render, tripRanges, legendHtml, summary, segmentColors, METRICS, WIDTHS, G, MPH };
 })();

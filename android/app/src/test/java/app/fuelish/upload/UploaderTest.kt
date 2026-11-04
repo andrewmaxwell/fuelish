@@ -22,6 +22,8 @@ class UploaderTest {
     private val chunks = HashMap<String, String>() // "id/seq" -> sha
     private val metas = HashMap<String, String>()
     private var failNextChunks = 0
+    private var serverLosesChunks = false
+    private val chunkMetaHeaders = HashMap<String, JSONObject>()
     private var requests = 0
     private val base get() = "http://127.0.0.1:${server.address.port}"
 
@@ -38,6 +40,11 @@ class UploaderTest {
                     metas[parts[0]] = String(body)
                     200 to "{}"
                 }
+                parts.size == 2 && parts[1] == "verify" -> {
+                    val n = JSONObject(metas[parts[0]] ?: "{}").optInt("chunkCount", -1)
+                    val complete = n >= 0 && (0 until n).all { chunks.containsKey(parts[0] + "/" + it) } && !serverLosesChunks
+                    200 to "{\"complete\":$complete}"
+                }
                 parts[0] !in metas -> 404 to "upload recording metadata first"
                 failNextChunks > 0 -> {
                     failNextChunks--
@@ -46,6 +53,8 @@ class UploaderTest {
                 else -> {
                     val sha = MessageDigest.getInstance("SHA-256").digest(body).joinToString("") { "%02x".format(it) }
                     val key = parts[0] + "/" + parts[2]
+                    val metaHeader = ex.requestHeaders.getFirst("X-Fuelish-Meta")
+                    if (metaHeader != null) chunkMetaHeaders[key] = JSONObject(String(java.util.Base64.getUrlDecoder().decode(metaHeader)))
                     when {
                         sha != ex.requestHeaders.getFirst("X-Fuelish-Sha256") -> 422 to "sha mismatch"
                         chunks[key] == null -> {
@@ -156,5 +165,93 @@ class UploaderTest {
         assertEquals(UploadResult.Done(2), Uploader(store, base, "tok").uploadAll())
         assertTrue(!store.fullyUploaded("live"))
         assertTrue(metas["live"]!!.contains("\"recording\""))
+    }
+
+    @Test
+    fun unfinishedRawChunkBlocksDeletion() {
+        // The review's case: a stopped recording whose last chunk was never finished (writer error).
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 1)
+        val raw = File(store.dir("a"), RecordingWriter.chunkName(1, ".ndjson")).apply { writeText("{\"k\":\"chunk\",\"rx\":5,\"wall\":9}\n") }
+        val up = Uploader(store, base, "tok", deleteAfterUpload = true)
+        up.uploadAll()
+        assertTrue("raw data must survive", raw.exists())
+        assertTrue(!store.fullyUploaded("a"))
+        // Once it is finalized (as the service now does) and the count includes it, it uploads and then goes.
+        store.finalizeLeftovers("a")
+        store.writeMeta("a", store.readMeta("a").put("chunkCount", 2))
+        assertEquals(UploadResult.Done(1), up.uploadAll())
+        assertTrue(!store.dir("a").exists())
+        assertEquals(2, chunks.keys.count { it.startsWith("a/") })
+    }
+
+    @Test
+    fun missingExpectedChunksBlockDeletion() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 0)
+        store.writeMeta("a", store.readMeta("a").put("chunkCount", 3)) // says 3, has none
+        Uploader(store, base, "tok", deleteAfterUpload = true).uploadAll()
+        assertTrue(store.dir("a").exists())
+        assertTrue(!store.fullyUploaded("a"))
+    }
+
+    @Test
+    fun serverMustConfirmCompletenessBeforeDeletion() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 2)
+        serverLosesChunks = true
+        Uploader(store, base, "tok", deleteAfterUpload = true).uploadAll()
+        assertTrue(store.dir("a").exists())
+        serverLosesChunks = false
+        Uploader(store, base, "tok", deleteAfterUpload = true).uploadAll()
+        assertTrue(!store.dir("a").exists())
+    }
+
+    @Test
+    fun oversizedSummaryIsDroppedWithItsFormatMarker() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 1)
+        val metaFile = File(store.dir("a"), RecordingWriter.chunkName(0, ".meta.json"))
+        val m = JSONObject(metaFile.readText())
+        val rows = org.json.JSONArray().apply { repeat(4000) { put(org.json.JSONArray(listOf(it, 1.234, 5.678))) } }
+        m.put("engineFormat", 1).put("engineCols", org.json.JSONArray(listOf("rpm", "maf"))).put("engine", rows)
+            .put("trackFormat", 2).put("track", org.json.JSONArray(listOf(org.json.JSONArray(listOf(1, 2, 3)))))
+        metaFile.writeText(m.toString())
+        assertEquals(UploadResult.Done(1), Uploader(store, base, "tok").uploadAll())
+        val sent = chunkMetaHeaders["a/0"]!!
+        assertTrue(!sent.has("engine") && !sent.has("engineFormat") && !sent.has("engineCols"))
+        assertEquals("engine", sent.getJSONArray("summaryOmitted").getString(0))
+        assertTrue(sent.has("track") && sent.getInt("trackFormat") == 2) // small enough once engine is gone
+    }
+
+    @Test
+    fun metadataRevisionOnlyGoesUp() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 0)
+        val r1 = store.readMeta("a").getLong("rev")
+        store.writeMeta("a", JSONObject().put("id", "a").put("rev", 0)) // a stale in-memory copy
+        assertTrue(store.readMeta("a").getLong("rev") > r1)
+    }
+
+    @Test
+    fun concurrentUploadsDoNotOverlap() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 20)
+        val results = java.util.Collections.synchronizedList(mutableListOf<UploadResult>())
+        val threads = (1..3).map { Thread { results += Uploader(store, base, "tok").uploadAll() } }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+        // Every chunk was sent exactly once in total across the three uploaders.
+        assertEquals(20, results.sumOf { (it as UploadResult.Done).chunks })
+    }
+
+    @Test
+    fun cancellationStopsBetweenChunks() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 5)
+        var n = 0
+        val r = Uploader(store, base, "tok") { n++ >= 3 }.uploadAll()
+        assertTrue(r is UploadResult.Retry)
+        assertTrue(store.pendingChunks("a").isNotEmpty())
     }
 }

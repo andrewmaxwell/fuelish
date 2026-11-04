@@ -22,34 +22,79 @@ class Rec(val stream: String, val tNs: Long, val line: String, val track: Double
 /**
  * Per-second means of the engine values the OBD recorder marks for the summary, so the web
  * page can chart them without downloading raw chunks (~2 MB a minute). Raw values stay in the chunk.
+ *
+ * Status values (check-engine light, code count, fuel system status) keep the last reading of the
+ * second instead of a mean, since an average of states means nothing.
+ *
+ * Fuel flow is estimated here, per airflow sample, from the commanded air-fuel ratio read within the
+ * last [LAMBDA_MAX_AGE_MS] (`fuel_est_gs`, g/s, 0 during fuel cut), and `fuel_cut` is the share of
+ * those samples in fuel cut. Averaging airflow and lambda first and dividing afterwards overstates
+ * fuel in any second that mixes fueling and fuel cut. Derivation version: [FUEL_EST_VERSION].
  */
 class EngineSummary {
     private val cols = LinkedHashMap<String, Int>()
-    private val bins = java.util.TreeMap<Long, HashMap<Int, DoubleArray>>() // second -> col -> [sum, n]
+    private val bins = java.util.TreeMap<Long, HashMap<Int, DoubleArray>>() // second -> col -> [sum, n, last]
+    private var lambda = Double.NaN
+    private var lambdaMs = Long.MIN_VALUE
 
     fun add(field: String, wallMs: Long, value: Double) {
         if (!value.isFinite()) return
+        put(field, wallMs, value)
+        when (field) {
+            "commanded_lambda" -> {
+                lambda = value
+                lambdaMs = wallMs
+            }
+            "maf" -> if (lambda > 0 && wallMs - lambdaMs in 0..LAMBDA_MAX_AGE_MS) {
+                val cut = lambda >= 1.99
+                put("fuel_est_gs", wallMs, if (cut) 0.0 else value / (AFR * lambda))
+                put("fuel_cut", wallMs, if (cut) 1.0 else 0.0)
+            }
+        }
+    }
+
+    private fun put(field: String, wallMs: Long, value: Double) {
         val c = cols.getOrPut(field) { cols.size }
-        val acc = bins.getOrPut(Math.floorDiv(wallMs, 1000L)) { HashMap() }.getOrPut(c) { DoubleArray(2) }
+        val acc = bins.getOrPut(Math.floorDiv(wallMs, 1000L)) { HashMap() }.getOrPut(c) { DoubleArray(3) }
         acc[0] += value
         acc[1] += 1.0
+        acc[2] = value
     }
 
     val isEmpty get() = bins.isEmpty()
 
+    /** An empty summary for the next chunk that still knows the latest air-fuel target. */
+    fun next() = EngineSummary().also {
+        it.lambda = lambda
+        it.lambdaMs = lambdaMs
+    }
+
     fun columns() = JSONArray(cols.keys.toList())
 
-    /** Rows of [wallMs at the middle of the second, mean per column (null if none that second)]. */
+    /** Rows of [wallMs at the middle of the second, value per column (null if none that second)]. */
     fun rows() = JSONArray().apply {
+        val names = cols.keys.toList()
         for ((sec, byCol) in bins) {
             put(JSONArray().apply {
                 put(sec * 1000 + 500)
                 for (c in 0 until cols.size) {
                     val acc = byCol[c]
-                    put(if (acc == null) JSONObject.NULL else Math.round(acc[0] / acc[1] * 100) / 100.0)
+                    val v = when {
+                        acc == null -> null
+                        names[c] in LAST_FIELDS -> acc[2]
+                        else -> acc[0] / acc[1]
+                    }
+                    put(if (v == null) JSONObject.NULL else Math.round(v * 1000) / 1000.0)
                 }
             })
         }
+    }
+
+    companion object {
+        const val AFR = 14.08 // stoichiometric air-fuel ratio of E10 pump gas
+        const val LAMBDA_MAX_AGE_MS = 1000L
+        const val FUEL_EST_VERSION = 1
+        val LAST_FIELDS = setOf("mil_on", "dtc_count", "fuel_sys1")
     }
 }
 
@@ -211,7 +256,7 @@ class RecordingWriter(
         chunkDrops = 0
         stats = HashMap()
         track = JSONArray()
-        engine = EngineSummary()
+        engine = engine.next()
         write(
             Rec(
                 "chunk", chunkStartNs,
@@ -241,6 +286,7 @@ class RecordingWriter(
             put("track", track)
             if (!engine.isEmpty) {
                 put("engineFormat", ENGINE_FORMAT)
+                put("fuelEstVersion", EngineSummary.FUEL_EST_VERSION)
                 put("engineCols", engine.columns())
                 put("engine", engine.rows())
             }
@@ -259,7 +305,10 @@ class RecordingWriter(
         /** 2 = every GPS fix as [wallMs, lat, lon, speedMps, hAccM, bearingDeg, joltMps2]; null = unknown. */
         const val TRACK_FORMAT = 2
 
-        /** 1 = `engine` rows of [wallMs, mean of each `engineCols` field over that second (or null)]. */
+        /**
+         * 1 = `engine` rows of [wallMs, mean of each `engineCols` field over that second (or null)].
+         * Status fields hold the second's last value; see [EngineSummary].
+         */
         const val ENGINE_FORMAT = 1
 
         fun chunkName(seq: Int, ext: String) = "chunk-%06d%s".format(seq, ext)

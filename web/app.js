@@ -7,12 +7,31 @@ const TOKEN_KEY = "fuelish.token";
 const VIEW_KEY = "fuelish.routeView";
 const routeCache = new Map(); // recording id -> points rebuilt from raw data
 
+// Each navigation gets a number. Work that finishes after the user has moved on checks it and stops,
+// so a slow page can't draw over the one they opened since. Maps, observers and listeners a page
+// sets up are released when it's left.
+let navGen = 0;
+const cleanups = [];
+const onLeave = (fn) => cleanups.push(fn);
+const current = () => { const g = navGen; return () => g === navGen; };
+
 // Trips are one outing when the next starts within this long of the last one ending, near where it ended.
 const OUTING_GAP_MS = 30 * 60000;
 const OUTING_NEAR_M = 500;
 
 function token() {
   try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; }
+}
+
+// Every recording, newest first (the server pages them).
+async function allRecordings() {
+  let all = [], before = null;
+  for (;;) {
+    const page = await api("/recordings" + (before != null ? `?before=${before}` : ""));
+    all = all.concat(page.recordings);
+    if (page.next == null || !page.recordings.length) return { recordings: all };
+    before = page.next;
+  }
 }
 
 async function api(path, opts = {}) {
@@ -112,7 +131,7 @@ function totals(recs) {
     trips: m.length,
     meters: m.reduce((n, r) => n + r.trip.meters, 0),
     movingMs: m.reduce((n, r) => n + r.trip.movingMs, 0),
-    maxMps: Math.max(0, ...m.map((r) => r.trip.maxMps)),
+    maxMps: Math.max(0, extent(m, (r) => r.trip.maxMps)[1]),
   };
 }
 
@@ -140,13 +159,16 @@ document.getElementById("logout").onclick = () => {
 };
 
 async function route() {
+  navGen++;
+  while (cleanups.length) { try { cleanups.pop()(); } catch {} }
+  const live = current();
   // A shared trip needs no sign-in.
   const share = location.hash.match(/^#\/s\/([A-Za-z0-9_-]+)/);
   if (share) {
     document.body.classList.add("page-trip");
     document.getElementById("logout").hidden = true;
     app.innerHTML = `<p class="muted loading">Loading…</p>`;
-    try { await showTrip(null, share[1]); } catch (e) { app.innerHTML = `<p class="bad loading">${esc(e.message)}</p>`; }
+    try { await showTrip(null, share[1]); } catch (e) { if (live()) app.innerHTML = `<p class="bad loading">${esc(e.message)}</p>`; }
     return;
   }
   if (!token()) return showLogin();
@@ -164,14 +186,16 @@ async function route() {
     else if (many) await showMany(many[1], many[2]);
     else await showList();
   } catch (e) {
-    if (e.message !== "unauthorized") app.innerHTML = `<p class="bad loading">${esc(e.message)}</p>`;
+    if (e.message !== "unauthorized" && live()) app.innerHTML = `<p class="bad loading">${esc(e.message)}</p>`;
   }
 }
 
 // ---------- trip list ----------
 
 async function showList() {
-  const { recordings } = await api("/recordings");
+  const live = current();
+  const { recordings } = await allRecordings();
+  if (!live()) return;
   if (!recordings.length) {
     app.innerHTML = `<div class="empty"><h1>No trips yet</h1><p class="muted">Trips show up here once the phone uploads them (on Wi-Fi, or when you tap Upload now).</p></div>`;
     return;
@@ -267,14 +291,20 @@ function outingCard(o) {
 // GPS points for one recording, cut off where the drive ended. `onProgress` reports a raw rebuild.
 async function tripPoints(id, detail, onProgress, { shared = false } = {}) {
   const { recording: r, chunks } = detail || (await api(`/recordings/${id}`));
-  let pts = Route.fromChunks(chunks) || routeCache.get(id);
-  if (!pts && shared) throw new Error("This trip was recorded before routes were summarized, so it can't be shown on a shared link.");
-  if (!pts) {
-    // Recorded before the phone summarized every GPS fix: rebuild from the raw chunks once.
-    const links = await api(`/recordings/${id}/links`, { method: "POST" });
-    pts = await Route.fromRaw(chunks.map((c) => links.chunks[c.seq]), onProgress);
-    routeCache.set(id, pts);
+  // Summarized chunks give their fixes directly; any without a summary (recorded before the phone
+  // made them, recovered after a crash, or trimmed for size) are rebuilt from raw data once.
+  let pts = Route.fromChunks(chunks);
+  const raw = Route.rawChunks(chunks);
+  if (raw.length && !shared) {
+    let extra = routeCache.get(id);
+    if (!extra) {
+      const links = await api(`/recordings/${id}/links`, { method: "POST" });
+      extra = await Route.fromRaw(raw.map((c) => links.chunks[c.seq]).filter(Boolean), onProgress);
+      routeCache.set(id, extra);
+    }
+    pts = Route.merge(pts, extra);
   }
+  if (!pts.length && shared && raw.length) throw new Error("This trip was recorded before routes were summarized, so it can't be shown on a shared link.");
   const end = r.driveEndWallMs;
   const out = end != null ? pts.filter((p) => p.t <= end) : pts;
   // Engine rows from the chunk summaries; `engineRaw` lists chunks whose engine data is only raw.
@@ -289,6 +319,7 @@ async function tripPoints(id, detail, onProgress, { shared = false } = {}) {
 const engineCache = new Map();
 async function rawEngine(id, pts, onProgress) {
   if (engineCache.has(id)) return engineCache.get(id);
+  if (!pts.engineRaw.length) return [];
   const links = await api(`/recordings/${id}/links`, { method: "POST" });
   const rows = Engine.derive(await Engine.fromRaw(pts.engineRaw, pts.engineRaw.map((c) => links.chunks[c.meta.seq]), onProgress))
     .filter((e) => pts.end == null || e.t <= pts.end);
@@ -344,25 +375,34 @@ function sideRoute(sm, { engine = false, trips = 0 } = {}) {
   document.getElementById("sub-line").textContent = bits.join(" · ");
 }
 
-// Highway vs town, wasted fuel, car health: everything that needs the engine.
-function sideEngine(sm, e, { gas = null, partial = false } = {}) {
+// Highway vs town, where the fuel went, trip cost, car health: everything that needs the engine.
+function sideEngine(sm, e, { gas = null, partial = false, trip = null } = {}) {
   const figs = document.getElementById("figs");
   if (!figs) return;
   const cost = (g) => (gas ? money(g * gas.price) : null);
   const mi = sm.miles.toFixed(sm.miles < 10 ? 1 : 0);
+  // With fuel readings over less of the drive, mpg is only for the part they cover, and gas for the
+  // whole drive is that part measured plus the rest at the same mpg (marked ≈).
+  const thin = e.coverage < 0.95;
+  const galShown = e.galTrip ?? e.gal;
   figs.innerHTML = fig(mi, "miles") + fig(fmtDur(sm.movingMs), "moving") +
-    fig(e.mpg != null ? e.mpg.toFixed(0) : "–", "mpg") + fig(e.gal != null && gas ? cost(e.gal) : "–", e.gal != null ? `for ${gallons(e.gal)} gal` : "gas");
+    fig(e.mpg != null ? (thin ? "≈" : "") + e.mpg.toFixed(0) : "–", "mpg") +
+    fig(galShown != null && gas ? (thin ? "≈" : "") + cost(galShown) : "–", galShown != null ? `for ${gallons(galShown)} gal` : "gas");
   const note = document.getElementById("gas-note");
-  if (gas) {
-    note.hidden = false;
-    note.textContent = `Gas at ${money(gas.price)}/gal, the ${gas.regionName} average for the week of ${new Date(gas.weekMs).toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" })} (U.S. EIA).${partial ? " Some of these trips have no engine data and aren't counted." : ""}`;
-  }
+  const bits = [];
+  if (gas) bits.push(`Gas at ${money(gas.price)}/gal, the ${gas.regionName} average for the week of ${new Date(gas.weekMs).toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" })} (U.S. EIA).`);
+  if (thin && e.gal != null) bits.push(e.coverage < 0.5
+    ? `Fuel readings cover only ${Math.round(e.coverage * 100)}% of this drive, so its mpg and gas are rough.`
+    : `Fuel readings cover ${Math.round(e.coverage * 100)}% of this drive; mpg is for that part, and gas for the rest is estimated at the same mpg.`);
+  if (partial) bits.push("Some of these trips have no engine data and aren't counted.");
+  note.hidden = !bits.length;
+  note.textContent = bits.join(" ");
 
   // Highway vs town: economy bars on one scale.
   const split = document.getElementById("split");
   const parts = [["Highway", `${Engine.HIGHWAY_MPH}+ mph`, e.highway], ["Town", `under ${Engine.HIGHWAY_MPH} mph`, e.town]].filter(([, , g]) => g.gal > 0.001);
   if (parts.length) {
-    const max = Math.max(...parts.map(([, , g]) => g.mpg ?? 0), 1);
+    const max = Math.max(1, ...parts.map(([, , g]) => g.mpg ?? 0));
     split.hidden = false;
     split.innerHTML = `<h2>Highway vs town</h2>
       <div class="split">${parts.map(([name, note, g]) => `
@@ -374,25 +414,26 @@ function sideEngine(sm, e, { gas = null, partial = false } = {}) {
       ${e.cutMs >= 30000 ? `<p class="hint">The engine cut fuel entirely while you coasted for ${fmtDur(e.cutMs)}.</p>` : ""}`;
   }
 
-  // Wasted fuel: one bar of all the fuel used, the wasted parts colored.
+  // Where the fuel went: one bar of the measured fuel, idling and enrichment marked. Braking is
+  // energy, not fuel, and only an estimate, so it's listed under the bar, not inside it.
   const waste = document.getElementById("waste");
-  if (e.waste && e.gal) {
-    const w = e.waste, total = w.idle + w.braking + w.rich;
+  if (e.fuelUse && e.gal) {
+    const u = e.fuelUse;
     const kinds = [
-      ["braking", "Braking", w.braking, "speed you built up, then braked away"],
-      ["idle", "Idling", w.idle, `engine running at 0 mph for ${fmtDur(e.idleMs)}`],
-      ["rich", "Running rich", w.rich, "extra fuel at full throttle"],
+      ["idle", "Idling", u.idle, `engine running at 0 mph for ${fmtDur(e.idleMs)}`],
+      ["rich", "Enrichment", u.rich, "fuel beyond the ideal air-fuel ratio, mostly hard acceleration"],
     ];
-    const pct = (g) => Math.max(0, (g / e.gal) * 100);
+    const pct = (g) => Math.min(100, Math.max(0, (g / e.gal) * 100));
     waste.hidden = false;
-    waste.innerHTML = `<h2>Wasted fuel <span>${gallons(total)} gal${cost(total) ? ` · ${cost(total)}` : ""} · ${Math.round(pct(total))}% of the fuel</span></h2>
-      <div class="waste-bar" role="img" aria-label="Share of fuel wasted">${kinds.map(([k, , g]) => `<i class="w-${k}" style="width:${pct(g)}%"></i>`).join("")}<i class="w-rest"></i></div>
+    waste.innerHTML = `<h2>Where the fuel went <span>${gallons(e.gal)} gal measured</span></h2>
+      <div class="waste-bar" role="img" aria-label="Share of fuel used idling and running rich">${kinds.map(([k, , g]) => `<i class="w-${k}" style="width:${pct(g)}%"></i>`).join("")}<i class="w-rest"></i></div>
       <dl class="waste-list">${kinds.map(([k, label, g, why]) => `
-        <div><dt><i class="sw w-${k}"></i>${label}<small>${why}</small></dt><dd>${gallons(g)} gal${cost(g) ? ` · ${cost(g)}` : ""}</dd></div>`).join("")}</dl>
+        <div><dt><i class="sw w-${k}"></i>${label}<small>${why}</small></dt><dd>${gallons(g)} gal${cost(g) ? ` · ${cost(g)}` : ""} · ${Math.round(pct(g))}%</dd></div>`).join("")}
+        <div><dt><i class="sw w-braking"></i>Slowing down<small>rough estimate of the speed you braked away, as fuel it took to build</small></dt><dd>≈ ${gallons(e.brakingGalEq)} gal-eq</dd></div></dl>
       <details class="how"><summary>How these are estimated</summary>
-        <p>${e.fromCar ? "Fuel use is as reported by the car." : "This car doesn't report fuel use, so it's estimated from the air flowing into the engine and the air-fuel ratio the engine asks for."}
+        <p>${e.fromCar ? "Fuel use is as reported by the car." : `This car doesn't report fuel use, so it's estimated from the air flowing into the engine and the air-fuel ratio the engine asks for${e.perSample ? ", reading by reading" : ""}.`}
         ${e.speedFactor !== 1 ? `Miles use the car's speed, which read ${Math.abs((1 - 1 / e.speedFactor) * 100).toFixed(1)}% ${e.speedFactor > 1 ? "low" : "high"} against GPS on this drive, corrected.` : "Miles use the car's own speed."}</p>
-        <p>Braking is the energy your brakes turned into heat, beyond what air and tires would have taken anyway, counted as the fuel it took to build that speed (${Math.round(e.massKg)} kg, 25% engine efficiency).</p>
+        <p>Slowing down is the energy lost beyond what air and tires would have taken anyway (${Math.round(e.massKg)} kg, 25% engine efficiency). It isn't measured fuel: it assumes a level road (going downhill reads as braking), and it can't tell the brakes from the transmission's engine braking. Treat it as a hint, not a bill.</p>
       </details>`;
   }
 
@@ -400,7 +441,7 @@ function sideEngine(sm, e, { gas = null, partial = false } = {}) {
   const health = document.getElementById("health");
   const bad = [], ok = [];
   if (e.mil != null) (e.mil || e.dtcs ? bad : ok).push(e.mil ? `Check engine light on${e.dtcs ? `, ${plural(e.dtcs, "code")}` : ""}` : e.dtcs ? `${plural(e.dtcs, "stored code")}` : "Check engine light off");
-  if (Number.isFinite(e.volts[0])) {
+  if (Number.isFinite(e.volts[0]) && Number.isFinite(e.volts[1])) {
     const v = `charging ${e.volts[0].toFixed(1)}–${e.volts[1].toFixed(1)} V`;
     (e.volts[0] < 12.8 || e.volts[1] > 15.2 ? bad : ok).push(v);
   }
@@ -464,10 +505,12 @@ function momentsFor(pts, sm) {
 
 // `share` is a share-link token: the trip is shown read-only, without anything that needs signing in.
 async function showTrip(id, share = null, focusT = null) {
+  const live = current();
   // The list is only needed to find the other trips of this one's outing; the page works without it.
   const [detail, list] = share
     ? [await api(`/shared/${share}`), null]
     : await Promise.all([api(`/recordings/${id}`), api("/recordings").catch(() => null)]);
+  if (!live()) return;
   const { recording: r } = detail;
   id = r.id;
   const m = r.meta;
@@ -514,7 +557,7 @@ async function showTrip(id, share = null, focusT = null) {
   const pts = await tripPoints(id, detail, (i, n) => {
     if (status) status.innerHTML = `Building the detailed route… <progress max="${n}" value="${i}"></progress>`;
   }, { shared: !!share });
-  if (!document.getElementById("map")) return; // navigated away meanwhile
+  if (!live()) return; // navigated away meanwhile
   if (pts.length < 2) {
     status.textContent = "Not enough GPS fixes to draw a route.";
     return;
@@ -530,29 +573,40 @@ async function showTrip(id, share = null, focusT = null) {
     view.map.setView([pts[best].lat, pts[best].lon], 17);
     view.focusAt = best;
   }
-  const gas = await Gas.forTrip(pts[0].lat, pts[0].lon, r.startedWallMs);
-  const engineOpts = { gas, vehicle: m.vehicle };
-  if (view.focusAt != null) view.pick(view.focusAt);
-  if (pts.engine.length) {
-    view.setEngine(pts.engine, engineOpts);
+  // Engine results don't wait for the gas price; the cost fills in when (if) it arrives.
+  const engineOpts = { gas: null, vehicle: m.vehicle, trip: r };
+  let engineRows = pts.engine;
+  const showEngine = () => {
+    if (!engineRows.length || !live()) return;
+    view.setEngine(engineRows, engineOpts);
     if (view.focusAt != null) view.pick(view.focusAt); // again, now with engine values in the readout
-  } else if (pts.engineRaw.length) {
+  };
+  if (view.focusAt != null) view.pick(view.focusAt);
+  showEngine();
+  withTimeout(Gas.forTrip(pts[0].lat, pts[0].lon, r.startedWallMs), 8000).then((gas) => {
+    if (gas && live()) { engineOpts.gas = gas; showEngine(); }
+  });
+  if (pts.engineRaw.length) {
+    // Chunks whose engine data is only raw (older drives, recovered or trimmed chunks): read them
+    // once and merge with whatever the summaries gave.
     const st = document.getElementById("engine-status");
     st.hidden = false;
     try {
       const rows = await rawEngine(id, pts, (i, n) => {
         st.innerHTML = `Reading engine data from the raw recording… <progress max="${n}" value="${i}"></progress>`;
       });
-      if (document.getElementById("engine-status") === st) {
-        st.hidden = true;
-        view.setEngine(rows, engineOpts);
-        if (view.focusAt != null) view.pick(view.focusAt);
-      }
+      if (!live()) return;
+      st.hidden = true;
+      engineRows = Engine.merge(pts.engine, rows);
+      Engine.calibrate(engineRows, pts);
+      showEngine();
     } catch (e) {
-      if (e.message !== "unauthorized") st.innerHTML = `<span class="bad">Couldn't read the engine data: ${esc(e.message)}</span>`;
+      if (e.message !== "unauthorized" && live()) st.innerHTML = `<span class="bad">Couldn't read the engine data: ${esc(e.message)}</span>`;
     }
   }
 }
+
+const withTimeout = (p, ms) => Promise.race([p, new Promise((res) => setTimeout(() => res(null), ms))]).catch(() => null);
 
 // Share link for one trip: create, copy, stop sharing.
 async function shareControls(id) {
@@ -596,7 +650,9 @@ async function shareControls(id) {
 // ---------- insights across all drives ----------
 
 async function showInsights() {
-  const { recordings } = await api("/recordings");
+  const live = current();
+  const { recordings } = await allRecordings();
+  if (!live()) return;
   app.innerHTML = `
     <div class="insights">
       <a href="#/" class="back">← Trips</a>
@@ -605,30 +661,8 @@ async function showInsights() {
       <div id="ins"></div>
     </div>`;
   const sub = document.getElementById("ins-sub");
-  const trips = [];
-  const asc = [...recordings].sort((a, b) => a.startedWallMs - b.startedWallMs);
-  for (let i = 0; i < asc.length; i++) {
-    const r = asc[i];
-    if (sub) sub.textContent = `Loading engine data… ${i + 1} of ${asc.length} trips`;
-    try {
-      // Only engine data is needed here, not the route; the list's outline gives the start for gas prices.
-      const { chunks } = await api(`/recordings/${r.id}`);
-      if (!Engine.recorded(chunks)) continue;
-      const end = r.driveEndWallMs;
-      let rows = Engine.derive(Engine.fromChunks(chunks)).filter((e) => end == null || e.t <= end);
-      if (rows.length) Engine.calibrate(rows, Route.fromChunks(chunks) || []);
-      else {
-        rows = await rawEngine(r.id, { engineRaw: Engine.rawOnly(chunks), end, chunks }, (k, n) => {
-          if (sub) sub.textContent = `Reading engine data from an older drive's raw recording… ${k} of ${n}`;
-        });
-      }
-      const start = r.trip?.path?.[0];
-      if (rows.length) trips.push({ r, rows, gas: await Gas.forTrip(start?.[0], start?.[1], r.startedWallMs) });
-    } catch (e) {
-      if (e.message === "unauthorized") throw e;
-    }
-  }
-  if (!document.getElementById("ins")) return;
+  const trips = await engineTrips(recordings, live, (msg) => { if (sub) sub.textContent = msg; });
+  if (!live()) return;
   if (!trips.length) {
     sub.textContent = "No drives with engine data yet. They show up here once the phone records with the OBD adapter connected.";
     return;
@@ -639,10 +673,43 @@ async function showInsights() {
   Insights.render(document.getElementById("ins"), trips);
 }
 
+// Every drive with engine data, oldest first: [{ r, rows, gas }]. Rows come from the summaries,
+// merged with a raw rebuild of chunks that only have raw engine data. Used by Insights, the
+// transmission page and the cost page.
+async function engineTrips(recordings, live, onStatus = () => {}) {
+  const trips = [];
+  const asc = [...recordings].sort((a, b) => a.startedWallMs - b.startedWallMs);
+  for (let i = 0; i < asc.length; i++) {
+    const r = asc[i];
+    if (!live()) return trips;
+    onStatus(`Loading engine data… ${i + 1} of ${asc.length} trips`);
+    try {
+      // Only engine data is needed here, not the route; the list's outline gives the start for gas prices.
+      const { chunks } = await api(`/recordings/${r.id}`);
+      if (!Engine.recorded(chunks)) continue;
+      const end = r.driveEndWallMs;
+      let rows = Engine.derive(Engine.fromChunks(chunks)).filter((e) => end == null || e.t <= end);
+      const raw = Engine.rawOnly(chunks);
+      if (raw.length) {
+        const more = await rawEngine(r.id, { engineRaw: raw, end, chunks }, (k, n) => onStatus(`Reading engine data from a raw recording… ${k} of ${n}`));
+        rows = Engine.merge(rows, more);
+      }
+      if (rows.length) Engine.calibrate(rows, Route.fromChunks(chunks));
+      const start = r.trip?.path?.[0];
+      if (rows.length) trips.push({ r, rows, gas: await withTimeout(Gas.forTrip(start?.[0], start?.[1], r.startedWallMs), 8000) });
+    } catch (e) {
+      if (e.message === "unauthorized") throw e;
+    }
+  }
+  return trips;
+}
+
 // ---------- several trips: a day, a week, or an outing ----------
 
 async function showMany(kind, key) {
-  const { recordings } = await api("/recordings");
+  const live = current();
+  const { recordings } = await allRecordings();
+  if (!live()) return;
   let recs, title, sub, prev = null, next = null;
   if (kind === "outing") {
     recs = outingOf(recordings, key);
@@ -731,7 +798,7 @@ async function showMany(kind, key) {
       progress();
     }
   }));
-  if (!document.getElementById("map")) return;
+  if (!live()) return;
   for (const r of failed) document.querySelector(`.trip-row[data-id="${CSS.escape(r.id)}"] span`)?.insertAdjacentText("beforeend", " · couldn't load the route");
   const pts = lists.flat();
   if (pts.length < 2) {
@@ -744,7 +811,8 @@ async function showMany(kind, key) {
   const view = drawRoute(pts, sm, { withDay: kind === "week" });
   const engineRows = engines.flat();
   if (engineRows.length) {
-    const gas = await Gas.forTrip(pts[0].lat, pts[0].lon, shown[0].startedWallMs);
+    const gas = await withTimeout(Gas.forTrip(pts[0].lat, pts[0].lon, shown[0].startedWallMs), 8000);
+    if (!live()) return;
     view.setEngine(engineRows, { partial: engines.some((e, i) => !e.length && lists[i].length), gas, vehicle: shown[0].meta.vehicle });
   }
 
@@ -833,12 +901,15 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
   }));
   syncButtons();
   recolor();
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (document.getElementById("map")) recolor(); });
+  const mq = window.matchMedia("(prefers-color-scheme: dark)");
+  mq.addEventListener("change", recolor);
   // The map's container changes size with the layout (e.g. rotating a phone).
-  new ResizeObserver(() => view.map.invalidateSize()).observe(mapEl);
+  const ro = new ResizeObserver(() => view.map.invalidateSize());
+  ro.observe(mapEl);
+  onLeave(() => { mq.removeEventListener("change", recolor); ro.disconnect(); view.map.remove(); });
 
   // Engine data arrives with the route, or later for older drives read from raw chunks.
-  function setEngine(rows, { partial = false, gas = null, vehicle = "" } = {}) {
+  function setEngine(rows, { partial = false, gas = null, vehicle = "", trip = null } = {}) {
     if (!rows.length || !document.getElementById("map")) return;
     Engine.attach(pts, Engine.smoothMpg(rows));
     hasEngine = true;
@@ -846,7 +917,7 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
     recolor();
     syncButtons();
     view.moments(momentsFor(pts, sm));
-    sideEngine(sm, Engine.summary(rows, { vehicle }), { gas, partial });
+    sideEngine(sm, Engine.summary(rows, { vehicle }), { gas, partial, trip });
   }
 
   return { ...view, setEngine, pick };

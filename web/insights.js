@@ -87,7 +87,7 @@ const Insights = (() => {
     const x0 = curve[0].x, x1 = curve[curve.length - 1].x;
     // Scale to the well-supported part of the curve; sparse ends and stray dots are clipped.
     const solid = pts.filter((c) => c.near >= minNear).map((c) => c[y]);
-    const peak = yMax ?? Math.max(1e-9, ...(solid.length ? solid : pts.map((c) => c[y])));
+    const peak = yMax ?? Math.max(1e-9, extent(solid.length ? solid : pts.map((c) => c[y]))[1]);
     const step = niceStep(peak / 4), ymax = Math.ceil((peak * 1.08) / step) * step;
     let W = 0, X = () => 0;
     const Y = (v) => top + (1 - Math.min(v, ymax) / ymax) * (H - top - bottom);
@@ -205,7 +205,8 @@ const Insights = (() => {
     const cols = SIGNALS.map((s) => ({ ...s, vals: secs.map(s.get) }));
     const usable = cols.filter((c) => {
       const v = c.vals.filter((x) => x != null);
-      return v.length >= 30 && Math.max(...v) - Math.min(...v) > 1e-9;
+      const [lo, hi] = extent(v);
+      return v.length >= 30 && hi - lo > 1e-9;
     });
     const skipped = cols.filter((c) => !usable.includes(c));
     const pairs = [];
@@ -295,7 +296,7 @@ const Insights = (() => {
     host.appendChild(tipEl);
     const stride = Math.max(1, Math.ceil(pts.length / 2500));
     const shown = pts.filter((_, k) => k % stride === 0);
-    const ext = (k) => { const v = pts.map((q) => q[k]); return [Math.min(...v), Math.max(...v)]; };
+    const ext = (k) => extent(pts, (q) => q[k]);
     const [x0, x1] = ext(0), [y0, y1] = ext(1);
     const W = Math.max(280, host.clientWidth || 560);
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
@@ -336,25 +337,27 @@ const Insights = (() => {
 
   function render(host, trips) {
     const secs = seconds(trips);
-    let miles = 0, gal = 0, cost = 0, waste = 0, wasteCost = 0, priced = true;
+    // mpg counts only miles that have fuel readings (fuelMiles); gas and cost are whole-drive.
+    let miles = 0, fuelMiles = 0, gal = 0, galTrip = 0, cost = 0, idle = 0, idleCost = 0, priced = true;
     for (const t of trips) {
       const e = Engine.summary(t.rows, { vehicle: t.r.meta.vehicle });
       miles += e.miles;
       if (e.gal != null) {
         gal += e.gal;
-        if (t.gas) cost += e.gal * t.gas.price; else priced = false;
+        fuelMiles += e.fuelMiles;
+        galTrip += e.galTrip ?? e.gal;
+        if (t.gas) cost += (e.galTrip ?? e.gal) * t.gas.price; else priced = false;
       }
-      if (e.waste) {
-        const w = e.waste.idle + e.waste.braking + e.waste.rich;
-        waste += w;
-        if (t.gas) wasteCost += w * t.gas.price;
+      if (e.fuelUse) {
+        idle += e.fuelUse.idle;
+        if (t.gas) idleCost += e.fuelUse.idle * t.gas.price;
       }
     }
     const fig = (value, label, unit = "") => `<div class="fig"><b>${value}<small>${unit}</small></b><span>${label}</span></div>`;
 
     // Speed: 0.5 mph steps, smoothed over about 2 mph. Temperature: 1 °F steps over about 4 °F.
     const bySpeed = samples(trips, (b) => b.speed * MPH);
-    const maxMph = Math.max(30, ...bySpeed.map((s) => s.x));
+    const maxMph = Math.max(30, extent(bySpeed, (s) => s.x)[1]);
     const speedHi = Math.ceil(maxMph / 5) * 5;
     const speedCurve = kernel(bySpeed.filter((s) => s.x >= 1), { lo: 1, hi: speedHi, step: 0.5, bw: 2 });
     const timeCurve = kernel(bySpeed, { lo: 0, hi: speedHi, step: 0.5, bw: 1.5 });
@@ -362,17 +365,17 @@ const Insights = (() => {
     const temp = (b) => (b.coolant != null ? Engine.cToF(b.coolant) : null);
     const movingTemp = samples(trips, (b) => (b.speed * MPH > 3 ? temp(b) : null));
     const idleTemp = samples(trips, (b) => (b.speed === 0 && b.rpm > 300 ? temp(b) : null));
-    const tLo = (smp) => Math.floor(Math.min(...smp.map((s) => s.x)) / 10) * 10, tHi = (smp) => Math.ceil(Math.max(...smp.map((s) => s.x)) / 10) * 10;
+    const tLo = (smp) => Math.floor(extent(smp, (s) => s.x)[0] / 10) * 10, tHi = (smp) => Math.ceil(extent(smp, (s) => s.x)[1] / 10) * 10;
     const tempCurve = movingTemp.length ? kernel(movingTemp, { lo: tLo(movingTemp), hi: tHi(movingTemp), step: 1, bw: 4 }) : [];
     const idleCurve = idleTemp.length ? kernel(idleTemp, { lo: tLo(idleTemp), hi: tHi(idleTemp), step: 1, bw: 4 }) : [];
 
     host.innerHTML = `
       <div class="figs">
         ${fig(miles.toFixed(miles < 10 ? 1 : 0), "miles", "")}
-        ${fig(gal ? (miles / gal).toFixed(0) : "–", "miles per gallon")}
-        ${fig(gallons(gal), "gallons")}
+        ${fig(gal ? (fuelMiles / gal).toFixed(0) : "–", "miles per gallon")}
+        ${fig(gallons(galTrip), "gallons")}
         ${fig(cost && priced ? money(cost) : "–", "spent on gas")}
-        ${fig(gal ? Math.round((waste / gal) * 100) + "%" : "–", `wasted${wasteCost ? ` (${money(wasteCost)})` : ""}`)}
+        ${fig(gal ? Math.round((idle / gal) * 100) + "%" : "–", `burned idling${idleCost ? ` (${money(idleCost)})` : ""}`)}
       </div>
 
       <section class="ins-sec">

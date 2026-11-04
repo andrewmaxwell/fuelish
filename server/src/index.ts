@@ -17,6 +17,9 @@ const MAX_META_BYTES = 512 * 1024;
 const MAX_CHUNK_BYTES = 90 * 1024 * 1024; // Workers request bodies are capped at 100 MB
 const LINK_TTL_S = 15 * 60;
 const SHARE_RE = /^[A-Za-z0-9_-]{22}$/; // 16 random bytes, base64url
+const PREF_RE = /^[a-z][a-z0-9_.-]{0,63}$/;
+const MAX_PREF_BYTES = 64 * 1024;
+const PAGE_SIZE = 500;
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -62,10 +65,17 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
 
   if (m === "GET" && p[0] === "me" && p.length === 1) return json({ scopes });
 
+  if (p[0] === "prefs") {
+    need("read");
+    if (p.length === 1 && m === "GET") return getPrefs(env);
+    if (p.length === 2 && m === "PUT") return putPref(req, p[1], env);
+    throw new HttpError(404, "not found");
+  }
+
   if (p[0] !== "recordings") throw new HttpError(404, "not found");
   if (p.length === 1 && m === "GET") {
     need("read");
-    return listRecordings(env);
+    return listRecordings(url, env);
   }
   const id = p[1];
   if (!id || !ID_RE.test(id)) throw new HttpError(400, "bad recording id");
@@ -77,6 +87,10 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   if (p.length === 2 && m === "GET") {
     need("read");
     return getRecording(id, env);
+  }
+  if (p.length === 3 && p[2] === "verify" && m === "POST") {
+    need("upload");
+    return verifyRecording(id, env);
   }
   if (p.length === 4 && p[2] === "chunks" && m === "PUT") {
     need("upload");
@@ -148,9 +162,35 @@ async function verifySignedUrl(url: URL, env: Env): Promise<void> {
 
 // ---------- upload ----------
 
+// Refuses a body that says (or turns out) to be larger than `max`, before buffering much of it.
+async function readBounded(req: Request, max: number, what: string): Promise<ArrayBuffer> {
+  const declared = Number(req.headers.get("Content-Length"));
+  if (Number.isFinite(declared) && declared > max) throw new HttpError(413, `${what} too large`);
+  if (!req.body) return new ArrayBuffer(0);
+  const parts: Uint8Array[] = [];
+  let n = 0;
+  const reader = req.body.getReader();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > max) {
+      await reader.cancel();
+      throw new HttpError(413, `${what} too large`);
+    }
+    parts.push(value);
+  }
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.byteLength; }
+  return out.buffer;
+}
+
+// Metadata arrives in the order requests finish, not the order the phone wrote it, so each copy
+// carries `rev` (raised on every write). An older revision never replaces a newer one, and a
+// finished recording is never reopened by a late "recording" snapshot.
 async function putRecording(req: Request, id: string, env: Env): Promise<Response> {
-  const text = await req.text();
-  if (text.length > MAX_META_BYTES) throw new HttpError(413, "metadata too large");
+  const text = new TextDecoder().decode(await readBounded(req, MAX_META_BYTES, "metadata"));
   let meta: any;
   try {
     meta = JSON.parse(text);
@@ -173,13 +213,22 @@ async function putRecording(req: Request, id: string, env: Env): Promise<Respons
      ON CONFLICT (id) DO UPDATE SET
        status = excluded.status, ended_at_ms = excluded.ended_at_ms, chunk_count = excluded.chunk_count,
        meta_json = excluded.meta_json, updated_at_ms = excluded.updated_at_ms
-     WHERE recordings.device_id = excluded.device_id`,
+     WHERE recordings.device_id = excluded.device_id
+       AND COALESCE(json_extract(excluded.meta_json, '$.rev'), 0) >= COALESCE(json_extract(recordings.meta_json, '$.rev'), 0)
+       AND NOT (recordings.status != 'recording' AND excluded.status = 'recording')`,
   )
     .bind(id, deviceId, status, startedAt, endedAt, chunkCount, text, now)
     .run();
-  const row = await env.DB.prepare("SELECT device_id FROM recordings WHERE id = ?").bind(id).first<{ device_id: string }>();
+  const row = await env.DB.prepare("SELECT device_id, meta_json FROM recordings WHERE id = ?").bind(id).first<{ device_id: string; meta_json: string }>();
   if (row?.device_id !== deviceId) throw new HttpError(409, "recording id belongs to another device");
-  return json({ ok: true });
+  // A stale copy is acknowledged (the phone has a newer one queued anyway) but not stored.
+  return json({ ok: true, stale: row.meta_json !== text });
+}
+
+// The phone asks this before deleting its copy: does the server hold every chunk 0..chunkCount-1?
+async function verifyRecording(id: string, env: Env): Promise<Response> {
+  const d = await recordingDetail(id, env);
+  return json({ complete: d.recording.complete, chunkCount: d.recording.chunkCount, missing: d.missing });
 }
 
 function parseSeq(s: string | undefined): number {
@@ -187,23 +236,27 @@ function parseSeq(s: string | undefined): number {
   return Number(s);
 }
 
-function chunkKey(id: string, seq: number): string {
-  return `recordings/${id}/chunk-${String(seq).padStart(6, "0")}.ndjson.gz`;
+// Objects are named by their content, so two different uploads for one seq never overwrite each
+// other's bytes; D1 decides which one is the chunk. (Chunks stored before this have the old name,
+// kept in their r2_key.)
+function chunkKey(id: string, seq: number, sha: string): string {
+  return `recordings/${id}/chunk-${String(seq).padStart(6, "0")}-${sha}.ndjson.gz`;
 }
 
 async function putChunk(req: Request, id: string, seq: number, env: Env): Promise<Response> {
   const sha = (req.headers.get("X-Fuelish-Sha256") ?? "").toLowerCase();
   if (!SHA_RE.test(sha)) throw new HttpError(400, "missing X-Fuelish-Sha256");
-  const metaHeader = req.headers.get("X-Fuelish-Meta") ?? "{}";
+  const metaHeader = req.headers.get("X-Fuelish-Meta");
   let chunkMeta: string;
   try {
-    chunkMeta = JSON.stringify(JSON.parse(b64urlDecode(metaHeader)));
+    chunkMeta = metaHeader ? JSON.stringify(JSON.parse(b64urlDecode(metaHeader))) : "{}";
   } catch {
     throw new HttpError(400, "X-Fuelish-Meta must be base64url JSON");
   }
 
-  const rec = await env.DB.prepare("SELECT id FROM recordings WHERE id = ?").bind(id).first();
+  const rec = await env.DB.prepare("SELECT id, chunk_count FROM recordings WHERE id = ?").bind(id).first<{ chunk_count: number | null }>();
   if (!rec) throw new HttpError(404, "upload recording metadata first");
+  if (rec.chunk_count != null && seq >= rec.chunk_count) throw new HttpError(400, `recording has only ${rec.chunk_count} chunks`);
 
   const existing = await env.DB.prepare("SELECT sha256 FROM chunks WHERE recording_id = ? AND seq = ?")
     .bind(id, seq)
@@ -214,41 +267,55 @@ async function putChunk(req: Request, id: string, seq: number, env: Env): Promis
     throw new HttpError(409, "chunk already stored with different content");
   }
 
-  const body = await req.arrayBuffer();
+  const body = await readBounded(req, MAX_CHUNK_BYTES, "chunk");
   if (body.byteLength === 0) throw new HttpError(400, "empty chunk");
-  if (body.byteLength > MAX_CHUNK_BYTES) throw new HttpError(413, "chunk too large");
   const actual = hex(await crypto.subtle.digest("SHA-256", body));
   if (actual !== sha) throw new HttpError(422, "sha256 mismatch");
 
-  const key = chunkKey(id, seq);
+  const key = chunkKey(id, seq, sha);
   await env.RECORDINGS.put(key, body, {
     sha256: sha,
     httpMetadata: { contentType: "application/gzip" },
   });
-  await env.DB.prepare(
+  const ins = await env.DB.prepare(
     `INSERT INTO chunks (recording_id, seq, r2_key, bytes, sha256, meta_json, uploaded_at_ms)
      VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
   )
     .bind(id, seq, key, body.byteLength, sha, chunkMeta, Date.now())
     .run();
+  if (!ins.meta.changes) {
+    // Another upload of this seq got there first. Same bytes: a duplicate. Different bytes: ours
+    // lost, so remove its object (the winner's has a different name and is untouched).
+    const won = await env.DB.prepare("SELECT sha256 FROM chunks WHERE recording_id = ? AND seq = ?").bind(id, seq).first<{ sha256: string }>();
+    if (won?.sha256 === sha) return json({ ok: true, duplicate: true });
+    await env.RECORDINGS.delete(key);
+    throw new HttpError(409, "chunk already stored with different content");
+  }
   return json({ ok: true, duplicate: false }, 201);
 }
 
 // ---------- read ----------
 
-async function listRecordings(env: Env): Promise<Response> {
+// Newest first, a page at a time: `before` (a start time, from the previous page's `next`) continues.
+async function listRecordings(url: URL, env: Env): Promise<Response> {
+  const before = Number(url.searchParams.get("before") ?? Infinity);
   const { results } = await env.DB.prepare(
     `SELECT r.id, r.device_id, r.status, r.started_at_ms, r.ended_at_ms, r.chunk_count, r.meta_json, r.updated_at_ms,
-            COUNT(c.seq) AS chunks_received, COALESCE(SUM(c.bytes), 0) AS bytes,
+            COUNT(c.seq) AS chunks_received, COUNT(CASE WHEN c.seq < r.chunk_count THEN 1 END) AS chunks_in_range,
+            COALESCE(SUM(c.bytes), 0) AS bytes,
             json_group_array(json_extract(c.meta_json, '$.track')) AS tracks
-     FROM recordings r LEFT JOIN (SELECT * FROM chunks ORDER BY seq) c ON c.recording_id = r.id
-     GROUP BY r.id ORDER BY r.started_at_ms DESC LIMIT 500`,
-  ).all<any>();
+     FROM (SELECT * FROM recordings WHERE started_at_ms < ?1 ORDER BY started_at_ms DESC LIMIT ?2) r
+     LEFT JOIN (SELECT * FROM chunks ORDER BY seq) c ON c.recording_id = r.id
+     GROUP BY r.id ORDER BY r.started_at_ms DESC`,
+  )
+    .bind(Number.isFinite(before) ? before : Number.MAX_SAFE_INTEGER, PAGE_SIZE)
+    .all<any>();
   return json({
     recordings: results.map((r) => {
       const row = recordingRow(r);
       return { ...row, trip: tripSummary(r.tracks, row.driveEndWallMs) };
     }),
+    next: results.length === PAGE_SIZE ? results.at(-1).started_at_ms : null,
   });
 }
 
@@ -256,8 +323,11 @@ async function listRecordings(env: Env): Promise<Response> {
 // (Bluetooth disconnect, or the engine stops answering), and that wait isn't driving: it's
 // usually the walk away from the car. The phone stamps the stop when the wait runs out, so
 // the drive ended one wait earlier. Manual stops and recordings still going end when they end.
+// Phones since late 2026 record the moment itself (driveEndWallMs); older recordings get the estimate.
 export function driveEndMs(meta: any, endedAtMs: number | null): number | null {
   if (endedAtMs == null) return null;
+  const stamped = Number(meta?.driveEndWallMs);
+  if (meta?.driveEndWallMs != null && Number.isFinite(stamped)) return Math.max(meta?.startedWallMs ?? 0, Math.min(endedAtMs, stamped));
   const auto = meta?.config?.auto ?? {};
   const waitS =
     meta?.stopReason === "car_disconnected" ? auto.stopAfterCarDisconnectS
@@ -280,10 +350,9 @@ export function tripSummary(tracksJson: string, endMs: number | null = null) {
   fixes.sort((a, b) => a[0] - b[0]);
   let meters = 0, maxMps = 0, movingMs = 0;
   for (let i = 1; i < fixes.length; i++) {
-    const [t0, la0, lo0, v0] = fixes[i - 1], [t1, la1, lo1, v1] = fixes[i];
-    if (t1 - t0 > 30_000) continue; // a gap in the track (tunnel, lost fix): don't bridge it
-    meters += haversine(la0, lo0, la1, lo1);
-    if ((v0 ?? 0) > 1 || (v1 ?? 0) > 1) movingMs += t1 - t0;
+    const [t0, la0, lo0, v0, a0] = fixes[i - 1], [t1, la1, lo1, v1, a1] = fixes[i];
+    meters += segmentMeters(t1 - t0, haversine(la0, lo0, la1, lo1), v0, v1, a0, a1);
+    if (t1 - t0 <= MAX_GAP_MS && ((v0 ?? 0) > 1 || (v1 ?? 0) > 1)) movingMs += t1 - t0;
   }
   for (const p of fixes) if (p[3] != null) maxMps = Math.max(maxMps, p[3]);
   const step = Math.max(1, Math.ceil(fixes.length / 80));
@@ -292,6 +361,18 @@ export function tripSummary(tracksJson: string, endMs: number | null = null) {
 }
 
 const round5 = (x: number) => Math.round(x * 1e5) / 1e5;
+
+// Distance policy, the same here and in the web page (route.js): a step between two fixes counts
+// unless it bridges a gap in the track, the car was standing still (GPS speed under 0.5 m/s at both
+// ends: position wander while parked), or it's an impossible jump. Without speeds, a step counts
+// only when it's longer than the fixes' own uncertainty.
+export const MAX_GAP_MS = 30_000;
+export function segmentMeters(dtMs: number, d: number, v0?: number | null, v1?: number | null, acc0?: number | null, acc1?: number | null): number {
+  if (dtMs <= 0 || dtMs > MAX_GAP_MS) return 0;
+  if (d / (dtMs / 1000) > 90) return 0; // over 200 mph: a bad fix, not a drive
+  if (v0 != null && v1 != null) return v0 > 0.5 || v1 > 0.5 ? d : 0;
+  return d > Math.max(acc0 ?? 0, acc1 ?? 0, 10) ? d : 0;
+}
 
 function haversine(la1: number, lo1: number, la2: number, lo2: number): number {
   const r = Math.PI / 180, dLa = (la2 - la1) * r, dLo = (lo2 - lo1) * r;
@@ -311,7 +392,8 @@ function recordingRow(r: any) {
     chunkCount: r.chunk_count,
     chunksReceived: r.chunks_received,
     bytes: r.bytes,
-    complete: r.chunk_count != null && r.chunks_received === r.chunk_count,
+    // Every seq 0..chunkCount-1 is here (seqs are unique per recording), not just as many chunks.
+    complete: r.chunk_count != null && r.chunks_in_range === r.chunk_count,
     updatedAtMs: r.updated_at_ms,
     meta,
   };
@@ -324,6 +406,7 @@ async function getRecording(id: string, env: Env): Promise<Response> {
 async function recordingDetail(id: string, env: Env) {
   const r = await env.DB.prepare(
     `SELECT r.*, (SELECT COUNT(*) FROM chunks WHERE recording_id = r.id) AS chunks_received,
+            (SELECT COUNT(*) FROM chunks WHERE recording_id = r.id AND seq < r.chunk_count) AS chunks_in_range,
             (SELECT COALESCE(SUM(bytes), 0) FROM chunks WHERE recording_id = r.id) AS bytes
      FROM recordings r WHERE r.id = ?`,
   )
@@ -347,6 +430,30 @@ async function recordingDetail(id: string, env: Env) {
   const missing: number[] = [];
   for (let s = 0; s < expected; s++) if (!have.has(s)) missing.push(s);
   return { recording: recordingRow(r), chunks, missing };
+}
+
+// ---------- prefs ----------
+
+async function getPrefs(env: Env): Promise<Response> {
+  const { results } = await env.DB.prepare("SELECT key, value_json FROM prefs").all<{ key: string; value_json: string }>();
+  return json({ prefs: Object.fromEntries(results.map((r) => [r.key, JSON.parse(r.value_json)])) });
+}
+
+async function putPref(req: Request, key: string, env: Env): Promise<Response> {
+  if (!PREF_RE.test(key)) throw new HttpError(400, "bad pref key");
+  const text = new TextDecoder().decode(await readBounded(req, MAX_PREF_BYTES, "pref"));
+  try {
+    JSON.parse(text);
+  } catch {
+    throw new HttpError(400, "pref value is not JSON");
+  }
+  await env.DB.prepare(
+    `INSERT INTO prefs (key, value_json, updated_at_ms) VALUES (?1, ?2, ?3)
+     ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,
+  )
+    .bind(key, text, Date.now())
+    .run();
+  return json({ ok: true });
 }
 
 // ---------- share links ----------
@@ -421,7 +528,8 @@ async function download(p: string[], env: Env, ctx: ExecutionContext): Promise<R
   if (!ID_RE.test(id)) throw new HttpError(400, "bad recording id");
   if (p[2] === "chunks" && p.length === 4) {
     const seq = parseSeq(p[3]);
-    const obj = await env.RECORDINGS.get(chunkKey(id, seq));
+    const row = await env.DB.prepare("SELECT r2_key FROM chunks WHERE recording_id = ? AND seq = ?").bind(id, seq).first<{ r2_key: string }>();
+    const obj = row && (await env.RECORDINGS.get(row.r2_key));
     if (!obj) throw new HttpError(404, "chunk not found");
     return new Response(obj.body, {
       headers: {

@@ -24,6 +24,16 @@ class AutoStopPolicy(private val stopAfterDisconnectNs: Long, private val stopAf
         }
     }
 
+    /**
+     * When the drive ended for [reason] (a value [check] returned), on the elapsed-time clock: the
+     * Bluetooth disconnect or the moment the engine stopped answering, not when the wait ran out.
+     */
+    fun driveEndNs(reason: String): Long? = when (reason) {
+        "car_disconnected" -> disconnectedAtNs.takeIf { it != 0L }
+        "engine_off" -> engineOffSinceNs.takeIf { it != 0L }
+        else -> null
+    }
+
     /** Returns a stop reason, or null to keep recording. */
     fun check(nowNs: Long, obdState: String): String? {
         when (obdState) {

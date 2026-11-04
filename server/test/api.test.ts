@@ -101,7 +101,8 @@ describe("upload pipeline", () => {
     const want = new Uint8Array(await new Blob([sent.get(0)!, sent.get(1)!, sent.get(2)!]).arrayBuffer());
     expect(got).toEqual(want);
 
-    const tampered = links.all.replace(/sig=./, "sig=0");
+    // Flip the signature's first hex digit to a value guaranteed to differ.
+    const tampered = links.all.replace(/sig=(.)/, (_: string, c: string) => `sig=${c === "0" ? "1" : "0"}`);
     expect((await exports.default.fetch(new Request(tampered))).status).toBe(403);
   });
 
@@ -112,9 +113,68 @@ describe("upload pipeline", () => {
   });
 });
 
+describe("integrity", () => {
+  const put = (id: string, over: object) =>
+    call(`/recordings/${id}`, { method: "PUT", headers: DEVICE, body: JSON.stringify({ id, deviceId: "dev1", status: "recording", startedWallMs: 1000, ...over }) });
+
+  it("ignores stale metadata that arrives after newer metadata", async () => {
+    await put("r2", { rev: 5, status: "stopped", endedWallMs: 2000, chunkCount: 2 });
+    const late = await put("r2", { rev: 3 }); // an older 'recording' snapshot finishing last
+    expect(late.status).toBe(200);
+    expect(await late.json()).toMatchObject({ stale: true });
+    // Even with a higher revision, a finished recording isn't reopened.
+    await put("r2", { rev: 9 });
+    const d: any = await (await call("/recordings/r2", { headers: WEB })).json();
+    expect(d.recording).toMatchObject({ status: "stopped", chunkCount: 2 });
+  });
+
+  it("calls a recording complete only with every expected seq, and refuses seqs past the end", async () => {
+    await put("r3", {});
+    for (const seq of [0, 2]) {
+      const body = await gzip(`{"k":"${seq}"}\n`);
+      await call(`/recordings/r3/chunks/${seq}`, { method: "PUT", headers: { ...DEVICE, "X-Fuelish-Sha256": await sha(body) }, body });
+    }
+    await put("r3", { rev: 2, status: "stopped", endedWallMs: 2000, chunkCount: 2 });
+    const d: any = await (await call("/recordings/r3", { headers: WEB })).json();
+    expect(d.missing).toEqual([1]);
+    expect(d.recording.complete).toBe(false);
+    const v: any = await (await call("/recordings/r3/verify", { method: "POST", headers: DEVICE })).json();
+    expect(v).toMatchObject({ complete: false, missing: [1] });
+    const body = await gzip("late\n");
+    const past = await call("/recordings/r3/chunks/5", { method: "PUT", headers: { ...DEVICE, "X-Fuelish-Sha256": await sha(body) }, body });
+    expect(past.status).toBe(400);
+  });
+
+  it("keeps the stored bytes matching the database when a conflicting chunk loses", async () => {
+    await put("r4", {});
+    const a = await gzip("first\n"), b = await gzip("second\n");
+    const up = async (body: Uint8Array) =>
+      call("/recordings/r4/chunks/0", { method: "PUT", headers: { ...DEVICE, "X-Fuelish-Sha256": await sha(body) }, body });
+    expect((await up(a)).status).toBe(201);
+    expect((await up(b)).status).toBe(409);
+    const res = await call("/recordings/r4/chunks/0", { headers: WEB });
+    expect(await sha(new Uint8Array(await res.arrayBuffer()))).toBe(await sha(a));
+  });
+
+  it("rejects oversized bodies from their declared length", async () => {
+    const res = await call("/recordings/r5", { method: "PUT", headers: { ...DEVICE, "Content-Length": String(10 * 1024 * 1024) }, body: "{}" });
+    expect(res.status).toBe(413);
+  });
+});
+
+describe("prefs", () => {
+  it("stores small JSON settings for the web page", async () => {
+    expect((await call("/prefs/places", { method: "PUT", headers: DEVICE, body: "{}" })).status).toBe(403);
+    expect((await call("/prefs/places", { method: "PUT", headers: WEB, body: JSON.stringify({ a: "Home" }) })).status).toBe(200);
+    expect((await call("/prefs/places", { method: "PUT", headers: WEB, body: "not json" })).status).toBe(400);
+    const got: any = await (await call("/prefs", { headers: WEB })).json();
+    expect(got.prefs.places).toEqual({ a: "Home" });
+  });
+});
+
 describe("share links", () => {
   it("shows one trip without a token, trimmed, until revoked", async () => {
-    await call("/recordings/rec1", { method: "PUT", headers: DEVICE, body: meta({ vehicle: "Civic", note: "private", config: { obd: { deviceAddress: "00:04" } } }) });
+    await call("/recordings/rec1", { method: "PUT", headers: DEVICE, body: meta({ rev: 10, status: "stopped", endedWallMs: 2000, chunkCount: 3, vehicle: "Civic", note: "private", config: { obd: { deviceAddress: "00:04" } } }) });
     expect((await call("/recordings/rec1/shares", { method: "POST", headers: DEVICE })).status).toBe(403);
     const created = await call("/recordings/rec1/shares", { method: "POST", headers: WEB });
     expect(created.status).toBe(201);
@@ -155,6 +215,13 @@ describe("trip summary", () => {
     expect(tripSummary("[null]")).toBeNull();
   });
 
+  it("doesn't count parked GPS wander as distance", async () => {
+    const { tripSummary } = await import("../src/index");
+    // 61 fixes alternating ~11 m apart, speed 0, 100 m accuracy: the review's reproduction.
+    const fixes = Array.from({ length: 61 }, (_, i) => [i * 1000, 38 + (i % 2) * 0.0001, -90, 0, 100]);
+    expect(tripSummary(JSON.stringify([fixes]))!.meters).toBe(0);
+  });
+
   it("leaves out fixes after the drive ended", async () => {
     const { tripSummary } = await import("../src/index");
     const tracks = JSON.stringify([[[0, 38.0, -90.0, 5, 3], [5000, 38.001, -90.0, 5, 3], [9000, 38.002, -90.0, 1, 3]]]);
@@ -172,6 +239,8 @@ describe("drive end", () => {
     expect(driveEndMs({ stopReason: "car_disconnected" }, 1_000_000)).toBe(1_000_000);
     expect(driveEndMs({ stopReason: "car_disconnected", config, startedWallMs: 950_000 }, 1_000_000)).toBe(950_000);
     expect(driveEndMs({ stopReason: "car_disconnected", config }, null)).toBeNull();
+    // A phone that stamped the disconnect itself is believed over the estimate.
+    expect(driveEndMs({ stopReason: "car_disconnected", config, driveEndWallMs: 810_000 }, 1_000_000)).toBe(810_000);
   });
 });
 
