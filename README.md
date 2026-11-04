@@ -27,7 +27,7 @@ docs/      data-format.md: every record type, clock and file
 4. The web page lists trips by day (route outline, distance, moving time, top speed). Each trip opens on a full-size
    map with its color and line-width controls over it: speed, acceleration, turning (left blue, right red), and with
    the OBD adapter gas pedal, MPG and gallons per hour. Notable moments are labeled on the map (hardest brake and
-   acceleration, sharpest turn, top speed, longest stop, best and thirstiest minute). Below the map is a short speed
+   acceleration, sharpest turn, top speed, longest stop, thirstiest minute). Below the map is a short speed
    timeline; beside it the headline numbers (miles, moving time, mpg, cost), highway vs. town economy, wasted fuel,
    a one-line car health summary and a friction circle (forward vs. sideways g from GPS speed and heading).
    Hovering the map or the timeline shows that moment's readout.
@@ -38,8 +38,11 @@ docs/      data-format.md: every record type, clock and file
    fuel use, so it's estimated from airflow and the commanded air-fuel ratio. Miles come from the car's speed,
    scaled to GPS when the two consistently disagree (the Civic reads about 2% low).
    Each trip shows its cost at the average regular gas price for its week and region (U.S. EIA weekly survey,
-   fetched and cached by the Worker: no key or input needed) and its wasted fuel: idling, braking away speed
-   (estimated from the energy braked off), and running rich at full throttle.
+   fetched and cached by the Worker: no key or input needed). **Where you could save** ranks what the driver
+   controls by what it cost: braking (the energy braked off, with the biggest stops linked to the map), cruising
+   above 60/65/70 mph (gas saved against minutes lost, from the drive's own fuel use at steady speeds), idling and
+   running rich at full throttle. Engine readings are moved onto GPS time per drive (the GPS track runs about 2 s
+   ahead of the phone's clock), so map colors and readouts land where they happened.
    **Insights** (`#/insights`) covers every drive with engine data: totals, fuel economy by speed and by engine
    temperature, and a grid of how the engine signals correlate, with a scatter for any pair and links to the
    moments they disagree most.

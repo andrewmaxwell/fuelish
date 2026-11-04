@@ -10,7 +10,7 @@ export function load(...files) {
   const ctx = vm.createContext({ console, fetch: async () => ({ ok: false }), setTimeout, Promise, Map, Set, Math, Date, JSON });
   for (const f of files) vm.runInContext(readFileSync(new URL(f, dir), "utf8") + "\n;globalThis.__last = 1;", ctx, { filename: f });
   // Top-level const declarations aren't properties of the context; expose them.
-  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}) })", ctx);
+  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}) })", ctx);
 }
 const { Engine, Route, extent } = load("route.js", "engine.js");
 
@@ -208,4 +208,65 @@ test("cvt: a press is timed from the second that shows it", () => {
   assert.equal(ev[0].t, 10000);
   assert.equal(ev[0].trace.find((p) => p.dt === 0).drpm, 1000);
   assert.equal(ev[0].trace.find((p) => p.dt === -1).drpm, 0);
+});
+
+// A drive that speeds up and slows down, as GPS points (m/s) and engine rows (km/h) shifted by `lagMs`.
+function wavy(lagMs) {
+  const v = (t) => 15 + 10 * Math.sin(t / 20000);
+  const pts = Array.from({ length: 600 }, (_, i) => ({ t: i * 1000, lat: 38 + i * 1e-4, lon: -90, v: v(i * 1000), acc: 4, brg: 0 }));
+  const rows = Array.from({ length: 600 }, (_, i) => ({ t: i * 1000 + 500, speed: v(i * 1000 + 500 - lagMs) * 3.6 }));
+  return { pts, rows };
+}
+
+test("engine rows are moved onto GPS time by the measured lag", () => {
+  const { Engine } = load("route.js", "engine.js");
+  const { pts, rows } = wavy(2000);
+  Engine.calibrate(rows, pts);
+  assert.equal(rows.shiftMs, 2000);
+  assert.equal(rows[0].t, -1500);
+  const { pts: p2, rows: r2 } = wavy(0);
+  Engine.calibrate(r2, p2);
+  assert.equal(r2.shiftMs, 0);
+});
+
+test("merged rows aren't shifted or scaled twice", () => {
+  const { Engine } = load("route.js", "engine.js");
+  const { pts, rows } = wavy(2000);
+  for (const r of rows) r.speed *= 0.98;
+  Engine.calibrate(rows, pts);
+  const t0 = rows[0].t, s0 = rows[0].speed;
+  const merged = Engine.merge(rows.slice(0, 300), rows.slice(300));
+  Engine.calibrate(merged, pts);
+  assert.equal(merged[0].t, t0);
+  assert.equal(merged[0].speed, s0);
+});
+
+test("a half-turn bearing flip at walking pace isn't a corner", () => {
+  const { Route } = load("route.js", "engine.js");
+  const pts = Route.fromChunks([{ meta: { trackFormat: 2, track: [
+    [0, 38, -90, 1, 3, 39], [1000, 38.00001, -90, 2.2, 3, 39], [2000, 38.00003, -90, 4.5, 3, 215], [3000, 38.00008, -90, 6, 3, 214],
+  ] } }]);
+  assert.ok(pts.every((p) => p.side == null), JSON.stringify(pts.map((p) => p.side)));
+});
+
+test("coach: a hard stop from speed is the biggest braking event, and slower cruising saves gas but costs time", () => {
+  const { Coach } = load("route.js", "engine.js", "coach.js");
+  // 60 s at 25 m/s, a stop at 4 m/s² to 0, then 30 s stopped.
+  const pts = [];
+  let v = 25, t = 0;
+  for (let i = 0; i < 60; i++) pts.push({ t: (t += 1000), v });
+  while (v > 0) { v = Math.max(0, v - 4); pts.push({ t: (t += 1000), v }); }
+  for (let i = 0; i < 30; i++) pts.push({ t: (t += 1000), v: 0 });
+  const br = Coach.braking(pts, "2016 Honda Civic LX 2.0L");
+  assert.equal(br.events.length, 1);
+  assert.ok(br.events[0].fromMph > 50 && br.events[0].toMph < 1);
+  // ½mv² = 425 kJ; / (118 MJ/gal × 25%) = 0.0144 gal, less a little for drag and rolling.
+  assert.ok(br.galEq > 0.012 && br.galEq < 0.0145, String(br.galEq));
+
+  const rows = Array.from({ length: 600 }, (_, i) => ({ t: i * 1000, speed: 120, fuelGs: 2 }));
+  const sp = Coach.slowerCruise(rows, 65);
+  assert.equal(sp.source, "physics"); // one steady speed can't show how fuel grows with speed
+  assert.ok(sp.gal > 0 && sp.minutes > 0);
+  assert.ok(Math.abs(sp.aboveMin - 599 / 60) < 0.01);
+  assert.equal(Coach.slowerCruise(rows, 80), null);
 });

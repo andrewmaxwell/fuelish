@@ -406,6 +406,7 @@ const sidePanel = (middle = "") => `
     <div class="gas-note" id="gas-note" hidden></div>
     <p class="hint" id="engine-status" hidden></p>
   </section>
+  <section class="side-sec coach" id="coach" hidden></section>
   <section class="side-sec" id="split" hidden></section>
   <section class="side-sec" id="waste" hidden></section>
   <section class="side-sec" id="trip-cost" hidden></section>
@@ -437,10 +438,68 @@ function sideRoute(sm, { engine = false, trips = 0 } = {}) {
   document.getElementById("sub-line").textContent = bits.join(" · ");
 }
 
+// Where this drive could have been cheaper: what the driver controls, largest first, each with
+// what it would have cost in minutes. Braking stops are buttons that show the stop on the map.
+const COACH_KEY = "fuelish.coachTarget";
+function coachCard(el, { pts, rows, e, vehicle, price, focus }) {
+  if (!el) return;
+  let target = 65;
+  try { target = Number(localStorage.getItem(COACH_KEY)) || 65; } catch {}
+  const amount = (gal) => (price != null ? money(gal * price) : `${gallons(gal)} gal`);
+  const mins = (m) => (m < 1 ? `${Math.max(1, Math.round(m * 60))} s` : `${m.toFixed(m < 10 ? 1 : 0)} min`);
+  const render = () => {
+    const list = Coach.items({ pts, rows, e, vehicle, price, targetMph: target });
+    el.hidden = false;
+    if (!list.length) {
+      el.innerHTML = `<h2>Where you could save</h2><p class="hint">Nothing stood out on this drive: no hard stops, long idles or fast cruising worth changing.</p>`;
+      return;
+    }
+    const item = (it) => {
+      const head = (title) => `<div class="coach-head"><b>${title}</b><span>${amount(it.gal)}</span></div>`;
+      if (it.key === "braking") {
+        return `<li>${head("Brake less, coast more")}
+          <p>Slowing down threw away speed that took about ${amount(it.gal)} of gas to build${it.count > 1 ? `, over ${plural(it.count, "slow-down")}` : ""}. Some stops can't be helped, but lifting off sooner lets the car coast with the fuel cut off instead. The biggest:</p>
+          <div class="coach-stops">${it.events.map((s) => `<button type="button" data-i="${s.peakI}">${Math.round(s.fromMph)}→${Math.round(s.toMph)} mph<small>${s.peakG.toFixed(2)} g · ${amount(s.galEq)}</small></button>`).join("")}</div></li>`;
+      }
+      if (it.key === "speed") {
+        const perHour = price != null && it.minutes > 0.05 ? (it.gal * price) / (it.minutes / 60) : null;
+        const options = [60, 65, 70].filter((v) => v < it.topMph);
+        const saved = price != null ? it.gal * price >= 0.005 : it.gal >= 0.001;
+        return `<li>${head(`Cruise at ${it.targetMph}`)}
+          <p>You drove ${mins(it.aboveMin)} above ${it.targetMph} mph (top ${Math.round(it.topMph)}). Holding ${it.targetMph} there would have ${saved ? `used ${amount(it.gal)} less gas and taken ${mins(it.minutes)} longer${perHour != null ? `: like being paid ${money(perHour)} an hour for the extra time` : ""}` : `saved almost nothing and taken ${mins(it.minutes)} longer`}.</p>
+          ${options.length > 1 ? `<div class="seg coach-target" role="group" aria-label="Cruising speed">${options.map((v) => `<button type="button" data-v="${v}" aria-pressed="${v === it.targetMph}">${v} mph</button>`).join("")}</div>` : ""}
+          <p class="hint">${it.source === "drive" ? "From your own fuel use at steady speeds on this drive." : "From air drag (this drive had too little steady cruising to measure it)."} Speed limits and traffic come first.</p></li>`;
+      }
+      if (it.key === "rich") {
+        return `<li>${head("Ease into the gas")}
+          <p>Pressing hard makes the engine run rich, spending fuel beyond what the air needs. A firm but not floored pedal keeps it lean.</p></li>`;
+      }
+      return `<li>${head("Switch off for long waits")}
+        <p>The engine idled ${fmtDur(it.idleMs)} at a standstill. For waits over a minute (not traffic lights), switching off saves more than the restart uses.</p></li>`;
+    };
+    el.innerHTML = `<h2>Where you could save</h2><ul class="coach-list">${list.map(item).join("")}</ul>
+      <details class="how"><summary>How these are estimated</summary>
+        <p>Braking is the energy lost beyond what air and tires would have taken anyway (${Math.round(Engine.physics.massKg(vehicle))} kg, 25% engine efficiency), from GPS speed. It isn't measured fuel: it assumes a level road (going downhill reads as braking), and it can't tell the brakes from engine braking. Speed compares each second above the cruising speed with the same miles at that speed, using how fuel per mile grows with speed. Flooring it and idling are measured from the engine.</p>
+      </details>`;
+  };
+  render();
+  el.onclick = (ev) => {
+    const stop = ev.target.closest("[data-i]");
+    if (stop) { focus(Number(stop.dataset.i)); return; }
+    const b = ev.target.closest(".coach-target button");
+    if (b) {
+      target = Number(b.dataset.v);
+      try { localStorage.setItem(COACH_KEY, String(target)); } catch {}
+      render();
+    }
+  };
+}
+
 // Highway vs town, where the fuel went, trip cost, car health: everything that needs the engine.
-function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle = trip?.meta?.vehicle ?? "" } = {}) {
+function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle = trip?.meta?.vehicle ?? "", coach = null } = {}) {
   const figs = document.getElementById("figs");
   if (!figs) return;
+  if (coach) coachCard(document.getElementById("coach"), { ...coach, e, vehicle, price: gas?.price ?? null });
   const cost = (g) => (gas ? money(g * gas.price) : null);
   const mi = sm.miles.toFixed(sm.miles < 10 ? 1 : 0);
   // With fuel readings over less of the drive, mpg is only for the part they cover, and gas for the
@@ -498,12 +557,10 @@ function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle =
       <div class="waste-bar" role="img" aria-label="${esc(kinds.map(([, label, g]) => `${label} ${Math.round(pct(g))}%`).join(", "))}">${kinds.map(([k, , g]) => `<i class="w-${k}" style="flex-grow:${g}"></i>`).join("")}</div>
       <dl class="waste-list">${kinds.map(([k, label, g, why]) => `
         <div><dt><i class="sw w-${k}"></i>${label}<small>${why}</small></dt><dd>${gallons(g)} gal${cost(g) ? ` · ${cost(g)}` : ""} · ${Math.round(pct(g))}%</dd></div>`).join("")}
-        ${e.cutMs >= 30000 ? `<div><dt><i class="sw w-cut"></i>Coasting, fuel off<small>the engine cut fuel entirely while you coasted</small></dt><dd>${fmtDur(e.cutMs)} · 0 gal</dd></div>` : ""}
-        <div><dt><i class="sw w-braking"></i>Slowing down<small>rough estimate of the speed you braked away, as fuel it took to build</small></dt><dd>≈ ${gallons(e.brakingGalEq)} gal-eq</dd></div></dl>
+        ${e.cutMs >= 30000 ? `<div><dt><i class="sw w-cut"></i>Coasting, fuel off<small>the engine cut fuel entirely while you coasted</small></dt><dd>${fmtDur(e.cutMs)} · 0 gal</dd></div>` : ""}</dl>
       <details class="how"><summary>How these are estimated</summary>
         <p>${e.fromCar ? "Fuel use is as reported by the car." : `This car doesn't report fuel use, so it's estimated from the air flowing into the engine and the air-fuel ratio the engine asks for${e.perSample ? ", reading by reading" : ""}, corrected by the engine's fuel trims (how much fuel it adds or removes beyond what the airflow sensor implies).`}
         ${e.speedFactor !== 1 ? `Miles use the car's speed, which read ${Math.abs((1 - 1 / e.speedFactor) * 100).toFixed(1)}% ${e.speedFactor > 1 ? "low" : "high"} against GPS on this drive, corrected.` : "Miles use the car's own speed."}</p>
-        <p>Slowing down is the energy lost beyond what air and tires would have taken anyway (${Math.round(e.massKg)} kg, 25% engine efficiency). It isn't measured fuel: it assumes a level road (going downhill reads as braking), and it can't tell the brakes from the transmission's engine braking. Treat it as a hint, not a bill.</p>
       </details>`;
   }
 
@@ -561,10 +618,9 @@ function momentsFor(pts, sm) {
     if (!best || mpg > best.mpg) best = { i: mid, mpg };
     if (!worst || mpg < worst.mpg) worst = { i: mid, mpg };
   }
-  if (best && worst && best.mpg - worst.mpg > 5) {
-    out.push({ i: best.i, text: `Best minute ${best.mpg >= 99 ? "99+" : best.mpg.toFixed(0)} mpg` });
-    out.push({ i: worst.i, text: `Thirstiest minute ${worst.mpg.toFixed(0)} mpg` });
-  }
+  // Only the thirstiest: the best minute is nearly always a long downhill coast, which says nothing
+  // about the driving.
+  if (best && worst && best.mpg - worst.mpg > 5) out.push({ i: worst.i, text: `Thirstiest minute ${worst.mpg.toFixed(0)} mpg` });
   // Moments within about 300 m of each other share one label.
   const merged = [];
   for (const m of out) {
@@ -1148,7 +1204,9 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
     view.moments(momentsFor(pts, sm));
     // Coverage is against the whole drive: its GPS miles, and for one trip its door-to-door time.
     const scope = { tripMiles: sm.miles, tripMs: trip ? endOf(trip) - trip.startedWallMs : null };
-    sideEngine(sm, Engine.summary(rows, { vehicle, ...scope }), { gas, partial, trip, vehicle });
+    // Coaching is for one drive at a time: a day or a week mixes too much to say what to change.
+    const coach = trip ? { pts, rows, focus: (i) => { view.map.setView([pts[i].lat, pts[i].lon], Math.max(view.map.getZoom(), 16)); pick(i); } } : null;
+    sideEngine(sm, Engine.summary(rows, { vehicle, ...scope }), { gas, partial, trip, vehicle, coach });
   }
 
   return { ...view, setEngine, pick };

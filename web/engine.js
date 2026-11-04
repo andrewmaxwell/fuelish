@@ -75,11 +75,56 @@ const Engine = (() => {
     return rows;
   }
 
+  // GPS fix times and the phone's own clock (OBD replies, motion sensors) don't quite agree: on the
+  // Civic recordings the GPS track runs about 2 s ahead of the pedal, rpm and accelerometer, which
+  // all agree with each other. Matched by timestamp, every engine value would land ~2 s (50 m at
+  // highway speed) down the road from where it happened. The offset is found per drive by sliding
+  // the car's speed against GPS speed, and engine rows are moved onto GPS time. Returns the shift in
+  // ms (0 when the drive has too little moving data to tell, or no clear best).
+  function align(rows, pts) {
+    const todo = rows.filter((r) => r.shiftMs == null);
+    if (!todo.length) return rows.shiftMs ?? 0;
+    const gps = pts.filter((p) => p.v != null);
+    const at = (t) => {
+      let lo = 0, hi = gps.length - 1;
+      if (hi < 1 || t < gps[0].t || t > gps[hi].t) return null;
+      while (hi - lo > 1) { const m = (lo + hi) >> 1; if (gps[m].t <= t) lo = m; else hi = m; }
+      const a = gps[lo], b = gps[hi];
+      if (b.t - a.t > 2500) return null;
+      return b.t === a.t ? a.v : a.v + ((b.v - a.v) * (t - a.t)) / (b.t - a.t);
+    };
+    const moving = todo.filter((r) => r.speed != null && r.speed > 5);
+    const err = (lag) => {
+      let s = 0, n = 0;
+      for (const r of moving) {
+        const g = at(r.t - lag);
+        if (g == null) continue;
+        s += Math.abs(r.speed / 3.6 - g);
+        n++;
+      }
+      return n >= 120 ? s / n : null;
+    };
+    let best = 0, bestErr = err(0);
+    if (bestErr != null) {
+      for (let lag = -1000; lag <= 4000; lag += 250) {
+        const e = err(lag);
+        if (e != null && e < bestErr) { best = lag; bestErr = e; }
+      }
+      // Only a clear improvement counts: noise alone can nudge the minimum a step either way.
+      if (best !== 0 && !(bestErr < 0.85 * err(0))) best = 0;
+    } else best = 0;
+    for (const r of todo) { r.t -= best; r.shiftMs = best; }
+    rows.shiftMs = best;
+    return best;
+  }
+
   // The car's speed sensor is often a few percent off (tire size and wear). Where GPS is good and
   // the car is moving, compare the two; if they disagree consistently, scale the car's speed to GPS.
   // Rows keep the car's own reading as `speedCar`. Returns the factor applied (1 when none).
+  // Engine rows are first moved onto GPS time (see align).
   function calibrate(rows, pts) {
     if (!rows.length || !pts?.length || rows.calibrated != null) return rows.calibrated ?? 1;
+    align(rows, pts);
     const ratios = [];
     let j = 0;
     for (const p of pts) {
@@ -94,7 +139,8 @@ const Engine = (() => {
       const med = ratios[ratios.length >> 1];
       if (med > 0.9 && med < 1.1 && Math.abs(med - 1) > 0.003) k = med;
     }
-    if (k !== 1) for (const r of rows) if (r.speed != null) { r.speedCar = r.speed; r.speed *= k; }
+    // A row already scaled (merged in from an earlier calibration) keeps its scaling.
+    if (k !== 1) for (const r of rows) if (r.speed != null && r.speedCar == null) { r.speedCar = r.speed; r.speed *= k; }
     rows.calibrated = k;
     return k;
   }
@@ -337,7 +383,9 @@ const Engine = (() => {
   const cToF = (c) => (c * 9) / 5 + 32;
   const mph = (kmh) => kmh * KMH_TO_MPH;
 
-  return { fuelLabel, epa, recorded, rawOnly, hasSummary, merge, fromChunks, fromRaw, derive, calibrate, summary, smoothMpg, HIGHWAY_MPH, attach, cToF, mph, galOf, FUEL_G_PER_L, L_PER_GAL };
+  const physics = { J_PER_GAL, ENGINE_EFF, CRR, CDA, AIR, massKg };
+
+  return { physics, align, fuelLabel, epa, recorded, rawOnly, hasSummary, merge, fromChunks, fromRaw, derive, calibrate, summary, smoothMpg, HIGHWAY_MPH, attach, cToF, mph, galOf, FUEL_G_PER_L, L_PER_GAL };
 })();
 
 // Average regular gas price for a trip's week and region (U.S. EIA weekly survey, via /api/v1/gas-prices).

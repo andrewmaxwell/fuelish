@@ -90,7 +90,9 @@ const Route = (() => {
   }
 
   // Forward acceleration from GPS speed, sideways acceleration from speed × turn rate
-  // (central differences; null across gaps, and sideways also below 3 m/s where bearing is noise).
+  // (central differences; null across gaps). Sideways needs all three fixes above 4 m/s (9 mph):
+  // slower than that, GPS bearing can flip half a turn between fixes. A heading swinging faster
+  // than 45°/s at that speed is a bearing glitch, not a corner.
   function derive(pts) {
     pts = pts.filter((p) => p.lat != null && p.lon != null).sort((a, b) => a.t - b.t);
     for (let i = 0; i < pts.length; i++) {
@@ -99,10 +101,10 @@ const Route = (() => {
       const dt = near ? (b.t - a.t) / 1000 : 0;
       p.a = near && a.v != null && b.v != null ? (b.v - a.v) / dt : null;
       p.side = null;
-      if (near && p.v != null && p.v > 3 && a.v > 2 && b.v > 2 && a.brg != null && b.brg != null) {
+      if (near && p.v > 4 && a.v > 4 && b.v > 4 && a.brg != null && b.brg != null) {
         const turn = ((((b.brg - a.brg) % 360) + 540) % 360) - 180; // degrees, -180..180
         const side = p.v * (turn * Math.PI / 180) / dt;
-        if (Math.abs(side) < 1.5 * G) p.side = side;
+        if (Math.abs(turn / dt) <= 45 && Math.abs(side) < 1.5 * G) p.side = side;
       }
     }
     return pts;
