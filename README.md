@@ -30,6 +30,9 @@ docs/      data-format.md: every record type, clock and file
    Trips that start within 30 min of the last one ending, near where it ended (errands, a fuel stop), are linked into
    one **outing**. A day, a week or an outing can be opened as one map of all its trips. An automatic stop waits a
    couple of minutes after the car goes away; that wait (usually you walking off) isn't counted or drawn.
+   With the OBD adapter, a trip also shows RPM, gas pedal and fuel flow under the speed timeline (and as map
+   colors), plus fuel used, MPG, idling, coolant, charging voltage and check-engine status. The Civic doesn't report
+   fuel use, so it's estimated from airflow and the commanded air-fuel ratio.
 
 **OBD is read-only by construction:** `ElmAllowlist` lets through only AT/ST adapter setup, mode 01 (live data),
 03/07/0A (read stored, pending and permanent codes) and 09 (VIN/calibration). Anything else, including 04 (clear codes), throws

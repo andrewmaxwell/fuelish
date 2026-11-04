@@ -46,9 +46,9 @@ batching latency.
 | `stats` | every 10 s | writer totals: records written, dropped, queue depth |
 | `drop` | when the write queue overflowed | `total` drops so far (should never appear) |
 | `event` | app events | `ev`: `start` (detail = trigger), `stop` (detail = stop reason), `car_bt_connected`/`car_bt_disconnected`, `provider_enabled`/`disabled`, `obd_not_started` |
-| `obd_event` | adapter link changes | `ev`: `connected`, `adapter_ready`, `disconnected`, `vehicle_lost`, `pid_demoted` |
+| `obd_event` | adapter link changes | `ev`: `connected`, `adapter_ready`, `disconnected`, `vehicle_lost` (the car stopped answering: 5 errors, or 5 requests in a row with nothing answered, which is how ignition off shows up on the Civic), `pid_demoted`, `pid_restored` (a demoted PID answered again and is back on its tier's interval) |
 | `obd_raw` | every adapter exchange | `tx`, `rx`, `cmd`, `st` (OK/NO_DATA/ERROR/TIMEOUT), `resp` (exact text before the `>` prompt) |
-| `obd_discovery` | after the car answers | protocol, supported PIDs per ECU, PIDs the decoder doesn't know, decoder formulas for every supported PID, VIN/calibration info, raw DTC responses |
+| `obd_discovery` | after the car answers | protocol, `mainEcu` (the engine ECU: 7E8/18DAF110, else the one supporting the most PIDs), supported PIDs per ECU, PIDs the decoder doesn't know, decoder formulas for every supported PID, VIN/calibration info, raw DTC responses |
 | `obd_bench` | after discovery | single-PID latency, multi-PID completeness and throughput per batch size, chosen batch size |
 | `obd` | each decoded value | `tx`, `rx`, `ecu` (CAN header), `pid`, `data` (hex data bytes), `f` (field), `val`, `u` (unit). PIDs without a decoder have only `data`. |
 | `obd_adapter` | every 5 s | adapter-measured battery voltage (`ATRV`) |
@@ -71,6 +71,11 @@ Android/data/app.fuelish/files/recordings/<id>/
                              bearingDeg, joltMps2], where jolt = max |‖accel‖ − g| since the previous fix.
                              Older chunks (no trackFormat) only have a point every 5 s; the web app rebuilds
                              their route from the raw chunks instead.
+                             `engine` (engineFormat 1, only when OBD values arrived): rows of [wallMs at the
+                             middle of a second, mean of each `engineCols` field from the main ECU over that
+                             second, or null], for about 20 engine fields (rpm, speed, pedal, load, maf,
+                             commanded_lambda, coolant_temp, ...). ~8 KB a minute. Older chunks don't have it;
+                             the web app reads their engine data from the raw chunks.
   chunk-000000.uploaded      server acknowledged this chunk
   meta.uploaded              sha256 of the last recording.json the server accepted
 ```

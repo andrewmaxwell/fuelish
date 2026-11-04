@@ -85,8 +85,10 @@ class Uploader(
         val meta = store.chunkMeta(id, seq)
         var metaJson = meta.toString()
         // Headers up to 64 KB were verified against Cloudflare; a 60 s chunk's 1 Hz track is ~5 KB.
-        if (metaJson.length > 40_000) {
-            meta.remove("track")
+        // The engine summary is ~8 KB a minute. Too big: drop it first, then the track (raw data has both).
+        for (key in listOf("engine", "engineCols", "engineFormat", "track")) {
+            if (metaJson.length <= 40_000) break
+            meta.remove(key)
             metaJson = meta.toString()
         }
         val headers = mapOf(

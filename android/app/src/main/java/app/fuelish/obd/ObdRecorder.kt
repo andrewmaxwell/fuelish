@@ -46,6 +46,8 @@ class ObdRecorder(
     private var protocol = 0
     private var supported = sortedSetOf<Int>()
     private var maxBatch = 1
+    /** The engine ECU: its values (not the transmission's duplicates) go into the engine summary. */
+    private var mainEcu = ""
 
     // Rolling stats for status and obd_stats records.
     private var statWindowStart = 0L
@@ -173,8 +175,12 @@ class ObdRecorder(
         supported = all.filterTo(sortedSetOf()) { !Pids.isBitmapPid(it) }
         if (supported.isEmpty()) return false
 
+        // ECU #1 (7E8 / 18DAF110) is the engine by OBD convention; otherwise the one supporting the most.
+        val ecus = perEcu.keys().asSequence().toList()
+        mainEcu = ecus.firstOrNull { it == "7E8" || it == "18DAF110" }
+            ?: ecus.maxByOrNull { perEcu.getJSONArray(it).length() } ?: ""
         val discovery = JSONObject()
-            .put("protocolNumber", dpn).put("protocol", dp)
+            .put("protocolNumber", dpn).put("protocol", dp).put("mainEcu", mainEcu)
             .put("supportedByEcu", perEcu)
             .put("supported", JSONArray(supported.map { Pids.hex(it) }))
             .put("unknownToDecoder", JSONArray(supported.filter { it !in Pids.all }.map { Pids.hex(it) }))
@@ -386,10 +392,12 @@ class ObdRecorder(
         }
         for (f in def.fields) {
             val value = runCatching { f.decode(v.data) }.getOrDefault(Double.NaN)
+            val summary = if (ecu == mainEcu && f.name in SUMMARY_FIELDS && value.isFinite()) doubleArrayOf(value) else null
             sink.emit(
                 "obd:" + f.name, r.doneNs,
                 JsonLine("obd").n("tx", r.sentNs).n("rx", r.doneNs).s("ecu", ecu).s("pid", Pids.hex(v.pid)).s("data", dataHex)
                     .s("f", f.name).d("val", value).s("u", f.unit).build(),
+                summary,
             )
             values[f.name] = if (value.isFinite()) "%.4g %s".format(value, f.unit) else "–"
         }
@@ -414,5 +422,14 @@ class ObdRecorder(
         statWindowStart = now
         statRequests = 0
         statLatencyNs = 0
+    }
+
+    companion object {
+        /** Engine values summarized per second in each chunk's stats (see EngineSummary). */
+        val SUMMARY_FIELDS = setOf(
+            "rpm", "speed", "throttle", "rel_throttle", "accel_pedal_d", "engine_load", "abs_load", "maf", "map",
+            "commanded_lambda", "fuel_rate", "fuel_sys1", "stft_b1", "ltft_b1", "timing_advance", "coolant_temp", "iat",
+            "fuel_level", "module_voltage", "dtc_count", "mil_on",
+        )
     }
 }

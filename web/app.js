@@ -261,12 +261,30 @@ async function tripPoints(id, detail, onProgress) {
     routeCache.set(id, pts);
   }
   const end = r.driveEndWallMs;
-  return end != null ? pts.filter((p) => p.t <= end) : pts;
+  const out = end != null ? pts.filter((p) => p.t <= end) : pts;
+  // Engine rows from the chunk summaries; `engineRaw` lists chunks whose engine data is only raw.
+  out.engine = Engine.derive(Engine.fromChunks(chunks)).filter((e) => end == null || e.t <= end);
+  out.engineRaw = Engine.rawOnly(chunks);
+  out.end = end;
+  return out;
+}
+
+// Older drives (before the phone summarized engine data): read it from the raw chunks once.
+const engineCache = new Map();
+async function rawEngine(id, pts, onProgress) {
+  if (engineCache.has(id)) return engineCache.get(id);
+  const links = await api(`/recordings/${id}/links`, { method: "POST" });
+  const rows = Engine.derive(await Engine.fromRaw(pts.engineRaw, pts.engineRaw.map((c) => links.chunks[c.meta.seq]), onProgress))
+    .filter((e) => pts.end == null || e.t <= pts.end);
+  engineCache.set(id, rows);
+  return rows;
 }
 
 const stat = (label, value, unit = "") => `<div class="stat"><span>${label}</span><b>${value}<small>${unit}</small></b></div>`;
+// Engine-only options (RPM, pedal, fuel) stay hidden until the drive's engine data is in.
 const seg = (key, options) => `<div class="seg" data-key="${key}" role="group">${Object.entries(options)
-  .map(([k, v]) => `<button type="button" data-v="${k}">${esc(typeof v === "string" ? v : v.label)}</button>`).join("")}</div>`;
+  .map(([k, v]) => `<button type="button" data-v="${k}"${key !== "base" && Route.METRICS[k]?.engine ? " data-engine hidden" : ""}>${esc(typeof v === "string" ? v : v.label)}</button>`).join("")}</div>`;
+const engineCard = () => `<div class="card" id="engine-card" hidden><h2>Engine</h2><div id="engine-body"></div></div>`;
 const routeCard = () => `
   <div class="card">
     <h2>Route</h2>
@@ -328,6 +346,7 @@ async function showTrip(id) {
       <section class="trip-time"><div id="timeline" class="chart-host"></div></section>
       <aside class="trip-side">
         <div class="stats" id="stats"></div>
+        ${engineCard()}
         ${routeCard()}
         ${frictionCard("")}
       </aside>
@@ -351,7 +370,20 @@ async function showTrip(id) {
     stat("Top speed", sm.maxMph != null ? sm.maxMph.toFixed(0) : "–", "mph") +
     stat("Stops", sm.stops.length) +
     stat("Hardest brake", Math.abs(sm.peak.brake).toFixed(2), "g");
-  drawRoute(pts, sm, { timeline: true });
+  const view = drawRoute(pts, sm, { timeline: true });
+  if (pts.engine.length) view.setEngine(pts.engine);
+  else if (pts.engineRaw.length) {
+    const card = document.getElementById("engine-card"), body = document.getElementById("engine-body");
+    card.hidden = false;
+    try {
+      const rows = await rawEngine(id, pts, (i, n) => {
+        body.innerHTML = `<p class="hint">Reading engine data from the raw recording… <progress max="${n}" value="${i}"></progress></p>`;
+      });
+      if (document.getElementById("engine-card") === card) view.setEngine(rows);
+    } catch (e) {
+      if (e.message !== "unauthorized") body.innerHTML = `<p class="bad">Couldn't read the engine data: ${esc(e.message)}</p>`;
+    }
+  }
 }
 
 // ---------- several trips: a day, a week, or an outing ----------
@@ -415,6 +447,7 @@ async function showMany(kind, key) {
       </section>
       <aside class="trip-side">
         <div class="stats" id="stats"></div>
+        ${shown.length ? engineCard() : ""}
         ${shown.length ? `<div class="card"><h2>${plural(shown.length, "trip")}</h2><ol class="legs trip-rows">${rows}</ol></div>` : ""}
         ${shown.length ? routeCard() + frictionCard(" in these trips") : ""}
       </aside>
@@ -428,13 +461,16 @@ async function showMany(kind, key) {
   // A few at a time; each trip's points are tagged with its index so the map keeps them apart.
   // One trip that can't load (e.g. a raw chunk missing) leaves just that trip off the map.
   const lists = new Array(shown.length);
+  const engines = new Array(shown.length).fill([]);
   const failed = [];
   let nextI = 0;
   await Promise.all(Array.from({ length: Math.min(4, shown.length) }, async () => {
     while (nextI < shown.length) {
       const i = nextI++;
       try {
-        lists[i] = (await tripPoints(shown[i].id)).map((p) => ({ ...p, trip: i }));
+        const tp = await tripPoints(shown[i].id);
+        engines[i] = tp.engine; // summaries only: raw rebuilds of older drives are too slow for a week
+        lists[i] = tp.map((p) => ({ ...p, trip: i }));
       } catch (e) {
         if (e.message === "unauthorized") throw e;
         lists[i] = [];
@@ -462,6 +498,8 @@ async function showMany(kind, key) {
     stat("Top speed", sm.maxMph != null ? sm.maxMph.toFixed(0) : "–", "mph") +
     stat("Hardest brake", Math.abs(sm.peak.brake).toFixed(2), "g");
   const view = drawRoute(pts, sm, { withDay: kind === "week" });
+  const engineRows = engines.flat();
+  if (engineRows.length) view.setEngine(engineRows, { partial: engines.some((e, i) => !e.length && lists[i].length) });
 
   // Hovering a trip in the list brings it forward on the map.
   const index = new Map(shown.map((r, i) => [r.id, i]));
@@ -483,6 +521,15 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
   if (!Route.WIDTHS[state.width]) state.width = "none";
   if (!Route.BASES[state.base]) state.base = "muted";
 
+  // What's drawn: the saved choice, except engine colors on a drive without engine data.
+  let hasEngine = false;
+  const shownState = {};
+  const effective = () => Object.assign(shownState, state, {
+    color: Route.METRICS[state.color].engine && !hasEngine ? "speed" : state.color,
+    width: Route.METRICS[state.width]?.engine && !hasEngine ? "none" : state.width,
+  });
+  effective();
+
   const readout = document.getElementById("readout");
   const fmt = (x, d, u) => (x == null || !Number.isFinite(x) ? "–" : x.toFixed(d) + u);
   let views = [];
@@ -499,11 +546,14 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
         <dt>Turning</dt><dd>${fmt(p.side != null ? Math.abs(p.side) / Route.G : null, 2, " g")}${p.side != null && Math.abs(p.side) / Route.G >= 0.03 ? (p.side > 0 ? " right" : " left") : ""}</dd>
         <dt>Bumps</dt><dd>${fmt(p.jolt != null ? p.jolt / Route.G : null, 2, " g")}</dd>
         <dt>GPS error</dt><dd>${fmt(p.acc, 0, " m")}</dd>
+        ${p.eng ? `<dt>RPM</dt><dd>${fmt(p.eng.rpm, 0, "")}</dd>
+        <dt>Gas pedal</dt><dd>${fmt(p.eng.pedal, 0, "%")}</dd>
+        <dt>Fuel</dt><dd>${p.eng.cut ? "cut off" : fmt(p.eng.gph, 2, " gal/h")}</dd>` : ""}
       </dl>`;
   };
 
   const mapEl = document.getElementById("map");
-  const view = Route.render(mapEl, pts, state, pick);
+  const view = Route.render(mapEl, pts, shownState, pick);
   const timeline = withTimeline ? Charts.timeline(document.getElementById("timeline"), pts, pick) : null;
   const friction = Charts.frictionCircle(document.getElementById("friction"), pts, pick);
   views = [{ highlight: (i) => view.mark(i) }, friction, ...(timeline ? [timeline] : [])];
@@ -513,11 +563,11 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
     ? `<div><span>Braking</span><b>${Math.abs(pk.brake).toFixed(2)} g</b></div><div><span>Speeding up</span><b>${pk.accel.toFixed(2)} g</b></div><div><span>Turning</span><b>${pk.corner.toFixed(2)} g</b></div>`
     : `<p class="muted">Not enough moving GPS fixes here.</p>`;
 
-  const legend = () => { document.getElementById("rt-legend").innerHTML = Route.legendHtml(state, pts); };
-  const recolor = () => { view.redraw(); legend(); timeline?.recolor(Route.segmentColors(pts, state)); };
+  const legend = () => { document.getElementById("rt-legend").innerHTML = Route.legendHtml(shownState, pts); };
+  const recolor = () => { effective(); view.redraw(); legend(); timeline?.recolor(Route.segmentColors(pts, shownState)); };
   const save = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify(state)); } catch {} };
   const syncButtons = () => document.querySelectorAll(".seg").forEach((g) =>
-    g.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(state[g.dataset.key] === b.dataset.v))));
+    g.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(shownState[g.dataset.key] === b.dataset.v))));
   document.querySelectorAll(".seg").forEach((g) => g.addEventListener("click", (e) => {
     const b = e.target.closest("button");
     if (!b) return;
@@ -532,7 +582,46 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (document.getElementById("map")) recolor(); });
   // The map's container changes size with the layout (e.g. rotating a phone).
   new ResizeObserver(() => view.map.invalidateSize()).observe(mapEl);
-  return view;
+
+  // Engine data arrives with the route, or later for older drives read from raw chunks.
+  function setEngine(rows, { partial = false } = {}) {
+    if (!rows.length || !document.getElementById("map")) return;
+    Engine.attach(pts, rows);
+    hasEngine = true;
+    document.querySelectorAll("[data-engine]").forEach((b) => { b.hidden = false; });
+    syncButtons();
+    recolor();
+    timeline?.setRows([
+      { label: "RPM", unit: "", get: (p) => p.eng?.rpm ?? null, fmt: (v) => v.toFixed(0) + " rpm", min: 0, max: 3000 },
+      { label: "Gas pedal", unit: "%", get: (p) => p.eng?.pedal ?? null, fmt: (v) => v.toFixed(0), min: 0, max: 100 },
+      { label: "Fuel", unit: "gal/h", get: (p) => p.eng?.gph ?? null, fmt: (v) => v.toFixed(2), min: 0, max: 1 },
+    ]);
+    const card = document.getElementById("engine-card");
+    if (!card) return;
+    card.hidden = false;
+    const e = Engine.summary(rows);
+    const temp = (c) => (c == null ? "–" : Engine.cToF(c).toFixed(0));
+    const row = (label, value) => `<div><dt>${label}</dt><dd>${value}</dd></div>`;
+    const light = e.mil == null ? "–" : `${e.mil ? "On" : "Off"}${e.dtcs != null ? `, ${e.dtcs ? plural(e.dtcs, "code") : "no codes"}` : ""}`;
+    document.getElementById("engine-body").innerHTML = `
+      <div class="stats engine-stats">
+        ${stat("Fuel used", e.gal != null ? e.gal.toFixed(e.gal < 1 ? 2 : 1) : "–", "gal")}
+        ${stat("Fuel economy", e.mpg != null ? e.mpg.toFixed(0) : "–", "mpg")}
+        ${stat("Top RPM", e.maxRpm ? Math.round(e.maxRpm).toLocaleString() : "–")}
+      </div>
+      <dl class="engine-list">
+        ${row("Idling", fmtDur(e.idleMs))}
+        ${row("Coasting with fuel cut", fmtDur(e.cutMs))}
+        ${row("Coolant", e.coolant[0] != null ? `${temp(e.coolant[0])} → ${temp(e.coolant[1])} °F` : "–")}
+        ${row("Charging", Number.isFinite(e.volts[0]) ? `${e.volts[0].toFixed(1)}–${e.volts[1].toFixed(1)} V` : "–")}
+        ${row("Fuel tank", e.fuelLevel != null ? e.fuelLevel.toFixed(0) + "%" : "–")}
+        ${row("Check engine light", light)}
+      </dl>
+      <p class="hint">${e.fromCar ? "Fuel use as reported by the car." : "Fuel use is estimated from airflow and the air-fuel ratio the engine asks for; this car doesn't report it directly."}
+        Economy uses the car's own speed.${partial ? " Some of these trips have no engine data and aren't counted." : ""}</p>`;
+  }
+
+  return { ...view, setEngine };
 }
 
 window.addEventListener("hashchange", route);

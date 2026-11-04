@@ -200,9 +200,28 @@ const Route = (() => {
       value: null, // filled per route: 0..1 progress
       stops: seq([0, 0.33, 0.66, 1], ...VIOLET),
     },
+    // From the OBD adapter (p.eng, see engine.js); offered only on drives that have it.
+    rpm: {
+      label: "RPM", unit: "rpm", fmt: (x) => x.toFixed(0), engine: true,
+      value: (p, q) => q.eng?.rpm ?? null,
+      stops: seq([800, 2000, 3000, 4500], ...VIOLET),
+      width: [800, 5000],
+    },
+    pedal: {
+      label: "Pedal", unit: "%", fmt: (x) => x.toFixed(0), engine: true, note: "Gas pedal position as the car reports it (about 20% at rest)",
+      value: (p, q) => q.eng?.pedal ?? null,
+      stops: seq([20, 30, 45, 65, 90], ...BLUE),
+      width: [20, 90],
+    },
+    fuel: {
+      label: "Fuel", unit: "gal/h", fmt: (x) => x.toFixed(1), engine: true, note: "Estimated fuel flow (0 while coasting in fuel cut)",
+      value: (p, q) => q.eng?.gph ?? null,
+      stops: seq([0, 0.5, 1.5, 3, 6], ...ORANGE),
+      width: [0, 6],
+    },
   };
 
-  const WIDTHS = { none: "Even", speed: "Speed", accel: "Accel", jolt: "Bumps" };
+  const WIDTHS = { none: "Even", speed: "Speed", accel: "Accel", jolt: "Bumps", rpm: "RPM", fuel: "Fuel" };
   const BASES = { muted: "Map", streets: "Streets", satellite: "Satellite" };
   const stopsFor = (m) => m.stops[dark() ? "dark" : "light"];
 

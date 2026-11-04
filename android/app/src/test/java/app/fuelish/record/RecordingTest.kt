@@ -58,6 +58,31 @@ class RecordingTest {
     }
 
     @Test
+    fun engineSummaryAveragesEachSecond() {
+        var t = 0L
+        val dir = tmp.newFolder("eng")
+        val closed = mutableListOf<ChunkInfo>()
+        val w = RecordingWriter(dir, "r2", chunkSeconds = 60, chunkMaxBytes = 1 shl 30,
+            elapsedNs = { t }, wallMs = { 10_000L + t / 1_000_000 }, onChunkClosed = { closed += it })
+        w.start()
+        // Second 10: rpm 1000 and 2000; second 11: rpm 3000 and speed 50. A non-summary value is ignored.
+        for ((ms, f, v) in listOf(Triple(100L, "rpm", 1000.0), Triple(600L, "rpm", 2000.0), Triple(1200L, "rpm", 3000.0), Triple(1300L, "speed", 50.0))) {
+            t = ms * 1_000_000
+            w.emit("obd:$f", t, JsonLine("obd").build(), doubleArrayOf(v))
+        }
+        t = 1_400_000_000
+        w.emit("obd:baro", t, JsonLine("obd").build())
+        w.stop()
+        val m = closed.single().meta
+        assertEquals(RecordingWriter.ENGINE_FORMAT, m.getInt("engineFormat"))
+        assertEquals("[\"rpm\",\"speed\"]", m.getJSONArray("engineCols").toString())
+        val rows = m.getJSONArray("engine")
+        assertEquals("[10500,1500,null]", rows.getJSONArray(0).toString())
+        assertEquals("[11500,3000,50]", rows.getJSONArray(1).toString())
+        assertEquals("OBD values stay out of the GPS track", 0, m.getJSONArray("track").length())
+    }
+
+    @Test
     fun recoveryCountsChunksAlreadyUploadedAndDeleted() {
         val store = RecordingStore(tmp.newFolder("root2"))
         val id = "20261103T000000Z-beef"

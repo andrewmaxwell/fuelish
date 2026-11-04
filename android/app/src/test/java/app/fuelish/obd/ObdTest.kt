@@ -100,8 +100,10 @@ class ObdTest {
 
     private class CollectSink : RecordSink {
         val lines: MutableList<Pair<String, String>> = Collections.synchronizedList(mutableListOf())
+        val summarized: MutableList<Pair<String, Double>> = Collections.synchronizedList(mutableListOf())
         override fun emit(stream: String, tNs: Long, line: String, track: DoubleArray?) {
             lines += stream to line
+            if (track != null) summarized += stream to track[0]
         }
         fun streams() = synchronized(lines) { lines.map { it.first } }
     }
@@ -136,6 +138,10 @@ class ObdTest {
         assertEquals("rpm", rpm.getString("u"))
         assertEquals("1AF8", rpm.getString("data"))
         assertEquals("7E8", rpm.getString("ecu"))
+        // The engine ECU's values feed the engine summary; values outside the summary list don't.
+        assertEquals("7E8", discovery.getString("mainEcu"))
+        assertTrue(sink.summarized.any { it.first == "obd:rpm" && it.second == 1726.0 })
+        assertTrue(sink.summarized.none { it.first == "obd:o2_present" })
     }
 
     @Test

@@ -19,6 +19,40 @@ fun interface RecordSink {
 
 class Rec(val stream: String, val tNs: Long, val line: String, val track: DoubleArray?)
 
+/**
+ * Per-second means of the engine values the OBD recorder marks for the summary, so the web
+ * page can chart them without downloading raw chunks (~2 MB a minute). Raw values stay in the chunk.
+ */
+class EngineSummary {
+    private val cols = LinkedHashMap<String, Int>()
+    private val bins = java.util.TreeMap<Long, HashMap<Int, DoubleArray>>() // second -> col -> [sum, n]
+
+    fun add(field: String, wallMs: Long, value: Double) {
+        if (!value.isFinite()) return
+        val c = cols.getOrPut(field) { cols.size }
+        val acc = bins.getOrPut(Math.floorDiv(wallMs, 1000L)) { HashMap() }.getOrPut(c) { DoubleArray(2) }
+        acc[0] += value
+        acc[1] += 1.0
+    }
+
+    val isEmpty get() = bins.isEmpty()
+
+    fun columns() = JSONArray(cols.keys.toList())
+
+    /** Rows of [wallMs at the middle of the second, mean per column (null if none that second)]. */
+    fun rows() = JSONArray().apply {
+        for ((sec, byCol) in bins) {
+            put(JSONArray().apply {
+                put(sec * 1000 + 500)
+                for (c in 0 until cols.size) {
+                    val acc = byCol[c]
+                    put(if (acc == null) JSONObject.NULL else Math.round(acc[0] / acc[1] * 100) / 100.0)
+                }
+            })
+        }
+    }
+}
+
 /** Per-stream interval statistics for one chunk; `t` values are sample timestamps. */
 class StreamStat {
     var n = 0L
@@ -96,6 +130,7 @@ class RecordingWriter(
     private var reportedDrops = 0L
     private var stats = HashMap<String, StreamStat>()
     private var track = JSONArray()
+    private var engine = EngineSummary()
 
     fun start() {
         dir.mkdirs()
@@ -157,7 +192,11 @@ class RecordingWriter(
         stats.getOrPut(r.stream) { StreamStat() }.add(r.tNs)
         // Every GPS fix goes into the chunk's track summary so the web map can draw the
         // route without downloading raw data. Point layout: see TRACK_FORMAT.
-        r.track?.let { t -> track.put(JSONArray().apply { t.forEach { put(if (it.isFinite()) it else JSONObject.NULL) } }) }
+        // OBD values marked for the engine summary carry their value the same way.
+        r.track?.let { t ->
+            if (r.stream.startsWith("obd:")) engine.add(r.stream.removePrefix("obd:"), chunkStartWall + (r.tNs - chunkStartNs) / 1_000_000, t[0])
+            else track.put(JSONArray().apply { t.forEach { put(if (it.isFinite()) it else JSONObject.NULL) } })
+        }
     }
 
     private fun openChunk() {
@@ -172,6 +211,7 @@ class RecordingWriter(
         chunkDrops = 0
         stats = HashMap()
         track = JSONArray()
+        engine = EngineSummary()
         write(
             Rec(
                 "chunk", chunkStartNs,
@@ -199,6 +239,11 @@ class RecordingWriter(
             put("streams", JSONObject().apply { stats.forEach { (k, s) -> put(k, s.toJson()) } })
             put("trackFormat", TRACK_FORMAT)
             put("track", track)
+            if (!engine.isEmpty) {
+                put("engineFormat", ENGINE_FORMAT)
+                put("engineCols", engine.columns())
+                put("engine", engine.rows())
+            }
         }
         val info = finalizeChunk(dir, seq, chunkRaw!!, meta)
         rawBytesTotal.addAndGet(meta.getLong("rawBytes"))
@@ -213,6 +258,9 @@ class RecordingWriter(
 
         /** 2 = every GPS fix as [wallMs, lat, lon, speedMps, hAccM, bearingDeg, joltMps2]; null = unknown. */
         const val TRACK_FORMAT = 2
+
+        /** 1 = `engine` rows of [wallMs, mean of each `engineCols` field over that second (or null)]. */
+        const val ENGINE_FORMAT = 1
 
         fun chunkName(seq: Int, ext: String) = "chunk-%06d%s".format(seq, ext)
 
