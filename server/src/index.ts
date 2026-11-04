@@ -366,7 +366,7 @@ const round5 = (x: number) => Math.round(x * 1e5) / 1e5;
 // unless it bridges a gap in the track, the car was standing still (GPS speed under 0.5 m/s at both
 // ends: position wander while parked), or it's an impossible jump. Without speeds, a step counts
 // only when it's longer than the fixes' own uncertainty.
-export const MAX_GAP_MS = 30_000;
+const MAX_GAP_MS = 30_000;
 export function segmentMeters(dtMs: number, d: number, v0?: number | null, v1?: number | null, acc0?: number | null, acc1?: number | null): number {
   if (dtMs <= 0 || dtMs > MAX_GAP_MS) return 0;
   if (d / (dtMs / 1000) > 90) return 0; // over 200 mph: a bad fix, not a drive
