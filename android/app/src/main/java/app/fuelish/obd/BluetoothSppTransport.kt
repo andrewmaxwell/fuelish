@@ -61,7 +61,8 @@ class BluetoothSppTransport private constructor(private val socket: BluetoothSoc
             if (!adapter.isEnabled) throw IOException("Bluetooth is off")
             if (address.isBlank()) throw IOException("no OBD adapter selected in settings")
             val device = adapter.getRemoteDevice(address)
-            adapter.cancelDiscovery()
+            // No cancelDiscovery() here: the app never scans, and on Android 12+ that call needs
+            // BLUETOOTH_SCAN, which we don't hold, so it threw before every connection attempt.
             val socket = try {
                 device.createRfcommSocketToServiceRecord(SPP).also { it.connect() }
             } catch (e: IOException) {
