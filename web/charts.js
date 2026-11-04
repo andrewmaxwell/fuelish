@@ -14,7 +14,7 @@ const Charts = (() => {
   // Speed over time, with a strip below it in the route's current colors, then optional extra rows
   // on the same time axis (engine data): { label, unit, get(p) -> number|null, fmt(x), min?, max? }.
   function timeline(host, pts, onPick, extraRows = []) {
-    const SPEED_H = 104, ROW_H = 54, top = 12, stripH = 6, bottom = 22, left = 34, right = 12;
+    const SPEED_H = 64, ROW_H = 54, top = 12, stripH = 6, bottom = 22, left = 34, right = 12;
     const svg = el("svg", { class: "timeline", role: "img", "aria-label": "Speed over time" }, host);
     const tip = document.createElement("div");
     tip.className = "chart-tip";
@@ -61,7 +61,7 @@ const Charts = (() => {
       svg.setAttribute("height", H);
       svg.replaceChildren();
       x = (t) => left + ((t - t0) / Math.max(1, t1 - t0)) * (W - left - right);
-      for (let v = 0; v <= ymax; v += 20) {
+      for (let v = 0; v <= ymax; v += ymax > 60 ? 40 : 20) {
         el("line", { x1: left, x2: W - right, y1: y(v), y2: y(v), class: v ? "grid" : "axis" }, svg);
         el("text", { x: left - 6, y: y(v) + 4, class: "tick", "text-anchor": "end" }, svg).textContent = v;
       }

@@ -177,6 +177,13 @@ const Route = (() => {
       stops: [[-0.3, "#ff6b6b"], [-0.1, "#c94a4a"], [0, "#6b6a65"], [0.1, "#3577c9"], [0.3, "#7fb6ff"]],
       width: [0, 0.3], abs: true,
     },
+    turn: {
+      label: "Turning", unit: "", note: "Gray is straight; bluer the harder you turn left, redder the harder you turn right",
+      fmt: (x) => `${Math.abs(x).toFixed(2)} g${x < 0 ? " left" : x > 0 ? " right" : ""}`,
+      value: (p, q) => (p.side != null && q.side != null ? (p.side + q.side) / 2 / G : null),
+      stops: [[-0.35, "#8fc0ff"], [-0.15, "#3b82e0"], [-0.03, "#6b6a65"], [0.03, "#6b6a65"], [0.15, "#e04848"], [0.35, "#ff8a8a"]],
+      width: [0, 0.35], abs: true,
+    },
     jolt: {
       label: "Bumps", unit: "g", fmt: (x) => x.toFixed(1), note: "Biggest jolt between GPS fixes (includes mount bounce)",
       value: (p, q) => (q.jolt != null ? q.jolt / G : null),
@@ -215,7 +222,7 @@ const Route = (() => {
     },
   };
 
-  const WIDTHS = { none: "Even", speed: "Speed", accel: "Accel", jolt: "Bumps", rpm: "RPM", fuel: "Fuel" };
+  const WIDTHS = { none: "Even", speed: "Speed", accel: "Accel", turn: "Turning", jolt: "Bumps", rpm: "RPM", fuel: "Fuel" };
   const stopsFor = (m) => m.stops;
 
   // ---------- rendering ----------
@@ -346,7 +353,7 @@ const Route = (() => {
       hi = f(pts[pts.length - 1].t);
     } else {
       lo = `${m.fmt(s[0][0])} ${m.unit}`;
-      hi = `${m.fmt(s[s.length - 1][0])}+ ${m.unit}`;
+      hi = m.unit ? `${m.fmt(s[s.length - 1][0])}+ ${m.unit}` : m.fmt(s[s.length - 1][0]);
     }
     return `<div class="legend"><span>${lo}</span><span class="bar" style="background:linear-gradient(90deg, ${grad})"></span><span>${hi}</span></div>` +
       (m.note ? `<p class="hint">${m.note}</p>` : "");

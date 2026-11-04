@@ -37,12 +37,42 @@ const Engine = (() => {
       if (c.meta.engineFormat !== 1) continue;
       const cols = c.meta.engineCols.map((f) => NAMES[f] || f);
       for (const r of c.meta.engine) {
-        const row = { t: r[0] };
-        cols.forEach((k, i) => { if (r[i + 1] != null) row[k] = r[i + 1]; });
-        rows.push(row);
+        // A second split across two chunks comes as two rows with the same time: average them.
+        const prev = rows.at(-1), dup = prev && prev.t === r[0];
+        const row = dup ? prev : { t: r[0] };
+        cols.forEach((k, i) => {
+          const v = r[i + 1];
+          if (v == null) return;
+          row[k] = dup && row[k] != null ? (row[k] + v) / 2 : v;
+        });
+        if (!dup) rows.push(row);
       }
     }
     return rows;
+  }
+
+  // The car's speed sensor is often a few percent off (tire size and wear). Where GPS is good and
+  // the car is moving, compare the two; if they disagree consistently, scale the car's speed to GPS.
+  // Rows keep the car's own reading as `speedCar`. Returns the factor applied (1 when none).
+  function calibrate(rows, pts) {
+    if (!rows.length || !pts?.length || rows.calibrated != null) return rows.calibrated ?? 1;
+    const ratios = [];
+    let j = 0;
+    for (const p of pts) {
+      if (p.v == null || p.v < 7 || p.acc == null || p.acc > 10) continue;
+      while (j + 1 < rows.length && rows[j + 1].t <= p.t + 500) j++;
+      const r = rows[j];
+      if (Math.abs(r.t - p.t) <= 600 && r.speed > 25) ratios.push((p.v * 3.6) / r.speed);
+    }
+    let k = 1;
+    if (ratios.length >= 60) {
+      ratios.sort((a, b) => a - b);
+      const med = ratios[ratios.length >> 1];
+      if (med > 0.9 && med < 1.1 && Math.abs(med - 1) > 0.003) k = med;
+    }
+    if (k !== 1) for (const r of rows) if (r.speed != null) { r.speedCar = r.speed; r.speed *= k; }
+    rows.calibrated = k;
+    return k;
   }
 
   // Same per-second means as the phone, from the raw `obd` records of the engine ECU.
@@ -125,7 +155,7 @@ const Engine = (() => {
       const a = rows[i - 1], b = rows[i], dt = (b.t - a.t) / 1000;
       if (b.fuelGs != null) { fuel = b.fuelGs; fuelT = b.t; }
       if (b.speed != null) { speed = b.speed; speedT = b.t; }
-      if (dt > 2.5) continue; // a gap (adapter dropped, engine off): don't integrate across it
+      if (dt <= 0 || dt > 2.5) continue; // a gap (adapter dropped, engine off): don't integrate across it
       if (fuel != null && b.t - fuelT <= 3000) { fuelG += fuel * dt; fuelSecs += dt; }
       if (speed != null && b.t - speedT <= 3000) meters += (speed / 3.6) * dt;
       if (fuel != null && b.t - fuelT <= 3000 && b.speed === 0 && b.rpm > 300) idleG += fuel * dt;
@@ -159,6 +189,7 @@ const Engine = (() => {
       fromCar: rows.some((r) => r.fuelRateLph != null),
       waste: fuelSecs ? { idle: galOf(idleG), braking: brakeJ / J_PER_GAL / ENGINE_EFF, rich: galOf(richG) } : null,
       massKg: mass,
+      speedFactor: rows.calibrated ?? 1,
     };
   }
 
@@ -174,7 +205,7 @@ const Engine = (() => {
   const cToF = (c) => (c * 9) / 5 + 32;
   const mph = (kmh) => kmh * KMH_TO_MPH;
 
-  return { recorded, rawOnly, fromChunks, fromRaw, derive, summary, attach, cToF, mph };
+  return { recorded, rawOnly, fromChunks, fromRaw, derive, calibrate, summary, attach, cToF, mph };
 })();
 
 // Average regular gas price for a trip's week and region (U.S. EIA weekly survey, via /api/v1/gas-prices).

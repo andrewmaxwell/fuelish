@@ -279,6 +279,7 @@ async function tripPoints(id, detail, onProgress, { shared = false } = {}) {
   const out = end != null ? pts.filter((p) => p.t <= end) : pts;
   // Engine rows from the chunk summaries; `engineRaw` lists chunks whose engine data is only raw.
   out.engine = Engine.derive(Engine.fromChunks(chunks)).filter((e) => end == null || e.t <= end);
+  Engine.calibrate(out.engine, out);
   out.engineRaw = shared ? [] : Engine.rawOnly(chunks); // shared links never get raw chunks
   out.end = end;
   return out;
@@ -291,6 +292,7 @@ async function rawEngine(id, pts, onProgress) {
   const links = await api(`/recordings/${id}/links`, { method: "POST" });
   const rows = Engine.derive(await Engine.fromRaw(pts.engineRaw, pts.engineRaw.map((c) => links.chunks[c.meta.seq]), onProgress))
     .filter((e) => pts.end == null || e.t <= pts.end);
+  Engine.calibrate(rows, pts.length ? pts : Route.fromChunks(pts.chunks || []) || []);
   engineCache.set(id, rows);
   return rows;
 }
@@ -483,8 +485,9 @@ async function showInsights() {
       if (!Engine.recorded(chunks)) continue;
       const end = r.driveEndWallMs;
       let rows = Engine.derive(Engine.fromChunks(chunks)).filter((e) => end == null || e.t <= end);
-      if (!rows.length) {
-        rows = await rawEngine(r.id, { engineRaw: Engine.rawOnly(chunks), end }, (k, n) => {
+      if (rows.length) Engine.calibrate(rows, Route.fromChunks(chunks) || []);
+      else {
+        rows = await rawEngine(r.id, { engineRaw: Engine.rawOnly(chunks), end, chunks }, (k, n) => {
           if (sub) sub.textContent = `Reading engine data from an older drive's raw recording… ${k} of ${n}`;
         });
       }
@@ -730,11 +733,6 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
     document.querySelectorAll("[data-engine]").forEach((b) => { b.hidden = false; });
     syncButtons();
     recolor();
-    timeline?.setRows([
-      { label: "RPM", unit: "", get: (p) => p.eng?.rpm ?? null, fmt: (v) => v.toFixed(0) + " rpm", min: 0, max: 3000 },
-      { label: "Gas pedal", unit: "%", get: (p) => p.eng?.pedal ?? null, fmt: (v) => v.toFixed(0), min: 0, max: 100 },
-      { label: "Fuel", unit: "gal/h", get: (p) => p.eng?.gph ?? null, fmt: (v) => v.toFixed(2), min: 0, max: 1 },
-    ]);
     const card = document.getElementById("engine-card");
     if (!card) return;
     card.hidden = false;
@@ -760,7 +758,7 @@ function drawRoute(pts, sm, { timeline: withTimeline = false, withDay = false } 
         ${row("Check engine light", light)}
       </dl>
       <p class="hint">${e.fromCar ? "Fuel use as reported by the car." : "Fuel use is estimated from airflow and the air-fuel ratio the engine asks for; this car doesn't report it directly."}
-        Economy uses the car's own speed.${partial ? " Some of these trips have no engine data and aren't counted." : ""}</p>`;
+        ${e.speedFactor !== 1 ? `Miles use the car's speed, which read ${Math.abs((1 - 1 / e.speedFactor) * 100).toFixed(1)}% ${e.speedFactor > 1 ? "low" : "high"} against GPS on this drive, corrected.` : "Miles use the car's own speed."}${partial ? " Some of these trips have no engine data and aren't counted." : ""}</p>`;
   }
 
   return { ...view, setEngine, pick };

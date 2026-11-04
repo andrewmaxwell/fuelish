@@ -173,8 +173,10 @@ main { max-width: 1160px; margin: 0 auto; padding: 24px 16px 48px; }
 .outing-nav span { color: var(--text-2); }
 .outing-nav a, .period-nav a { font-weight: 600; text-decoration: none; }
 
-/* ---------- one trip: map first ---------- */
+/* ---------- one trip: map first, no app header (the page has its own way back) ---------- */
 body.page-trip main { max-width: none; padding: 0; }
+body.page-trip { --top: 0px; }
+body.page-trip .top { display: none; }
 .trip {
   display: grid;
   grid-template-columns: 380px minmax(0, 1fr);

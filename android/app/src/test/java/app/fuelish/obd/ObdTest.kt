@@ -67,6 +67,22 @@ class ObdTest {
     }
 
     @Test
+    fun schedulerSharesBatchesEvenlyAmongFastPids() {
+        // The Civic's setup: 8 fast PIDs, 14 medium every 500 ms, 6 PIDs per request.
+        val fast = listOf(0x04, 0x0B, 0x0C, 0x0D, 0x10, 0x11, 0x44, 0x49).map { PollItem(it, 0, PollScheduler.FAST, true) }
+        val medium = (0x60 until 0x6E).map { PollItem(it, 500_000_000L, "medium", true) }
+        val s = PollScheduler(fast + medium, 6)
+        var t = 0L
+        while (t < 60_000_000_000L) {
+            val b = s.next(t)
+            t += 60_000_000
+            s.completed(b, b.map { it.pid }.toSet(), t)
+        }
+        val polls = fast.map { it.polls }
+        assertTrue("fast polls should be even, got $polls", polls.max() <= polls.min() * 1.1)
+    }
+
+    @Test
     fun schedulerBatchesWhenAllowed() {
         val items = listOf(0x0C, 0x0D, 0x11, 0x04).map { PollItem(it, 0, PollScheduler.FAST, true) } +
             PollItem(0x05, 5_000_000_000L, "slow", true)

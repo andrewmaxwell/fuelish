@@ -25,14 +25,14 @@ docs/      data-format.md: every record type, clock and file
    deleted from the phone, and a finished recording's folder is removed once the server has all of it
    (`upload.deleteAfterUpload`, default on).
 4. The web page lists trips by day (route outline, distance, moving time, top speed). Each trip opens on a full-size
-   map colored by speed, acceleration, bumpiness, GPS accuracy or time, with a speed timeline and a friction circle
+   map colored by speed, acceleration, turning (left blue, right red), bumpiness, GPS accuracy or time, with a speed timeline and a friction circle
    (forward vs. sideways g from GPS speed and heading). Hovering any of the three highlights the same moment in the others.
    Trips that start within 30 min of the last one ending, near where it ended (errands, a fuel stop), are linked into
    one **outing**. A day, a week or an outing can be opened as one map of all its trips. An automatic stop waits a
    couple of minutes after the car goes away; that wait (usually you walking off) isn't counted or drawn.
-   With the OBD adapter, a trip also shows RPM, gas pedal and fuel flow under the speed timeline (and as map
-   colors), plus fuel used, MPG, idling, coolant, charging voltage and check-engine status. The Civic doesn't report
-   fuel use, so it's estimated from airflow and the commanded air-fuel ratio.
+   With the OBD adapter, a trip also offers RPM, gas pedal and fuel flow as map colors and in the hover readout, plus fuel used, MPG, idling, coolant, charging voltage and check-engine status. The Civic doesn't report
+   fuel use, so it's estimated from airflow and the commanded air-fuel ratio. Miles come from the car's speed,
+   scaled to GPS when the two consistently disagree (the Civic reads about 2% low).
    Each trip shows its cost at the average regular gas price for its week and region (U.S. EIA weekly survey,
    fetched and cached by the Worker: no key or input needed) and its wasted fuel: idling, braking away speed
    (estimated from the energy braked off), and running rich at full throttle.

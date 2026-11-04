@@ -20,7 +20,7 @@ class PollItem(val pid: Int, var intervalNs: Long, val tier: String, val knownLe
  */
 class PollScheduler(val items: List<PollItem>, var maxBatch: Int) {
     fun next(nowNs: Long): List<PollItem> {
-        val due = items.filter { it.dueNs <= nowNs }.sortedBy { it.dueNs }
+        val due = items.filter { it.dueNs <= nowNs }.sortedWith(fairOrder)
         if (due.isEmpty()) return emptyList()
         val head = due.first()
         if (maxBatch <= 1 || !head.knownLength) return listOf(head)
@@ -30,7 +30,7 @@ class PollScheduler(val items: List<PollItem>, var maxBatch: Int) {
             if (it !== head && it.knownLength) batch += it
         }
         if (batch.size < maxBatch) {
-            for (it in items.filter { it.tier == FAST && it.knownLength && it !in batch }.sortedBy { it.dueNs }) {
+            for (it in items.filter { it.tier == FAST && it.knownLength && it !in batch }.sortedWith(fairOrder)) {
                 if (batch.size >= maxBatch) break
                 batch += it
             }
@@ -67,5 +67,11 @@ class PollScheduler(val items: List<PollItem>, var maxBatch: Int) {
 
     companion object {
         const val FAST = "fast"
+        /**
+         * Oldest deadline first; among items polled in the same request (equal deadlines), the one
+         * polled least so far. Without that tie-break the lowest PIDs in list order always won and
+         * got ~60% more polls than the last fast PIDs.
+         */
+        private val fairOrder = compareBy<PollItem>({ it.dueNs }, { it.polls })
     }
 }
