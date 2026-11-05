@@ -90,6 +90,7 @@ object CarBluetooth {
         val open = PendingIntent.getActivity(
             c, 3,
             Intent(c, MainActivity::class.java).putExtra(MainActivity.EXTRA_START_TRIGGER, TRIGGER_CAR_NOTIFICATION)
+                .putExtra(MainActivity.EXTRA_START_PASS, Prefs.newStartPass(c))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )

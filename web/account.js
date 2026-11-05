@@ -290,7 +290,7 @@ const Account = (() => {
           <h2>Phones that have uploaded</h2>
           <p class="muted">Whose trips each phone's recordings count as. Use this for a phone that recorded before its person joined.</p>
           <ul class="rows">${admin[1].phones.map((p) => `<li><span><b>${esc(p.model || "Phone")}</b><small class="muted">${esc(p.vehicle || "")}${p.vehicle ? " · " : ""}${plural(p.trips, "trip")} · last ${ago(p.lastMs)}</small></span>
-            <select data-phone="${esc(p.deviceId)}" aria-label="Whose trips">${p.owners.length === 1 ? "" : `<option value="">${p.owners.map(nameOf).join(" + ")}</option>`}${people.map((u) => `<option value="${esc(u.id)}" ${p.owners.length === 1 && p.owners[0] === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}</select></li>`).join("")}</ul>
+            <select data-phone="${esc(p.deviceId)}" aria-label="Whose trips">${p.owners.length === 1 ? "" : `<option value="">${esc(p.owners.map(nameOf).join(" + "))}</option>`}${people.map((u) => `<option value="${esc(u.id)}" ${p.owners.length === 1 && p.owners[0] === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}</select></li>`).join("")}</ul>
         </section>` : ""}
       </div>`;
 

@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
@@ -53,12 +54,13 @@ import kotlinx.coroutines.delay
 import java.text.DateFormat
 import java.util.Date
 
-val PERMISSIONS = arrayOf(
+// Notification permission only exists from Android 13; asking for it earlier is never "granted".
+val PERMISSIONS = listOfNotNull(
     Manifest.permission.ACCESS_FINE_LOCATION,
     Manifest.permission.ACCESS_COARSE_LOCATION,
     Manifest.permission.BLUETOOTH_CONNECT,
-    Manifest.permission.POST_NOTIFICATIONS,
-)
+    if (Build.VERSION.SDK_INT >= 33) Manifest.permission.POST_NOTIFICATIONS else null,
+).toTypedArray()
 
 @Composable
 fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit) {
@@ -110,7 +112,8 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit) {
         }
         Spacer(Modifier.height(8.dp))
 
-        val setupDone = missing.isEmpty() && batteryOk && serverOk && obdChosen && (!autoOn || bgLocationOk)
+        // The adapter is optional (phone sensors alone make a trip), so it doesn't hold setup open.
+        val setupDone = missing.isEmpty() && batteryOk && serverOk && (!autoOn || bgLocationOk)
         // While setup is unfinished it comes first; afterwards it disappears.
         if (setupDone || st.recording) {
             if (st.recording) RecordingCard(st) else IdleCard(locationOk, autoOn, auto.optString("carName"), st.stopping)

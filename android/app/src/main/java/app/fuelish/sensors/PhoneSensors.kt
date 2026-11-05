@@ -12,6 +12,7 @@ import android.location.GnssNavigationMessage
 import android.location.GnssStatus
 import android.location.Location
 import android.location.LocationListener
+import android.location.GnssCapabilities
 import android.location.LocationManager
 import android.location.LocationRequest
 import android.location.OnNmeaMessageListener
@@ -157,7 +158,7 @@ class PhoneSensors(
             JsonLine("gnss_info").n("rx", now).s("hardwareModel", lm.gnssHardwareModelName).n("yearOfHardware", lm.gnssYearOfHardware)
                 .b("measurements", caps.hasMeasurements()).b("navigationMessages", caps.hasNavigationMessages())
                 .b("antennaInfo", caps.hasAntennaInfo())
-                .b("accumulatedDeltaRange", if (Build.VERSION.SDK_INT >= 34) caps.hasAccumulatedDeltaRange() == 1 else false)
+                .b("accumulatedDeltaRange", if (Build.VERSION.SDK_INT >= 34) caps.hasAccumulatedDeltaRange() == GnssCapabilities.CAPABILITY_SUPPORTED else false)
                 .b("gpsEnabled", lm.isProviderEnabled(LocationManager.GPS_PROVIDER)).build(),
         )
 

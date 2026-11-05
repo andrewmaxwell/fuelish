@@ -169,9 +169,14 @@ class MainActivity : ComponentActivity() {
             settingsOpen = false
         }
         // Tapping the "Car connected: tap to record" notification lands here; we're in the foreground now.
+        // Another app can send this too (the activity is exported), so it only records with the
+        // one-time pass from our own notification; otherwise it just opens the recorder screen.
         val trigger = i.getStringExtra(EXTRA_START_TRIGGER) ?: return
+        val pass = i.getStringExtra(EXTRA_START_PASS)
         i.removeExtra(EXTRA_START_TRIGGER)
+        i.removeExtra(EXTRA_START_PASS)
         recorderOpen = true
+        if (!Prefs.takeStartPass(this, pass)) return
         if (RecorderService.activeId == null && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
             RecorderService.start(this, "", trigger)
         }
@@ -179,6 +184,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_START_TRIGGER = "startTrigger"
+        const val EXTRA_START_PASS = "startPass"
         /** A web page hash to open, e.g. "#/r/<recording id>". */
         const val EXTRA_OPEN_PAGE = "openPage"
     }

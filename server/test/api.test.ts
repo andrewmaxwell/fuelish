@@ -162,6 +162,48 @@ describe("integrity", () => {
   });
 });
 
+describe("input checks", () => {
+  it("reads a streamed body that has no Content-Length", async () => {
+    const body = new TextEncoder().encode(JSON.stringify({ id: "r6", deviceId: "dev6", status: "recording", startedWallMs: 1 }));
+    const stream = new ReadableStream({ start(c) { c.enqueue(body); c.close(); } });
+    const req = new Request(BASE + "/recordings/r6", { method: "PUT", headers: DEVICE, body: stream, duplex: "half" } as RequestInit);
+    expect(req.headers.get("Content-Length")).toBeNull();
+    expect((await exports.default.fetch(req)).status).toBe(200);
+  });
+
+  it("refuses unknown statuses and impossible chunk counts", async () => {
+    const put = (o: object) => call("/recordings/r7", { method: "PUT", headers: DEVICE, body: JSON.stringify({ id: "r7", deviceId: "dev7", startedWallMs: 1, ...o }) });
+    expect((await put({ status: "done" })).status).toBe(400);
+    expect((await put({ status: "stopped", chunkCount: -1 })).status).toBe(400);
+    expect((await put({ status: "stopped", chunkCount: 5_000_000 })).status).toBe(400);
+    expect((await put({ status: "stopped", chunkCount: 1 })).status).toBe(200);
+  });
+
+  it("refuses a chunk whose track isn't a list of GPS points", async () => {
+    await call("/recordings/r8", { method: "PUT", headers: DEVICE, body: JSON.stringify({ id: "r8", deviceId: "dev8", status: "recording", startedWallMs: 1 }) });
+    const send = async (m: object) => {
+      const body = await gzip("{}\n");
+      return call("/recordings/r8/chunks/0", { method: "PUT", headers: { ...DEVICE, "X-Fuelish-Sha256": await sha(body), "X-Fuelish-Meta": b64url(JSON.stringify(m)) }, body });
+    };
+    expect((await send({ track: "not JSON" })).status).toBe(400);
+    expect((await send({ track: [[0, 91, 0]] })).status).toBe(400);
+    expect((await send({ track: [[0, 38, "x"]] })).status).toBe(400);
+    expect((await send([1])).status).toBe(400);
+    expect((await send({ track: [[0, 38, -90, null, 3]] })).status).toBe(201);
+  });
+
+  it("keeps listing trips when one stored track is damaged", async () => {
+    await call("/recordings/r9", { method: "PUT", headers: DEVICE, body: JSON.stringify({ id: "r9", deviceId: "dev9", status: "recording", startedWallMs: 2 }) });
+    // As if stored before tracks were checked.
+    await env.DB.prepare("INSERT INTO chunks (recording_id, seq, sha256, bytes, r2_key, meta_json, uploaded_at_ms) VALUES ('r9', 0, ?, 1, 'x', ?, 0)")
+      .bind("0".repeat(64), JSON.stringify({ track: "not JSON" })).run();
+    const res = await call("/recordings", { headers: WEB });
+    expect(res.status).toBe(200);
+    const r: any = await res.json();
+    expect(r.recordings.find((x: any) => x.id === "r9").trip).toBeNull();
+  });
+});
+
 describe("paging", () => {
   it("doesn't skip recordings that share a start time at a page boundary", async () => {
     // 501 recordings started at the same moment: the second page must hold the last one.

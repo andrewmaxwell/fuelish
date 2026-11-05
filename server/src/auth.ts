@@ -24,7 +24,9 @@ export interface Principal {
 }
 
 export class AuthError extends Error {
-  constructor(public status: number, message: string) {
+  // staleSession: the browser's session cookie names a session that has ended (expired, signed out
+  // elsewhere, or the person was turned off). Sign-in may replace it and any reply should clear it.
+  constructor(public status: number, message: string, public staleSession = false) {
     super(message);
   }
 }
@@ -99,7 +101,7 @@ export async function identify(req: Request, env: AuthEnv): Promise<Principal | 
     .bind(await sha256Hex(sid))
     .first<any>();
   const now = Date.now();
-  if (!row || row.expires_at_ms < now || row.disabled_at_ms != null) throw new AuthError(401, "signed out");
+  if (!row || row.expires_at_ms < now || row.disabled_at_ms != null) throw new AuthError(401, "signed out", true);
   // A cookie can be sent by any site that links here; a custom header can't be added cross-site
   // without the browser asking us first (and we never say yes). So changes need the header.
   if (!["GET", "HEAD"].includes(req.method) && req.headers.get("X-Fuelish") !== "1") throw new AuthError(403, "missing X-Fuelish header");

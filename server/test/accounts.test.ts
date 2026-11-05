@@ -145,6 +145,24 @@ describe("accounts", () => {
     expect((await call("/me", { headers: andrew })).status).toBe(401);
   });
 
+  it("lets a browser with an ended session sign in again or out, and clears the dead cookie", async () => {
+    // `andrew`'s session was ended by the sign-out above.
+    const me = await call("/me", { headers: andrew });
+    expect(me.status).toBe(401);
+    expect(me.headers.get("Set-Cookie")).toMatch(/Max-Age=0/);
+    const out = await call("/auth/logout", { method: "POST", headers: { ...andrew, "X-Fuelish": "1" } });
+    expect(out.status).toBe(200);
+    const again = await signIn(ANDREW, {}, andrew);
+    expect(again.status).toBe(200);
+    expect((await call("/me", { headers: sessionOf(again) })).status).toBe(200);
+  });
+
+  it("lists each trip with its person", async () => {
+    const r: any = await (await call(`/recordings?user=${dadId}`, { headers: WEB })).json();
+    expect(r.recordings.length).toBeGreaterThan(0);
+    for (const x of r.recordings) expect(x.userId).toBe(dadId);
+  });
+
   it("keeps the original tokens working", async () => {
     expect((await call("/recordings", { headers: WEB })).status).toBe(200);
     expect((await call("/recordings/old2", { method: "PUT", headers: DEVICE, body: meta("old2", "andrew-phone") })).status).toBe(200);

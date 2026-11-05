@@ -66,6 +66,21 @@ object Prefs {
         return p.getString("deviceId", null) ?: UUID.randomUUID().toString().also { p.edit().putString("deviceId", it).apply() }
     }
 
+    /**
+     * A one-time pass for "tap to record" notifications. MainActivity is exported (it's the
+     * launcher), so any app could send it a start-recording extra; only an intent carrying the pass
+     * we put in our own notification starts a recording. Using it clears it.
+     */
+    fun newStartPass(c: Context): String = UUID.randomUUID().toString().also { sp(c).edit().putString("startPass", it).apply() }
+
+    fun takeStartPass(c: Context, pass: String?): Boolean {
+        val p = sp(c)
+        val want = p.getString("startPass", null) ?: return false
+        if (pass == null || pass != want) return false
+        p.edit().remove("startPass").apply()
+        return true
+    }
+
     fun store(c: Context): RecordingStore {
         val base = c.getExternalFilesDir(null) ?: c.filesDir
         return RecordingStore(File(base, "recordings"))

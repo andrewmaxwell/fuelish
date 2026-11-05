@@ -25,6 +25,9 @@ const SHARE_RE = /^[A-Za-z0-9_-]{22}$/; // 16 random bytes, base64url
 const PREF_RE = /^[a-z][a-z0-9_.-]{0,63}$/;
 const MAX_PREF_BYTES = 64 * 1024;
 const PAGE_SIZE = 500;
+const STATUSES = new Set(["recording", "stopped", "interrupted"]);
+const MAX_CHUNKS = 999_999; // chunk seqs are at most 6 digits
+const MAX_TRACK_POINTS = 100_000;
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -33,6 +36,8 @@ export default {
     try {
       return await route(req, url, env, ctx);
     } catch (e) {
+      // A dead session cookie is cleared, so the page can sign in again without it.
+      if (e instanceof AuthError && e.staleSession) return json({ error: e.message }, e.status, { "Set-Cookie": sessionCookie("", 0) });
       if (e instanceof HttpError || e instanceof AuthError) return json({ error: e.message }, e.status);
       console.error(e);
       return json({ error: "internal error" }, 500);
@@ -63,9 +68,13 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   // Share links work without a token: one recording, trimmed, read-only.
   if (m === "GET" && p[0] === "shared" && p.length === 2) return getShared(p[1], env);
 
-  const who = await identify(req, env);
-
   // Signing in needs no credentials (but takes the original web token into account, for the owner).
+  // An ended session's cookie doesn't stop anyone signing in again or out: it's simply replaced.
+  const who = await identify(req, env).catch((e) => {
+    if (p[0] === "auth" && e instanceof AuthError && e.staleSession) return null;
+    throw e;
+  });
+
   if (p[0] === "auth") {
     if (m === "POST" && p[1] === "google" && p.length === 2) return googleSignIn(req, who, env);
     if (m === "POST" && p[1] === "logout" && p.length === 2) {
@@ -202,7 +211,10 @@ async function verifySignedUrl(url: URL, env: Env): Promise<void> {
 
 // Refuses a body that says (or turns out) to be larger than `max`, before buffering much of it.
 async function readBounded(req: Request, max: number, what: string): Promise<ArrayBuffer> {
-  const declared = Number(req.headers.get("Content-Length"));
+  // No header means "unknown length" (a streamed body), not zero.
+  const header = req.headers.get("Content-Length");
+  const declared = header == null || header.trim() === "" ? NaN : Number(header);
+  if (header != null && header.trim() !== "" && !(Number.isInteger(declared) && declared >= 0)) throw new HttpError(400, "bad Content-Length");
   if (Number.isFinite(declared) && declared > max) throw new HttpError(413, `${what} too large`);
   if (!req.body) return new ArrayBuffer(0);
   // With a declared length (the phone always sends one) the body goes straight into one buffer of
@@ -250,6 +262,11 @@ async function putRecording(req: Request, id: string, who: Principal, env: Env):
   if (!deviceId || !status || !Number.isFinite(startedAt)) {
     throw new HttpError(400, "metadata requires deviceId, status, startedWallMs");
   }
+  if (!STATUSES.has(status)) throw new HttpError(400, "unknown status");
+  if (meta.chunkCount != null && !(Number.isInteger(meta.chunkCount) && meta.chunkCount >= 0 && meta.chunkCount <= MAX_CHUNKS)) {
+    throw new HttpError(400, "bad chunkCount");
+  }
+  if (meta.rev != null && !(Number.isInteger(meta.rev) && meta.rev >= 0)) throw new HttpError(400, "bad rev");
   const endedAt = Number.isFinite(Number(meta.endedWallMs)) && meta.endedWallMs != null ? Number(meta.endedWallMs) : null;
   const chunkCount = Number.isInteger(meta.chunkCount) && status !== "recording" ? meta.chunkCount : null;
   const now = Date.now();
@@ -287,6 +304,24 @@ function parseSeq(s: string | undefined): number {
 // Objects are named by their content, so two different uploads for one seq never overwrite each
 // other's bytes; D1 decides which one is the chunk. (Chunks stored before this have the old name,
 // kept in their r2_key.)
+// The trip list reads every chunk's track, so a malformed one is refused here rather than stored.
+// Points are [wallMs, lat, lon, ...numbers or null]; see docs/data-format.md.
+export function checkChunkMeta(meta: any): void {
+  if (meta === null || typeof meta !== "object" || Array.isArray(meta)) throw new HttpError(400, "chunk metadata must be an object");
+  const track = meta.track;
+  if (track === undefined) return;
+  if (!Array.isArray(track) || track.length > MAX_TRACK_POINTS) throw new HttpError(400, "chunk track must be an array of points");
+  const num = (x: unknown) => typeof x === "number" && Number.isFinite(x);
+  for (const pt of track) {
+    const ok =
+      Array.isArray(pt) && pt.length >= 3 && pt.length <= 16 && num(pt[0]) &&
+      pt.every((x) => x === null || num(x)) &&
+      (pt[1] === null || (pt[1] >= -90 && pt[1] <= 90)) &&
+      (pt[2] === null || (pt[2] >= -180 && pt[2] <= 180));
+    if (!ok) throw new HttpError(400, "chunk track has a bad point");
+  }
+}
+
 function chunkKey(id: string, seq: number, sha: string): string {
   return `recordings/${id}/chunk-${String(seq).padStart(6, "0")}-${sha}.ndjson.gz`;
 }
@@ -306,6 +341,7 @@ async function putChunk(req: Request, id: string, seq: number, who: Principal, e
   } catch {
     throw new HttpError(400, "X-Fuelish-Meta must be base64url JSON");
   }
+  checkChunkMeta(JSON.parse(chunkMeta));
 
   const rec = await env.DB.prepare("SELECT id, chunk_count, user_id FROM recordings WHERE id = ?").bind(id).first<{ chunk_count: number | null; user_id: string | null }>();
   if (!rec) throw new HttpError(404, "upload recording metadata first");
@@ -367,7 +403,7 @@ async function listRecordings(url: URL, who: Principal, env: Env): Promise<Respo
   if (user === "me") user = who.userId ?? "";
   if (user != null && !/^[A-Za-z0-9_-]{0,64}$/.test(user)) throw new HttpError(400, "bad user");
   const { results } = await env.DB.prepare(
-    `SELECT r.id, r.device_id, r.status, r.started_at_ms, r.ended_at_ms, r.chunk_count, r.meta_json, r.updated_at_ms,
+    `SELECT r.id, r.device_id, r.user_id, r.status, r.started_at_ms, r.ended_at_ms, r.chunk_count, r.meta_json, r.updated_at_ms,
             COUNT(c.seq) AS chunks_received, COUNT(CASE WHEN c.seq < r.chunk_count THEN 1 END) AS chunks_in_range,
             COALESCE(SUM(c.bytes), 0) AS bytes,
             json_group_array(json_extract(c.meta_json, '$.track')) AS tracks
@@ -383,7 +419,14 @@ async function listRecordings(url: URL, who: Principal, env: Env): Promise<Respo
   return json({
     recordings: results.map((r) => {
       const row = recordingRow(r);
-      return { ...row, trip: tripSummary(r.tracks, row.driveEndWallMs) };
+      // One damaged summary (stored before tracks were checked) costs that trip its outline, not the list.
+      let trip = null;
+      try {
+        trip = tripSummary(r.tracks, row.driveEndWallMs);
+      } catch (e) {
+        console.error(`trip summary for ${r.id}:`, e);
+      }
+      return { ...row, trip };
     }),
     next: results.length === PAGE_SIZE ? `${last.started_at_ms}:${last.id}` : null,
   });
@@ -413,8 +456,19 @@ export function driveEndMs(meta: any, endedAtMs: number | null): number | null {
 export function tripSummary(tracksJson: string, endMs: number | null = null) {
   const fixes: number[][] = [];
   for (const t of JSON.parse(tracksJson || "[]")) {
-    const arr = typeof t === "string" ? JSON.parse(t) : t;
-    if (Array.isArray(arr)) for (const p of arr) if (p?.[1] != null && p?.[2] != null && (endMs == null || p[0] <= endMs)) fixes.push(p);
+    let arr = t;
+    if (typeof t === "string") {
+      try {
+        arr = JSON.parse(t);
+      } catch {
+        continue; // one bad chunk's track: skip it, keep the rest
+      }
+    }
+    if (Array.isArray(arr)) {
+      for (const p of arr) {
+        if (Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2]) && (endMs == null || p[0] <= endMs)) fixes.push(p);
+      }
+    }
   }
   if (fixes.length < 2) return null;
   fixes.sort((a, b) => a[0] - b[0]);
