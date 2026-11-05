@@ -1018,9 +1018,12 @@ async function showCosts() {
   const trips = await engineTrips(done, live, (msg) => { if (sub) sub.textContent = msg; });
   if (!live()) return;
   sub.textContent = `What driving costs you, counting more than gas, and where you can spend less.${failedNote(trips)}`;
+  // Count the drives left out directly; subtracting totals went negative when a recording that
+  // never moved still had engine data (it's in `trips` but not in the moved count).
+  const counted = new Set([...trips.map((t) => t.r.id), ...trips.failed.map((r) => r.id)]);
   Costs.page(document.getElementById("costs"), trips, {
     durationOf: (r) => endOf(r) - r.startedWallMs,
-    otherTrips: done.filter(moved).length - trips.length - trips.failed.length,
+    otherTrips: done.filter((r) => moved(r) && !counted.has(r.id)).length,
     save: (v) => Prefs.set("costs", v),
     onLeave,
   });
