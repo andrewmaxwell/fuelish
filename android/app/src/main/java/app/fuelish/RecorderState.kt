@@ -6,6 +6,7 @@ import app.fuelish.record.RecordingStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.File
 import java.util.UUID
+import org.json.JSONObject
 
 data class RecorderStatus(
     val recording: Boolean = false,
@@ -54,10 +55,28 @@ object Prefs {
 
     fun configJson(c: Context): String? = sp(c).getString("config", null)
 
-    fun config(c: Context): Config = runCatching { Config.parse(configJson(c)) }.getOrElse { Config.parse(null) }
+    /**
+     * The saved config. Saves are checked, so this is the last one that worked; one saved before
+     * checks existed and broken falls back to the defaults, keeping the sign-in and chosen devices.
+     */
+    fun config(c: Context): Config {
+        val stored = configJson(c)
+        runCatching { return Config.parseChecked(stored) }
+        val keep = runCatching { Config.parse(stored).json }.getOrNull()
+        val d = Config.parse(null)
+        if (keep != null) {
+            for (k in listOf("serverUrl", "deviceToken", "vehicle")) (keep.opt(k) as? String)?.let { d.json.put(k, it) }
+            for ((block, keys) in listOf("obd" to listOf("deviceAddress", "deviceName"), "auto" to listOf("carAddress", "carName", "enabled"))) {
+                val from = keep.opt(block) as? JSONObject ?: continue
+                for (k in keys) from.opt(k)?.let { v -> if (v is String || v is Boolean) d.json.getJSONObject(block).put(k, v) }
+            }
+        }
+        return runCatching { Config.parseChecked(d.json.toString()) }.getOrElse { Config.parse(null) }
+    }
 
+    /** Throws IllegalArgumentException (or a JSON error) saying what's wrong, and saves nothing. */
     fun saveConfig(c: Context, json: String) {
-        Config.parse(json) // validate
+        Config.parseChecked(json)
         sp(c).edit().putString("config", json).apply()
     }
 

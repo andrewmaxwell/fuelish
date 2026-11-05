@@ -135,12 +135,26 @@ class Uploader(
         // The engine summary is ~8 KB a minute. Too big: drop it first, then the track (raw data has
         // both). Each summary goes with every key that describes it, so nothing claims a summary
         // that isn't there, and `summaryOmitted` tells the web page to rebuild it from the raw chunk.
+        // The list still needs a route, so a dropped track leaves a thinned `routeOutline` behind.
         val omitted = org.json.JSONArray()
         for ((name, keys) in SUMMARY_GROUPS) {
             if (metaJson.length <= MAX_META_HEADER) break
+            val track = if (name == "track") meta.optJSONArray("track") else null
             keys.forEach { meta.remove(it) }
             omitted.put(name)
             meta.put("summaryOmitted", omitted)
+            metaJson = meta.toString()
+            if (track != null && !meta.has("routeOutline")) {
+                RouteOutline.fit(track, MAX_META_HEADER - metaJson.length - 20)?.let { meta.put("routeOutline", it) }
+                metaJson = meta.toString()
+            }
+        }
+        if (metaJson.length > MAX_META_HEADER && meta.has("routeOutline")) {
+            // A recovered chunk's outline, still too big alongside everything else.
+            val outline = meta.getJSONArray("routeOutline")
+            meta.remove("routeOutline")
+            metaJson = meta.toString()
+            RouteOutline.fit(outline, MAX_META_HEADER - metaJson.length - 20)?.let { meta.put("routeOutline", it) }
             metaJson = meta.toString()
         }
         val headers = mapOf(

@@ -2,6 +2,7 @@ package app.fuelish.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.widget.Toast
 import android.bluetooth.BluetoothManager
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -64,8 +65,13 @@ fun SettingsScreen(close: () -> Unit) {
     var cfg by remember { mutableStateOf(JSONObject(Prefs.config(ctx).json.toString())) }
     fun update(block: JSONObject.() -> Unit) {
         val next = JSONObject(cfg.toString()).apply(block)
-        Prefs.saveConfig(ctx, next.toString())
-        cfg = next
+        // The simple controls can't produce a config the checks refuse, but never crash over one.
+        try {
+            Prefs.saveConfig(ctx, next.toString())
+            cfg = next
+        } catch (e: IllegalArgumentException) {
+            Toast.makeText(ctx, "Not saved: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     var refresh by remember { mutableIntStateOf(0) }
@@ -257,6 +263,8 @@ private fun AdvancedSection(cfg: JSONObject, save: (String) -> Unit) {
                     save(j.toString())
                     error = ""
                     open = false
+                } catch (e: IllegalArgumentException) {
+                    error = "Not saved: ${e.message}"
                 } catch (e: Exception) {
                     error = "Not valid JSON: ${e.message}"
                 }

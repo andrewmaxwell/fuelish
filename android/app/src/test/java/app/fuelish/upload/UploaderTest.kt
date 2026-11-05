@@ -246,6 +246,30 @@ class UploaderTest {
     }
 
     @Test
+    fun oversizedTrackLeavesAThinnedOutlineForTheList() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 1)
+        val metaFile = File(store.dir("a"), RecordingWriter.chunkName(0, ".meta.json"))
+        val m = JSONObject(metaFile.readText())
+        // 10 minutes of 10 Hz GPS: far over the header limit.
+        val track = org.json.JSONArray().apply {
+            repeat(6000) { i -> put(org.json.JSONArray(listOf(1_000_000L + i * 100L, 38.0 + i * 1e-5, -90.0, 20.5, 3.2, 90, 0.1))) }
+        }
+        m.put("trackFormat", 2).put("track", track)
+        metaFile.writeText(m.toString())
+        assertEquals(UploadResult.Done(1), Uploader(store, base, "tok").uploadAll())
+        val sent = chunkMetaHeaders["a/0"]!!
+        assertTrue(!sent.has("track") && !sent.has("trackFormat"))
+        val omitted = sent.getJSONArray("summaryOmitted")
+        assertTrue((0 until omitted.length()).any { omitted.getString(it) == "track" })
+        val outline = sent.getJSONArray("routeOutline")
+        assertTrue(outline.length() in 30..601) // at most one a second, plus the last fix
+        assertEquals(5, outline.getJSONArray(0).length())
+        assertEquals(1_000_000L + 5999 * 100L, outline.getJSONArray(outline.length() - 1).getLong(0)) // ends where the track did
+        assertTrue(sent.toString().length <= Uploader.MAX_META_HEADER)
+    }
+
+    @Test
     fun metadataRevisionOnlyGoesUp() {
         val store = RecordingStore(tmp.newFolder())
         makeRecording(store, "a", 0)

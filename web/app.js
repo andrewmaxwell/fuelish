@@ -6,7 +6,7 @@
 const app = document.getElementById("app");
 const TOKEN_KEY = "fuelish.token";
 const VIEW_KEY = "fuelish.routeView";
-const routeCache = new Map(); // recording id -> points rebuilt from raw data
+const routeCache = new Map(); // `${id}@${raw chunk hashes}` -> points rebuilt from raw data
 
 // Each navigation gets a number. Work that finishes after the user has moved on checks it and stops,
 // so a slow page can't draw over the one they opened since. Maps, observers and listeners a page
@@ -82,16 +82,20 @@ const Prefs = (() => {
       .finally(() => { loading = null; });
     return loading;
   }
-  function set(key, value) {
+  // `change(current)` runs when this save's turn comes, against the value the saves before it left,
+  // so two quick edits to one setting (naming two places) both stick.
+  function update(key, change) {
     const run = queue.then(async () => {
+      const value = change(data?.[key]);
       await api(`/prefs/${key}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) });
       (data ||= {})[key] = value;
     });
     queue = run.catch(() => {});
     return run;
   }
+  const set = (key, value) => update(key, () => value);
   const clear = () => { data = null; loading = null; failed = false; };
-  return { load, set, clear, get: (k) => data?.[k], failed: () => failed };
+  return { load, set, update, clear, get: (k) => data?.[k], failed: () => failed };
 })();
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -309,12 +313,19 @@ async function showList() {
     }).join("")}`;
 }
 
+// Why a trip has no outline: it didn't move, its route is only on the trip page (left out of the
+// list's summary), or there's no GPS (yet).
+function noRouteLabel(r) {
+  if (r.trip) return "Didn't move";
+  return r.routeGaps > 0 ? "Route on the trip page" : "No GPS yet";
+}
+
 function tripCard(r) {
   const t = r.trip;
   const auto = r.meta.trigger?.startsWith("car_bluetooth");
   return `
     <a class="card trip-card" href="#/r/${esc(r.id)}">
-      <div class="thumb">${moved(r) ? Charts.thumbnail(t.path) : `<span class="muted">${t ? "Didn't move" : "No GPS yet"}</span>`}</div>
+      <div class="thumb">${moved(r) ? Charts.thumbnail(t.path) : `<span class="muted">${noRouteLabel(r)}</span>`}</div>
       <div class="trip-card-body">
         <div class="trip-card-title"><b>${esc(timeRange(r))}</b>${statusPill(r)}</div>
         <div class="muted">${esc(tripName(r.startedWallMs))}${auto ? " · auto-started" : ""}</div>
@@ -322,6 +333,7 @@ function tripCard(r) {
           <span><b>${miles(t.meters)}</b></span>
           <span><b>${fmtDur(t.movingMs)}</b> moving</span>
           <span>top <b>${Math.round(t.maxMps * Route.MPH)}</b> mph</span>
+          ${r.routeGaps ? `<span class="muted" title="Part of this trip's route isn't summarized for the list; the trip page has all of it">partial</span>` : ""}
         </div>` : ""}
         ${r.meta.note ? `<div class="note">${esc(r.meta.note)}</div>` : ""}
       </div>
@@ -336,7 +348,7 @@ function outingCard(o) {
     const gap = i ? `<li class="leg-stop">Stopped ${fmtDur(r.startedWallMs - endOf(o[i - 1]))}</li>` : "";
     return `${gap}<li><a href="#/r/${esc(r.id)}">
       <b>${esc(clock(r.startedWallMs))}</b>
-      <span>${moved(r) ? `${miles(r.trip.meters)} · ${fmtDur(r.trip.movingMs)}` : r.trip ? "didn't move" : "no GPS yet"}</span>
+      <span>${moved(r) ? `${miles(r.trip.meters)} · ${fmtDur(r.trip.movingMs)}` : noRouteLabel(r).toLowerCase()}</span>
       ${statusPill(r)}</a></li>`;
   }).join("");
   return `
@@ -349,6 +361,7 @@ function outingCard(o) {
           <span><b>${miles(t.meters)}</b></span>
           <span><b>${fmtDur(t.movingMs)}</b> moving</span>
           <span>top <b>${Math.round(t.maxMps * Route.MPH)}</b> mph</span>
+          ${r.routeGaps ? `<span class="muted" title="Part of this trip's route isn't summarized for the list; the trip page has all of it">partial</span>` : ""}
         </div>` : ""}
         <ol class="legs">${legs}</ol>
       </div>
@@ -365,11 +378,13 @@ async function tripPoints(id, detail, onProgress, { shared = false } = {}) {
   let pts = Route.fromChunks(chunks);
   const raw = Route.rawChunks(chunks);
   if (raw.length && !shared) {
-    let extra = routeCache.get(id);
+    // Keyed by which raw chunks went in, so parts uploaded later get read too.
+    const key = `${id}@${raw.map((c) => c.sha256 ?? c.seq).join(",")}`;
+    let extra = routeCache.get(key);
     if (!extra) {
       const links = await api(`/recordings/${id}/links`, { method: "POST" });
       extra = await Route.fromRaw(raw.map((c) => links.chunks[c.seq]).filter(Boolean), onProgress);
-      routeCache.set(id, extra);
+      routeCache.set(key, extra);
     }
     pts = Route.merge(pts, extra);
   }
@@ -385,18 +400,58 @@ async function tripPoints(id, detail, onProgress, { shared = false } = {}) {
   return out;
 }
 
+// A trip still recording or uploading: checks for new parts every 30 s while the page is visible
+// (and right away on coming back to it), and offers them with a button rather than redrawing the
+// map under someone looking at it.
+function watchForParts(r, live) {
+  const sig = (x) => `${x.status}|${x.chunksReceived}|${x.chunkCount}|${x.updatedAtMs}`;
+  const was = sig(r);
+  const state = () => document.getElementById("upd-state");
+  const show = (html) => { const el = state(); if (el) el.innerHTML = html; };
+  const refresh = `<button type="button" class="link" id="upd-go">Refresh</button>`;
+  let timer = null, busy = false;
+  const check = async () => {
+    if (busy || document.hidden || !live()) return;
+    busy = true;
+    try {
+      const { recording: now } = await api(`/recordings/${r.id}`);
+      if (!live()) return;
+      if (sig(now) !== was) {
+        const n = now.chunksReceived - r.chunksReceived;
+        show(`<b>${n > 0 ? `${plural(n, "new part")} uploaded` : now.status !== r.status ? "Recording finished" : "Updated"}.</b> ${refresh}`);
+        stop(); // nothing more to learn until it's shown
+      } else {
+        show(`Checked ${esc(clock(Date.now()))}. ${refresh}`);
+      }
+    } catch (e) {
+      if (live() && e.message !== "unauthorized") show(`Couldn't check for new parts. ${refresh}`);
+    } finally {
+      busy = false;
+    }
+  };
+  const onVisible = () => { if (!document.hidden) check(); };
+  const stop = () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  timer = setInterval(check, 30_000);
+  document.addEventListener("visibilitychange", onVisible);
+  const onClick = (e) => { if (e.target.id === "upd-go") route(); };
+  document.addEventListener("click", onClick);
+  show(refresh);
+  onLeave(() => { stop(); document.removeEventListener("click", onClick); });
+}
+
 // Older drives (before the phone summarized engine data): read it from the raw chunks once.
 const engineCache = new Map();
 async function rawEngine(id, pts, onProgress) {
-  if (engineCache.has(id)) return engineCache.get(id);
   if (!pts.engineRaw.length) return [];
+  const key = `${id}@${pts.engineRaw.map((c) => c.sha256 ?? c.meta.seq).join(",")}`; // new parts: read again
+  if (engineCache.has(key)) return engineCache.get(key);
   const links = await api(`/recordings/${id}/links`, { method: "POST" });
   // The engine ECU, from the recording's discovery: the chunk holding the discovery record may not
   // be among the raw ones read here.
   const rows = Engine.derive(await Engine.fromRaw(pts.engineRaw, pts.engineRaw.map((c) => links.chunks[c.meta.seq]), onProgress, { ecu: pts.ecu }))
     .filter((e) => pts.end == null || e.t <= pts.end);
   Engine.calibrate(rows, pts.length ? pts : Route.fromChunks(pts.chunks || []) || []);
-  engineCache.set(id, rows);
+  engineCache.set(key, rows);
   return rows;
 }
 
@@ -687,8 +742,8 @@ async function showTrip(id, share = null, focusT = null) {
         <div class="pills">${pills}${share ? "" : `<div class="share" id="share"></div>`}</div>
         ${outing}
         ${repeat}
-        ${r.status === "recording" ? `<p class="hint">Still recording; the route fills in as parts upload.</p>`
-          : !r.complete ? `<p class="hint">${r.chunksReceived} of ${r.chunkCount ?? "?"} parts uploaded so far; the phone sends the rest on Wi-Fi.</p>` : ""}
+        ${r.status === "recording" ? `<p class="hint" id="upd">Still recording; the route fills in as parts upload. <span id="upd-state"></span></p>`
+          : !r.complete ? `<p class="hint" id="upd">${r.chunksReceived} of ${r.chunkCount ?? "?"} parts uploaded so far; the phone sends the rest on Wi-Fi. <span id="upd-state"></span></p>` : ""}
         ${m.note ? `<p class="note">${esc(m.note)}</p>` : ""}
       </header>
       <section class="trip-map">
@@ -701,6 +756,7 @@ async function showTrip(id, share = null, focusT = null) {
     </div>`;
 
   if (!share) shareControls(id);
+  if (!share && (r.status === "recording" || !r.complete)) watchForParts(r, live);
   const status = document.getElementById("rt-status");
   const pts = await tripPoints(id, detail, (i, n) => {
     if (status) status.innerHTML = `Building the detailed route… <progress max="${n}" value="${i}"></progress>`;
@@ -870,11 +926,13 @@ async function showRoutes(key) {
       endOf,
       rename: async (lat, lon, name, input) => {
         const near = (p) => Route.haversine(p.lat, p.lon, lat, lon) < 250;
-        const list = (Prefs.get("places") || []).filter((p) => !near(p));
-        if (name) list.push({ lat, lon, name: name.slice(0, 80) });
         input.closest(".place").dataset.state = "saving";
         try {
-          await Prefs.set("places", list);
+          await Prefs.update("places", (places) => {
+            const list = (places || []).filter((p) => !near(p));
+            if (name) list.push({ lat, lon, name: name.slice(0, 80) });
+            return list;
+          });
         } catch (e) {
           if (e.message === "unauthorized" || !live()) return;
           input.closest(".place").dataset.state = "failed";
@@ -1037,7 +1095,8 @@ async function showMany(kind, key) {
       ${prev ? `<a href="${prev}">← Earlier</a>` : ""}${next ? `<a href="${next}">Later →</a>` : ""}</nav>` : "";
 
   // The trips, grouped into outings, with day headings in a week.
-  const shown = recs.filter((r) => r.trip);
+  // Trips whose route the list can't see (routeGaps) still go on the map: it loads full routes.
+  const shown = recs.filter((r) => r.trip || r.routeGaps > 0);
   let rows = "", lastDay = "";
   outings(shown).forEach((o) => {
     o.forEach((r, i) => {
@@ -1047,7 +1106,7 @@ async function showMany(kind, key) {
       if (i) rows += `<li class="leg-stop">Stopped ${fmtDur(r.startedWallMs - endOf(o[i - 1]))}</li>`;
       rows += `<li><a class="trip-row" href="#/r/${esc(r.id)}" data-id="${esc(r.id)}">
         <b>${esc(timeRange(r))}</b>
-        <span>${moved(r) ? `${miles(r.trip.meters)} · ${fmtDur(r.trip.movingMs)} · top ${Math.round(r.trip.maxMps * Route.MPH)} mph` : "didn't move"}</span>
+        <span>${moved(r) ? `${miles(r.trip.meters)} · ${fmtDur(r.trip.movingMs)} · top ${Math.round(r.trip.maxMps * Route.MPH)} mph${r.routeGaps ? " · partial" : ""}` : noRouteLabel(r).toLowerCase()}</span>
       </a></li>`;
     });
   });

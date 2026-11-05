@@ -192,6 +192,23 @@ describe("input checks", () => {
     expect((await send({ track: [[0, 38, -90, null, 3]] })).status).toBe(201);
   });
 
+  it("lists a trip's route from the outline the phone sends when the full track was left out", async () => {
+    await call("/recordings/r10", { method: "PUT", headers: DEVICE, body: JSON.stringify({ id: "r10", deviceId: "dev10", status: "recording", startedWallMs: 3 }) });
+    const send = async (seq: number, m: object) => {
+      const body = await gzip(`{"seq":${seq}}\n`);
+      return call(`/recordings/r10/chunks/${seq}`, { method: "PUT", headers: { ...DEVICE, "X-Fuelish-Sha256": await sha(body), "X-Fuelish-Meta": b64url(JSON.stringify(m)) }, body });
+    };
+    const outline = [[0, 38.0, -90.0, 20, 3], [5000, 38.001, -90.0, 20, 3]];
+    expect((await send(0, { summaryOmitted: ["track"], routeOutline: outline, streams: { "loc:gps": { n: 50 } } })).status).toBe(201);
+    expect((await send(1, { routeOutline: [[0, 100, 0]] })).status).toBe(400);
+    // An older upload: GPS in the raw chunk, no route the list can see.
+    expect((await send(1, { summaryOmitted: ["track"], streams: { "loc:gps": { n: 50 } } })).status).toBe(201);
+    const r: any = await (await call("/recordings", { headers: WEB })).json();
+    const t = r.recordings.find((x: any) => x.id === "r10");
+    expect(t.trip.meters).toBeGreaterThan(100);
+    expect(t.routeGaps).toBe(1);
+  });
+
   it("keeps listing trips when one stored track is damaged", async () => {
     await call("/recordings/r9", { method: "PUT", headers: DEVICE, body: JSON.stringify({ id: "r9", deviceId: "dev9", status: "recording", startedWallMs: 2 }) });
     // As if stored before tracks were checked.

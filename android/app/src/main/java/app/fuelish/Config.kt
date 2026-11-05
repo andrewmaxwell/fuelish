@@ -109,6 +109,86 @@ class Config(val json: JSONObject) {
             return Config(base)
         }
 
+        /** [parse], refusing a config the recorder can't run with (see [problems]). */
+        fun parseChecked(userJson: String?): Config {
+            val c = parse(userJson)
+            val p = problems(c.json)
+            require(p.isEmpty()) { p.joinToString("; ") }
+            return c
+        }
+
+        private val HEX_PID = Regex("^[0-9A-Fa-f]{2}$")
+        private val BT_ADDRESS = Regex("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+        /**
+         * What's wrong with a merged config, in words; empty when the recorder can use it. Every
+         * setting that has a default must keep that default's kind (object, list, text, number,
+         * yes/no), and numbers must be in a range the recorder can work with.
+         */
+        fun problems(merged: JSONObject): List<String> {
+            val out = mutableListOf<String>()
+            sameKinds(JSONObject(DEFAULTS), merged, "", out)
+            if (out.isNotEmpty()) return out
+            fun num(o: JSONObject, k: String, path: String, min: Double, max: Double) {
+                val v = o.optDouble(k)
+                if (v.isNaN() || v < min || v > max) out += "$path$k must be between ${fmt(min)} and ${fmt(max)}"
+            }
+            num(merged, "chunkSeconds", "", 5.0, 3600.0)
+            num(merged, "chunkMaxBytes", "", 65536.0, 64.0 * 1024 * 1024) // the server takes up to 90 MB
+            num(merged, "sensorMaxReportLatencyMs", "", 0.0, 60_000.0)
+            num(merged, "batteryIntervalS", "", 1.0, 3600.0)
+            val sensors = merged.getJSONObject("sensors")
+            for (k in sensors.keys()) {
+                if (sensors.opt(k) !is Number) out += "sensors.$k must be a number" else num(sensors, k, "sensors.", -1.0, 1000.0)
+            }
+            val loc = merged.getJSONObject("location")
+            for (k in listOf("gpsIntervalMs", "fusedIntervalMs")) num(loc, k, "location.", -1.0, 600_000.0)
+            val obd = merged.getJSONObject("obd")
+            for (k in listOf("fastIntervalMs", "mediumIntervalMs", "slowIntervalMs", "otherIntervalMs", "demotedIntervalMs", "adapterVoltageIntervalMs")) {
+                num(obd, k, "obd.", 0.0, 600_000.0)
+            }
+            num(obd, "requestTimeoutMs", "obd.", 100.0, 60_000.0)
+            num(obd, "maxPidsPerRequest", "obd.", 0.0, 6.0)
+            num(obd, "demoteAfterMisses", "obd.", 1.0, 1000.0)
+            num(obd, "vehicleLostAfterSilent", "obd.", 1.0, 1000.0)
+            for (k in listOf("fast", "medium", "slow")) {
+                val a = obd.getJSONArray(k)
+                for (i in 0 until a.length()) {
+                    val v = a.opt(i)
+                    if (v !is String || !HEX_PID.matches(v)) { out += "obd.$k has \"$v\"; PIDs are two hex digits like \"0C\""; break }
+                }
+            }
+            if (obd.getString("engineOnly") !in setOf("auto", "on", "off")) out += "obd.engineOnly must be auto, on or off"
+            val obdAddr = obd.getString("deviceAddress")
+            if (obdAddr.isNotEmpty() && !BT_ADDRESS.matches(obdAddr)) out += "obd.deviceAddress isn't a Bluetooth address"
+            val auto = merged.getJSONObject("auto")
+            val carAddr = auto.getString("carAddress")
+            if (carAddr.isNotEmpty() && !BT_ADDRESS.matches(carAddr)) out += "auto.carAddress isn't a Bluetooth address"
+            num(auto, "stopAfterCarDisconnectS", "auto.", 0.0, 3600.0)
+            num(auto, "stopAfterEngineOffS", "auto.", 0.0, 3600.0)
+            return out
+        }
+
+        private fun fmt(x: Double) = if (x == Math.floor(x)) x.toLong().toString() else x.toString()
+
+        private fun kind(v: Any?): String = when (v) {
+            is JSONObject -> "an object"
+            is JSONArray -> "a list"
+            is String -> "text"
+            is Boolean -> "true or false"
+            is Number -> "a number"
+            else -> "missing"
+        }
+
+        private fun sameKinds(defaults: JSONObject, merged: JSONObject, path: String, out: MutableList<String>) {
+            for (k in defaults.keys()) {
+                val d = defaults.get(k)
+                val m = merged.opt(k)
+                if (kind(d) != kind(m)) { out += "$path$k must be ${kind(d)}"; continue }
+                if (d is JSONObject && path.isEmpty() && k != "sensors") sameKinds(d, m as JSONObject, "$k.", out)
+            }
+        }
+
         fun upgrade(user: JSONObject): JSONObject {
             val obd = user.optJSONObject("obd") ?: return user
             for ((key, olds) in OLD_OBD_DEFAULTS) {

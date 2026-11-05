@@ -304,21 +304,24 @@ function parseSeq(s: string | undefined): number {
 // Objects are named by their content, so two different uploads for one seq never overwrite each
 // other's bytes; D1 decides which one is the chunk. (Chunks stored before this have the old name,
 // kept in their r2_key.)
-// The trip list reads every chunk's track, so a malformed one is refused here rather than stored.
+// The trip list reads every chunk's track (or, when the phone left the track out, its thinned
+// routeOutline), so a malformed one is refused here rather than stored.
 // Points are [wallMs, lat, lon, ...numbers or null]; see docs/data-format.md.
 export function checkChunkMeta(meta: any): void {
   if (meta === null || typeof meta !== "object" || Array.isArray(meta)) throw new HttpError(400, "chunk metadata must be an object");
-  const track = meta.track;
-  if (track === undefined) return;
-  if (!Array.isArray(track) || track.length > MAX_TRACK_POINTS) throw new HttpError(400, "chunk track must be an array of points");
   const num = (x: unknown) => typeof x === "number" && Number.isFinite(x);
-  for (const pt of track) {
-    const ok =
-      Array.isArray(pt) && pt.length >= 3 && pt.length <= 16 && num(pt[0]) &&
-      pt.every((x) => x === null || num(x)) &&
-      (pt[1] === null || (pt[1] >= -90 && pt[1] <= 90)) &&
-      (pt[2] === null || (pt[2] >= -180 && pt[2] <= 180));
-    if (!ok) throw new HttpError(400, "chunk track has a bad point");
+  for (const key of ["track", "routeOutline"]) {
+    const track = meta[key];
+    if (track === undefined) continue;
+    if (!Array.isArray(track) || track.length > MAX_TRACK_POINTS) throw new HttpError(400, `chunk ${key} must be an array of points`);
+    for (const pt of track) {
+      const ok =
+        Array.isArray(pt) && pt.length >= 3 && pt.length <= 16 && num(pt[0]) &&
+        pt.every((x) => x === null || num(x)) &&
+        (pt[1] === null || (pt[1] >= -90 && pt[1] <= 90)) &&
+        (pt[2] === null || (pt[2] >= -180 && pt[2] <= 180));
+      if (!ok) throw new HttpError(400, `chunk ${key} has a bad point`);
+    }
   }
 }
 
@@ -406,7 +409,9 @@ async function listRecordings(url: URL, who: Principal, env: Env): Promise<Respo
     `SELECT r.id, r.device_id, r.user_id, r.status, r.started_at_ms, r.ended_at_ms, r.chunk_count, r.meta_json, r.updated_at_ms,
             COUNT(c.seq) AS chunks_received, COUNT(CASE WHEN c.seq < r.chunk_count THEN 1 END) AS chunks_in_range,
             COALESCE(SUM(c.bytes), 0) AS bytes,
-            json_group_array(json_extract(c.meta_json, '$.track')) AS tracks
+            json_group_array(COALESCE(json_extract(c.meta_json, '$.track'), json_extract(c.meta_json, '$.routeOutline'))) AS tracks,
+            COUNT(CASE WHEN json_extract(c.meta_json, '$.track') IS NULL AND json_extract(c.meta_json, '$.routeOutline') IS NULL
+                         AND json_extract(c.meta_json, '$.streams."loc:gps"') IS NOT NULL THEN 1 END) AS untracked
      FROM (SELECT * FROM recordings WHERE (started_at_ms < ?1 OR (started_at_ms = ?1 AND id < ?2))
              AND (?4 IS NULL OR COALESCE(user_id, '') = ?4)
            ORDER BY started_at_ms DESC, id DESC LIMIT ?3) r
@@ -426,7 +431,9 @@ async function listRecordings(url: URL, who: Principal, env: Env): Promise<Respo
       } catch (e) {
         console.error(`trip summary for ${r.id}:`, e);
       }
-      return { ...row, trip };
+      // routeGaps: chunks with GPS whose route the list couldn't see (summary left out before
+      // phones sent an outline). Their trip may say less than was driven; the trip page has it all.
+      return { ...row, trip, routeGaps: r.untracked ?? 0 };
     }),
     next: results.length === PAGE_SIZE ? `${last.started_at_ms}:${last.id}` : null,
   });

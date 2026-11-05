@@ -1,5 +1,6 @@
 package app.fuelish.record
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
@@ -172,8 +173,8 @@ class RecordingStore(val root: File) {
     }
 
     /**
-     * Sidecar for a recovered chunk. It has no route or engine summary (the web page rebuilds
-     * those from the raw data), but it does carry the clock mapping that rebuild needs and which
+     * Sidecar for a recovered chunk. It has no full route or engine summary (the web page rebuilds
+     * those from the raw data), only a thinned `routeOutline` for the trip list, but it does carry the clock mapping that rebuild needs and which
      * kinds of data are inside, from the chunk's own header record and timestamps.
      */
     private fun recoveredMeta(seq: Int, f: File): JSONObject {
@@ -182,6 +183,7 @@ class RecordingStore(val root: File) {
         var wallStartMs = 0L
         var lastNs = 0L
         val kinds = HashMap<String, Long>()
+        val gps = JSONArray() // for the list's route; see RouteOutline
         f.useLines { seqLines ->
             for (line in seqLines) {
                 lines++
@@ -199,6 +201,11 @@ class RecordingStore(val root: File) {
                     else -> k
                 }
                 kinds.merge(stream, 1L, Long::plus)
+                if (stream == "loc:gps" && o.has("lat") && o.has("lon") && o.has("time")) {
+                    gps.put(JSONArray().put(o.getLong("time")).put(o.getDouble("lat")).put(o.getDouble("lon"))
+                        .put(if (o.has("speed")) o.getDouble("speed") else JSONObject.NULL)
+                        .put(if (o.has("hAcc")) o.getDouble("hAcc") else JSONObject.NULL))
+                }
             }
         }
         return JSONObject().put("seq", seq).put("records", lines).put("recovered", true).apply {
@@ -209,6 +216,7 @@ class RecordingStore(val root: File) {
                 put("wallEndMs", wallStartMs + (lastNs - firstNs) / 1_000_000)
             }
             put("streams", JSONObject().apply { kinds.forEach { (k, n) -> put(k, JSONObject().put("n", n)) } })
+            app.fuelish.upload.RouteOutline.fit(gps, 30_000)?.let { put("routeOutline", it) }
         }
     }
 

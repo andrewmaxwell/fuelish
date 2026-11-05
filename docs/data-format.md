@@ -83,8 +83,11 @@ Android/data/app.fuelish/files/recordings/<id>/
                              those samples in fuel cut.
                              If a sidecar is too big for the upload header, the phone drops a whole
                              summary (rows and format keys together) and lists it in `summaryOmitted`;
-                             the web app rebuilds that chunk's summary from its raw data.
-                             A chunk recovered after a crash has `recovered: true`, no summaries, and its
+                             the web app rebuilds that chunk's summary from its raw data. A dropped track
+                             leaves `routeOutline` behind: the same points cut to [wallMs, lat, lon,
+                             speedMps, hAccM], at most one every 1–20 s, so the trip list still has the route.
+                             A chunk recovered after a crash has `recovered: true`, no summaries (but a
+                             `routeOutline` from its GPS lines), and its
                              clock (`firstNs`, `wallStartMs`, `lastNs`, `wallEndMs`) and per-stream counts
                              read back from the raw file.
   chunk-000000.uploaded      server acknowledged this chunk

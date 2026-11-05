@@ -147,6 +147,23 @@ class RecordingTest {
     }
 
     @Test
+    fun recoveredChunkGetsARouteOutlineFromItsGpsLines() {
+        val store = RecordingStore(tmp.newFolder())
+        store.writeMeta("r", JSONObject().put("id", "r").put("status", "recording").put("startedWallMs", 1000))
+        val lines = StringBuilder("{\"k\":\"chunk\",\"v\":1,\"rec\":\"r\",\"seq\":0,\"rx\":5000000,\"wall\":1700000000000}\n")
+        for (i in 0 until 20) {
+            lines.append("{\"k\":\"loc\",\"p\":\"gps\",\"et\":${7000000 + i},\"time\":${1700000000000L + i * 1000},\"lat\":${38.0 + i * 1e-4},\"lon\":-90.0,\"speed\":12.5,\"hAcc\":4.0}\n")
+        }
+        lines.append("{\"k\":\"loc\",\"p\":\"fused\",\"time\":1700000000500,\"lat\":1,\"lon\":1}\n") // not GPS: left out
+        File(store.dir("r"), RecordingWriter.chunkName(0, ".ndjson")).writeText(lines.toString())
+        store.recover { null }
+        val outline = store.chunkMeta("r", 0).getJSONArray("routeOutline")
+        assertEquals(20, outline.length())
+        assertEquals(38.0, outline.getJSONArray(0).getDouble(1), 1e-9)
+        assertEquals(12.5, outline.getJSONArray(0).getDouble(3), 1e-9)
+    }
+
+    @Test
     fun engineSummaryEstimatesFuelPerSample() {
         // Half a second fueling at lambda 1, half in fuel cut (lambda 2), constant airflow.
         val e = EngineSummary()
