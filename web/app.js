@@ -373,7 +373,7 @@ function outingCard(o) {
           <span><b>${miles(t.meters)}</b></span>
           <span><b>${fmtDur(t.movingMs)}</b> moving</span>
           <span>top <b>${Math.round(t.maxMps * Route.MPH)}</b> mph</span>
-          ${r.routeGaps ? `<span class="muted" title="Part of this trip's route isn't summarized for the list; the trip page has all of it">partial</span>` : ""}
+          ${o.some((x) => x.routeGaps) ? `<span class="muted" title="Part of this outing's route isn't summarized for the list; each trip's page has all of it">partial</span>` : ""}
         </div>` : ""}
         <ol class="legs">${legs}</ol>
       </div>
