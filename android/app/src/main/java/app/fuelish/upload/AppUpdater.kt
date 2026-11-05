@@ -129,6 +129,9 @@ object AppUpdater {
             return
         }
         state.value = State.Ready(u)
+        // A recording may have started while it downloaded (the car connected): installing now would
+        // end it. The banner offers the update again after the drive.
+        if (app.fuelish.RecorderService.activeId != null) return
         val uri = FileProvider.getUriForFile(c, "${c.packageName}.updates", file)
         c.startActivity(
             Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")

@@ -129,6 +129,10 @@ stop also records when the drive itself ended, before the stop wait: `driveEndWa
 (the app was killed; recovered at next launch with whatever reached disk, at most
 ~1 s lost).
 
+`resumes` (optional): the id of the recording an app update cut short, which this one carries on.
+The phone starts it by itself after the update (a manual recording always, an automatic one while the
+car's Bluetooth is still connected), and the web map draws the two as one drive.
+
 ## Server
 
 - D1 `recordings` and `chunks` tables hold the phone's metadata JSON verbatim plus a

@@ -100,6 +100,32 @@ class RecordingTest {
     }
 
     @Test
+    fun recordingCutShortByAnUpdateIsClaimedOnceWhileRecent() {
+        val store = RecordingStore(tmp.newFolder("root"))
+        val old = "20261105T120000Z-0001"
+        store.writeMeta(old, JSONObject().put("status", "stopped").put("endedWallMs", 1_000L))
+        val id = "20261105T183610Z-2d89"
+        store.writeMeta(id, JSONObject().put("status", "interrupted").put("trigger", "car_bluetooth").put("endedWallMs", 100_000L))
+
+        assertEquals(null, store.claimCutShort(nowMs = 100_000L + 4 * 60_000, withinMs = 3 * 60_000)) // too long ago
+        val (got, meta) = store.claimCutShort(nowMs = 120_000L, withinMs = 3 * 60_000)!!
+        assertEquals(id, got)
+        assertEquals("car_bluetooth", meta.getString("trigger"))
+        assertEquals(null, store.claimCutShort(nowMs = 120_000L, withinMs = 3 * 60_000)) // only once
+
+        // Still "recording" (recovery hasn't run yet): judged by its files' last write.
+        val live = "20261105T190000Z-0002"
+        store.writeMeta(live, JSONObject().put("status", "recording"))
+        val now = store.dir(live).listFiles()!!.maxOf { it.lastModified() }
+        assertEquals(live, store.claimCutShort(now + 1_000, 3 * 60_000)?.first)
+
+        // A drive that ended normally is never resumed.
+        val done = "20261105T200000Z-0003"
+        store.writeMeta(done, JSONObject().put("status", "stopped").put("endedWallMs", now))
+        assertEquals(null, store.claimCutShort(now, 3 * 60_000))
+    }
+
+    @Test
     fun recoveryFinishesCrashedRecording() {
         val store = RecordingStore(tmp.newFolder("root"))
         val id = "20261103T000000Z-abcd"

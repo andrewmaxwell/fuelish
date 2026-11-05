@@ -22,6 +22,7 @@ import java.util.TimeZone
  *   recordings/<id>/server.complete            marker: the server confirmed it holds every chunk 0..chunkCount-1
  *   recordings/<id>/upload.target              where it uploads: server and account (see [UploadTarget])
  *   recordings/<id>/upload.refused             the server refused it (someone else's trip): the reason
+ *   recordings/<id>/resumed                    marker: cut short by an app update, a new recording carried on
  *
  * The acknowledgement files above belong to the server in upload.target.
  * recording.json carries `rev`, raised on every write, so the server can ignore a stale copy that
@@ -182,6 +183,27 @@ class RecordingStore(val root: File) {
     }
 
     /**
+     * The recording an app restart (an update replacing the app) just cut short, to carry on: the
+     * newest one, still "recording" or already recovered as "interrupted", last written within
+     * [withinMs] of [nowMs] and not resumed before. Claims it (a marker file), so it's resumed once.
+     */
+    fun claimCutShort(nowMs: Long, withinMs: Long): Pair<String, JSONObject>? {
+        val id = ids().lastOrNull() ?: return null
+        val meta = runCatching { readMeta(id) }.getOrNull() ?: return null
+        val d = dir(id)
+        val lastWriteMs = when (meta.optString("status")) {
+            // Recovery sets endedWallMs to the last write before the kill (its own writes are newer).
+            "interrupted" -> meta.optLong("endedWallMs")
+            "recording" -> d.listFiles()?.maxOfOrNull { it.lastModified() } ?: 0L
+            else -> return null
+        }
+        if (nowMs - lastWriteMs !in 0..withinMs) return null
+        val marker = File(d, RESUMED)
+        if (!marker.createNewFile()) return null
+        return id to meta
+    }
+
+    /**
      * Gzips raw chunks left unfinished (by a crash, or by the writer failing mid-chunk) so their data
      * gets uploaded like any other chunk, and removes temp files. Returns the newest leftover's
      * modification time, or 0 when there was none.
@@ -272,6 +294,7 @@ class RecordingStore(val root: File) {
         const val SERVER_MISSING = "server.missing"
         const val TARGET = "upload.target"
         const val REFUSED = "upload.refused"
+        const val RESUMED = "resumed"
         private val CHUNK_META = Regex("""chunk-(\d{6})\.meta\.json""")
         private val RAW_CHUNK = Regex("""chunk-(\d{6})\.ndjson""")
 

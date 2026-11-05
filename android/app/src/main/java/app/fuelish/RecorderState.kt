@@ -118,6 +118,10 @@ object Prefs {
         sp(c).edit().putString("uploadTarget", t.toJson().toString()).apply()
     }
 
+    /** Whether the chosen car's Bluetooth was last seen connected (kept across app restarts). */
+    fun carConnected(c: Context) = sp(c).getBoolean("carConnected", false)
+    fun setCarConnected(c: Context, connected: Boolean) = sp(c).edit().putBoolean("carConnected", connected).apply()
+
     fun store(c: Context): RecordingStore {
         val base = c.getExternalFilesDir(null) ?: c.filesDir
         return RecordingStore(File(base, "recordings"))

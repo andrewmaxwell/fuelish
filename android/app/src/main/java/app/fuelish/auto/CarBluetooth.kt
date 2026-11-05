@@ -35,6 +35,27 @@ class CarBluetoothReceiver : BroadcastReceiver() {
     }
 }
 
+/**
+ * After an update replaces the app (which kills a recording in progress), carries on recording
+ * if the update cut a drive short: a manual recording always, an automatic one while the car's
+ * Bluetooth is still connected. The new recording names the one it continues (`resumes`), so the
+ * web app shows the two as one drive. MY_PACKAGE_REPLACED may start a foreground service from the
+ * background.
+ */
+class AppUpdatedReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != Intent.ACTION_MY_PACKAGE_REPLACED || RecorderService.activeId != null) return
+        val (id, meta) = Prefs.store(context).claimCutShort(System.currentTimeMillis(), 3 * 60_000) ?: return
+        val trigger = meta.optString("trigger", RecorderService.TRIGGER_MANUAL)
+        val auto = trigger != RecorderService.TRIGGER_MANUAL
+        if (auto && !(Prefs.config(context).auto.optBoolean("enabled") && Prefs.carConnected(context))) return
+        if (!CarBluetooth.canStartInBackground(context)) return
+        Log.i("FuelishAuto", "app updated mid-recording: resuming $id")
+        runCatching { RecorderService.start(context, meta.optString("note"), trigger, resumes = id) }
+            .onFailure { Log.w("FuelishAuto", "couldn't resume after the update", it) }
+    }
+}
+
 object CarBluetooth {
     private const val TAG = "FuelishAuto"
     private const val CHANNEL = "auto"
@@ -57,6 +78,7 @@ object CarBluetooth {
         val auto = Prefs.config(c).auto
         if (!auto.optBoolean("enabled") || !address.equals(auto.optString("carAddress"), ignoreCase = true)) return
         Log.i(TAG, "car ${if (connected) "connected" else "disconnected"}")
+        Prefs.setCarConnected(c, connected)
 
         if (RecorderService.activeId != null) {
             // Already recording (auto or manual): just tell the session. The app has a

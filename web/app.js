@@ -180,6 +180,12 @@ function linked(a, b) {
   const end = a.trip?.path?.at(-1), start = b.trip?.path?.[0];
   return !end || !start || haversine(end, start) <= OUTING_NEAR_M;
 }
+// `b` carries on the drive `a` was recording when an app update ended it: the phone says so
+// (meta.resumes, from 0.1.44), or, before that, `a` was cut off and `b` started within a minute.
+function continues(a, b) {
+  if (b.meta?.resumes) return b.meta.resumes === a.id;
+  return a.status === "interrupted" && a.deviceId === b.deviceId && b.startedWallMs - endOf(a) <= 60000;
+}
 const outingOf = (all, id) => outings(all).find((o) => o.some((r) => r.id === id));
 
 function statusPill(r) {
@@ -1166,6 +1172,10 @@ async function showMany(kind, key) {
   progress();
   // A few at a time; each trip's points are tagged with its index so the map keeps them apart.
   // One trip that can't load (e.g. a raw chunk missing) leaves just that trip off the map.
+  // A recording an app update cut short and the one that carried the drive on are one drive on the
+  // map (one line, ticks counting on): points of both get the first one's index.
+  const drive = [];
+  shown.forEach((r, i) => { drive[i] = i && continues(shown[i - 1], r) ? drive[i - 1] : i; });
   const lists = new Array(shown.length);
   const engines = new Array(shown.length).fill([]);
   const failed = [];
@@ -1176,7 +1186,7 @@ async function showMany(kind, key) {
       try {
         const tp = await tripPoints(shown[i].id);
         engines[i] = tp.engine; // summaries only: raw rebuilds of older drives are too slow for a week
-        lists[i] = tp.map((p) => ({ ...p, trip: i }));
+        lists[i] = tp.map((p) => ({ ...p, trip: drive[i] }));
       } catch (e) {
         if (e.message === "unauthorized") throw e;
         lists[i] = [];
@@ -1195,7 +1205,7 @@ async function showMany(kind, key) {
   }
   status.remove();
   const sm = Route.summary(pts);
-  sideRoute(sm, { engine: engines.some((e) => e.length), trips: shown.length });
+  sideRoute(sm, { engine: engines.some((e) => e.length), trips: new Set(drive).size });
   const view = drawRoute(pts, sm, { withDay: kind === "week" });
   const engineRows = engines.flat();
   if (engineRows.length) {
@@ -1205,7 +1215,7 @@ async function showMany(kind, key) {
   }
 
   // Hovering a trip in the list brings it forward on the map.
-  const index = new Map(shown.map((r, i) => [r.id, i]));
+  const index = new Map(shown.map((r, i) => [r.id, drive[i]]));
   document.querySelectorAll(".trip-row").forEach((a) => {
     const k = index.get(a.dataset.id);
     a.addEventListener("mouseenter", () => view.focus(k));

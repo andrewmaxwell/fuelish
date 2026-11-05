@@ -49,7 +49,8 @@ class RecorderService : Service() {
                 startForegroundNow()
                 val note = intent.getStringExtra(EXTRA_NOTE).orEmpty()
                 val trigger = intent.getStringExtra(EXTRA_TRIGGER) ?: TRIGGER_MANUAL
-                control.execute { if (session == null) session = Session(note, trigger).also { it.start() } }
+                val resumes = intent.getStringExtra(EXTRA_RESUMES)
+                control.execute { if (session == null) session = Session(note, trigger, resumes).also { it.start() } }
             }
             ACTION_STOP -> control.execute { stopSession("manual") }
             ACTION_CAR_CONNECTED, ACTION_CAR_DISCONNECTED -> control.execute {
@@ -58,7 +59,8 @@ class RecorderService : Service() {
             else -> control.execute { if (session == null) stopSelf() }
         }
         // If the process is killed the recording is finished as "interrupted" on next launch;
-        // we don't auto-restart because background FGS starts can't use location.
+        // we don't auto-restart because background FGS starts can't use location. (An app update
+        // is the exception: AppUpdatedReceiver carries the drive on in a new recording.)
         return START_NOT_STICKY
     }
 
@@ -106,7 +108,7 @@ class RecorderService : Service() {
     }
 
     /** Everything that lives for exactly one recording. */
-    private inner class Session(private val note: String, private val trigger: String) {
+    private inner class Session(private val note: String, private val trigger: String, private val resumes: String? = null) {
         private val ctx = this@RecorderService
         private val cfg = Prefs.config(ctx)
         private val store = Prefs.store(ctx)
@@ -143,6 +145,7 @@ class RecorderService : Service() {
                 .put("vehicle", cfg.vehicle).put("note", note).put("trigger", trigger)
                 .put("app", appInfo()).put("device", deviceInfo())
                 .put("config", cfg.redacted())
+            if (resumes != null) meta.put("resumes", resumes)
             store.writeMeta(id, meta)
             // Uploads as whoever is signed in now, even if someone else signs in before it's sent.
             store.setTarget(id, Prefs.uploadTarget(ctx))
@@ -321,6 +324,7 @@ class RecorderService : Service() {
         const val ACTION_CAR_DISCONNECTED = "app.fuelish.CAR_DISCONNECTED"
         const val EXTRA_NOTE = "note"
         const val EXTRA_TRIGGER = "trigger"
+        const val EXTRA_RESUMES = "resumes"
         const val TRIGGER_MANUAL = "manual"
         const val CHANNEL = "recording"
         private const val NOTIFICATION_ID = 1
@@ -333,9 +337,11 @@ class RecorderService : Service() {
             )
         }
 
-        fun start(c: Context, note: String, trigger: String = TRIGGER_MANUAL) {
+        /** [resumes]: the recording an app update cut short, which this one carries on. */
+        fun start(c: Context, note: String, trigger: String = TRIGGER_MANUAL, resumes: String? = null) {
             c.startForegroundService(
-                Intent(c, RecorderService::class.java).setAction(ACTION_START).putExtra(EXTRA_NOTE, note).putExtra(EXTRA_TRIGGER, trigger),
+                Intent(c, RecorderService::class.java).setAction(ACTION_START).putExtra(EXTRA_NOTE, note).putExtra(EXTRA_TRIGGER, trigger)
+                    .apply { if (resumes != null) putExtra(EXTRA_RESUMES, resumes) },
             )
         }
 
