@@ -93,6 +93,12 @@ Android/data/app.fuelish/files/recordings/<id>/
   chunk-000000.uploaded      server acknowledged this chunk
   meta.uploaded              sha256 of the last recording.json the server accepted
   server.complete            the server confirmed it holds every chunk 0..chunkCount-1
+  upload.target              where it uploads, fixed when recording starts: server, a fingerprint of the
+                             upload key (never the key), and the account. A recording whose account or
+                             server differs from the phone's current one waits until the person chooses
+                             to send it as the current account (that resets the acknowledgements above
+                             when the server changes).
+  upload.refused             the key that tried, and why the server refused it (someone else's trip)
 ```
 
 With `upload.deleteAfterUpload` on (the default), a recording's whole folder is deleted only once it

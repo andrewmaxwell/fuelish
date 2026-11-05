@@ -144,6 +144,8 @@ class RecorderService : Service() {
                 .put("app", appInfo()).put("device", deviceInfo())
                 .put("config", cfg.redacted())
             store.writeMeta(id, meta)
+            // Uploads as whoever is signed in now, even if someone else signs in before it's sent.
+            store.setTarget(id, Prefs.uploadTarget(ctx))
 
             writer = RecordingWriter(
                 store.dir(id), id, cfg.chunkSeconds, cfg.chunkMaxBytes,

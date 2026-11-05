@@ -48,6 +48,16 @@ const Account = (() => {
     if (v !== "me" && v !== "all" && !users?.some((u) => u.id === v)) v = "me";
     return v;
   }
+  /** The picker choice that shows `userId`'s trips ("all" when they aren't one of the people listed). */
+  function whoFor(userId) {
+    if (!userId) return "all";
+    if (userId === me?.user?.id) return "me";
+    return users?.some((u) => u.id === userId) ? userId : "all";
+  }
+  /** Switches the picker (it takes effect on the next page shown). */
+  function setWho(v) {
+    try { localStorage.setItem(WHO_KEY, v); } catch {}
+  }
   /** The `user` filter for /recordings, or "" for everyone. */
   function whoParam() {
     const v = who();
@@ -299,15 +309,32 @@ const Account = (() => {
     const copy = async (btn, text) => {
       try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; } catch { prompt("Copy this link:", text); }
     };
-    app.querySelectorAll("[data-revoke]").forEach((b) => (b.onclick = async () => {
+    // Runs a change from a button or picker: disabled while it runs; a failure is said next to it
+    // and the control is left ready to try again (a picker goes back to what it showed).
+    const act = async (el, fn) => {
+      const was = el.tagName === "SELECT" ? el.dataset.was : null;
+      el.disabled = true;
+      el.parentElement.querySelector(".act-error")?.remove();
+      try {
+        await fn();
+      } catch (e) {
+        if (e.message === "unauthorized") throw e;
+        if (was != null) el.value = was;
+        el.insertAdjacentHTML("afterend", `<small class="bad act-error" role="alert">Didn't work: ${esc(e.message)}. Try again.</small>`);
+      } finally {
+        el.disabled = false;
+      }
+    };
+    app.querySelectorAll("[data-revoke]").forEach((b) => (b.onclick = () => {
       if (!confirm("Remove this phone? It stops uploading until you sign in on it again.")) return;
-      await api(`/devices/${b.dataset.revoke}`, { method: "DELETE" });
-      showAccount();
+      return act(b, async () => {
+        await api(`/devices/${b.dataset.revoke}`, { method: "DELETE" });
+        showAccount();
+      });
     }));
     const inviteBtn = document.getElementById("invite");
-    if (inviteBtn) inviteBtn.onclick = async () => {
-      inviteBtn.disabled = true;
-      try {
+    if (inviteBtn) inviteBtn.onclick = () => act(inviteBtn, async () => {
+      {
         const inv = await api("/invites", { method: "POST" });
         const url = link(inv.code);
         const out = document.getElementById("invite-out");
@@ -316,34 +343,39 @@ const Account = (() => {
         document.getElementById("copy-inv").onclick = (e) => copy(e.target, url);
         const share = document.getElementById("share-inv");
         if (share) share.onclick = () => navigator.share({ title: "Join Fuelish", text: "Join me on Fuelish to track your drives:", url }).catch(() => {});
-      } finally {
-        inviteBtn.disabled = false;
       }
-    };
+    });
     app.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = () => copy(b, link(b.dataset.copy))));
-    app.querySelectorAll("[data-uninvite]").forEach((b) => (b.onclick = async () => {
+    app.querySelectorAll("[data-uninvite]").forEach((b) => (b.onclick = () => act(b, async () => {
       await api(`/invites/${b.dataset.uninvite}`, { method: "DELETE" });
       showAccount();
-    }));
-    app.querySelectorAll("[data-disable]").forEach((b) => (b.onclick = async () => {
+    })));
+    app.querySelectorAll("[data-disable]").forEach((b) => (b.onclick = () => {
       const off = !!b.dataset.off;
       if (off && !confirm("Turn this person off? They're signed out everywhere and their phones stop uploading. Their trips stay.")) return;
-      await api(`/admin/users/${b.dataset.disable}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: off }) });
-      forget();
-      await load();
-      renderHeader();
-      showAccount();
+      return act(b, async () => {
+        await api(`/admin/users/${b.dataset.disable}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: off }) });
+        forget();
+        await load();
+        renderHeader();
+        showAccount();
+      });
     }));
-    app.querySelectorAll("[data-phone]").forEach((s) => (s.onchange = async () => {
-      if (!s.value) return;
-      await api(`/admin/phones/${encodeURIComponent(s.dataset.phone)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userId: s.value }) });
-      forget();
-      await load();
-      renderHeader();
-      showAccount();
-    }));
+    app.querySelectorAll("[data-phone]").forEach((s) => {
+      s.dataset.was = s.value;
+      s.onchange = () => {
+        if (!s.value) return;
+        return act(s, async () => {
+          await api(`/admin/phones/${encodeURIComponent(s.dataset.phone)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userId: s.value }) });
+          forget();
+          await load();
+          renderHeader();
+          showAccount();
+        });
+      };
+    });
   }
 
-  return { load, forget, whoParam, renderHeader, showLogin, showInvite, showAccount, nativeDone, signOut, inApp };
+  return { load, forget, whoParam, whoFor, setWho, renderHeader, showLogin, showInvite, showAccount, nativeDone, signOut, inApp };
 })();
 window.Account = Account;

@@ -25,11 +25,15 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params)
         up.value = up.value.copy(running = true, pending = store.pendingChunkCount(), unconfirmed = store.unconfirmed(RecorderService.activeId).size)
         var total = 0
         var result: UploadResult
+        var held = up.value.held
         // Loop so chunks that close while we upload are picked up in the same run.
         do {
-            result = Uploader(store, cfg.serverUrl, cfg.deviceToken, cfg.upload.optBoolean("deleteAfterUpload", true), { isStopped }) { id ->
+            val uploader = Uploader(store, cfg.serverUrl, cfg.deviceToken, cfg.upload.optBoolean("deleteAfterUpload", true), { isStopped }) { id ->
                 TripReady.notify(applicationContext, id, store.readMeta(id))
-            }.uploadAll()
+            }
+            result = uploader.uploadAll()
+            uploader.current?.let { Prefs.rememberUploadTarget(applicationContext, it) }
+            if (uploader.current != null) held = uploader.held.toList()
             if (result is UploadResult.Done) total += result.chunks
             if (result is UploadResult.Incomplete) total += result.chunks
         } while (result is UploadResult.Done && result.chunks > 0 && !isStopped)
@@ -42,6 +46,7 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params)
         up.value = UploadStatus(
             running = false, lastResult = text, lastAtMs = System.currentTimeMillis(), pending = store.pendingChunkCount(),
             unconfirmed = store.unconfirmed(RecorderService.activeId).size, attention = store.needsAttention(),
+            held = held.filter { store.dir(it).exists() },
         )
         return when (result) {
             is UploadResult.Done, is UploadResult.Incomplete -> Result.success()

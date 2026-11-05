@@ -29,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -180,6 +181,11 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit) {
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
+            if (serverOk) {
+                val target = remember(refresh) { Prefs.uploadTarget(ctx) }
+                Muted("Uploads as ${target.accountName ?: "this phone's signed-in account"}. Signing out of the Trips page doesn't change that; signing in as someone else does.")
+            }
+            if (up.held.isNotEmpty()) HeldTrips(up.held) { refresh++ }
             if (up.lastResult.isNotEmpty()) {
                 Muted("Last upload: " + up.lastResult + " (" + DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(up.lastAtMs)) + ")")
             }
@@ -192,6 +198,60 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit) {
             }
         }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+/**
+ * Trips recorded under another account (or for another server), or refused by the server as
+ * someone else's. They wait rather than upload as whoever is signed in now; the person can choose
+ * to send them as the current account.
+ */
+@Composable
+private fun HeldTrips(ids: List<String>, changed: () -> Unit) {
+    val ctx = LocalContext.current
+    val store = remember { Prefs.store(ctx) }
+    val now = remember(ids) { Prefs.uploadTarget(ctx) }
+    var asking by remember { mutableStateOf(false) }
+    val reasons = remember(ids) {
+        ids.mapNotNull { id ->
+            if (!store.dir(id).exists()) return@mapNotNull null
+            val t = store.target(id)
+            store.refusal(id, now.key)?.let { return@mapNotNull "the server refused it ($it)" }
+            when {
+                t == null -> null
+                t.server != now.server -> "recorded for ${t.server.removePrefix("https://")}"
+                else -> "recorded while signed in as ${t.accountName ?: "another account"}"
+            }
+        }.groupingBy { it }.eachCount()
+    }
+    val n = ids.size
+    Text(
+        "$n trip${if (n == 1) " is" else "s are"} waiting: " + reasons.entries.joinToString("; ") { (why, k) -> if (reasons.size == 1) why else "$k $why" } +
+            ". They upload when that account is signed in on this phone.",
+        style = MaterialTheme.typography.bodyMedium,
+    )
+    TextButton(onClick = { asking = true }) { Text("Upload them as ${now.accountName ?: "this account"}") }
+    if (asking) {
+        AlertDialog(
+            onDismissRequest = { asking = false },
+            title = { Text("Upload as ${now.accountName ?: "this account"}?") },
+            text = {
+                Text(
+                    "These trips will count as ${now.accountName ?: "this account"}'s. The server still refuses any that already belong to someone else; " +
+                        "the server's owner can move a phone's trips to the right person on the Account page.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    asking = false
+                    ids.filter { store.dir(it).exists() }.forEach { store.retarget(it, now) }
+                    RecorderState.upload.value = RecorderState.upload.value.copy(held = emptyList())
+                    UploadWorker.enqueue(ctx)
+                    changed()
+                }) { Text("Upload") }
+            },
+            dismissButton = { TextButton(onClick = { asking = false }) { Text("Not now") } },
+        )
     }
 }
 

@@ -223,6 +223,9 @@ body.page-trip { --top: 0px; }
 body.page-trip .top { display: none; }
 .main-nav { display: flex; gap: 2px; flex: 1; min-width: 0; margin: 0 12px; overflow-x: auto; scrollbar-width: none; }
 .main-nav::-webkit-scrollbar { display: none; }
+.main-nav.more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+.main-nav.more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent); }
+.main-nav.more-left.more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); }
 .main-nav a { flex: none; padding: 6px 10px; border-radius: 8px; font-size: 14px; font-weight: 550; color: var(--text-2); text-decoration: none; }
 .main-nav a:hover { color: var(--text); background: var(--accent-soft); }
 .main-nav a[aria-current="page"] { color: var(--text); background: var(--raised); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
@@ -579,3 +582,4 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 .marks-key i { width: 2px; height: 11px; background: #fff; border-radius: 1px; box-shadow: 0 0 0 1px rgba(11, 11, 11, 0.7); }
 .seg.marks { background: transparent; border: 0; padding: 0; flex-wrap: nowrap; }
 .seg.marks button { min-width: 0; flex: none; padding: 3px 8px; font-size: 12px; }
+.act-error { display: block; margin-top: 4px; font-size: 13px; }

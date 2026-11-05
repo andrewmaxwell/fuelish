@@ -25,6 +25,15 @@ OUT=android/app/build/outputs/apk/release
 APK="$OUT/app-release.apk"
 CODE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["elements"][0]["versionCode"])' "$OUT/output-metadata.json")
 NAME=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["elements"][0]["versionName"])' "$OUT/output-metadata.json")
+# The release key's certificate. Phones refuse an update signed by anything else, so check before sending.
+RELEASE_CERT_SHA256=3e2e448d1d8f3f3112bb4c8b2fabd059ed102c938b57e84b71f8b211106f7572
+APKSIGNER=$(ls -d "${ANDROID_HOME:-$HOME/Library/Android/sdk}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+[ -n "$APKSIGNER" ] || { echo "apksigner not found (Android SDK build-tools)." >&2; exit 1; }
+CERT=$(PATH="$JAVA_HOME/bin:$PATH" "$APKSIGNER" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p; s/^V2 Signer: certificate SHA-256 digest: //p' | head -1)
+if [ "$CERT" != "$RELEASE_CERT_SHA256" ]; then
+  echo "The APK isn't signed with the release key (got ${CERT:-no signature}). Not publishing." >&2
+  exit 1
+fi
 SHA=$(shasum -a 256 "$APK" | cut -d' ' -f1)
 
 echo "Publishing Fuelish $NAME (version $CODE, $(du -h "$APK" | cut -f1))…"

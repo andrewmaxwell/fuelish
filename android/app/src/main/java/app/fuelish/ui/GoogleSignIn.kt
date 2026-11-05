@@ -10,6 +10,7 @@ import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.GetCredentialException
 import androidx.credentials.exceptions.NoCredentialException
 import app.fuelish.Prefs
+import app.fuelish.record.UploadTarget
 import app.fuelish.upload.UploadWorker
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -88,6 +89,10 @@ object GoogleSignIn {
                     json?.optString("deviceToken")?.takeIf { it.isNotBlank() }?.let { token ->
                         val cfg = JSONObject(Prefs.config(activity).json.toString()).put("deviceToken", token)
                         Prefs.saveConfig(activity, cfg.toString())
+                        // Whose trips this phone now records: new recordings upload as this person.
+                        json.optJSONObject("user")?.let { u ->
+                            Prefs.rememberUploadTarget(activity, UploadTarget.of(serverUrl, token, u.optString("id").ifEmpty { null }, u.optString("name").ifEmpty { null }))
+                        }
                         UploadWorker.enqueue(activity)
                     }
                     Result.Ok

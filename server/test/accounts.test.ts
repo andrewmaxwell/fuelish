@@ -113,6 +113,12 @@ describe("accounts", () => {
     expect((await call("/recordings", { headers: dadPhone })).status).toBe(403);
   });
 
+  it("tells a phone whose account its key uploads as", async () => {
+    const me: any = await (await call("/me", { headers: dadPhone })).json();
+    expect(me.account).toEqual({ id: dadId, name: "Dad" });
+    expect(me.user).toBeNull();
+  });
+
   it("only lets the owner invite or manage people", async () => {
     const dad = sessionOf(await signIn(DAD));
     expect((await call("/invites", { method: "POST", headers: { ...dad, "X-Fuelish": "1" } })).status).toBe(403);

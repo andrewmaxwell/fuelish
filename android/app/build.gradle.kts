@@ -7,7 +7,8 @@ plugins {
 
 // Release key lives outside the repo (~/.android/fuelish-release.{jks,properties}). Google sign-in
 // is registered against its SHA-1, and every phone's install must keep the same key to update, so
-// back both files up. Without them (another machine), release builds fall back to the debug key.
+// back both files up. Without them (another machine), a release build stops with an error rather
+// than signing with some other key that installed phones would refuse as an update.
 val releaseProps = Properties().apply {
     val f = File(System.getProperty("user.home"), ".android/fuelish-release.properties")
     if (f.exists()) f.inputStream().use { load(it) }
@@ -45,11 +46,17 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
     buildFeatures { compose = true }
     testOptions { unitTests.isReturnDefaultValues = true }
+}
+
+tasks.configureEach {
+    if (name == "packageRelease" || name == "assembleRelease" || name == "bundleRelease") doFirst {
+        if (releaseProps.isEmpty()) throw GradleException("No release key (~/.android/fuelish-release.properties). Phones only update to builds signed with it.")
+    }
 }
 
 dependencies {

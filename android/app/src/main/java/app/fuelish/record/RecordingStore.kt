@@ -20,7 +20,10 @@ import java.util.TimeZone
  *   recordings/<id>/chunk-000000.uploaded      marker: server acknowledged this chunk
  *   recordings/<id>/meta.uploaded              sha256 of the last recording.json the server accepted
  *   recordings/<id>/server.complete            marker: the server confirmed it holds every chunk 0..chunkCount-1
+ *   recordings/<id>/upload.target              where it uploads: server and account (see [UploadTarget])
+ *   recordings/<id>/upload.refused             the server refused it (someone else's trip): the reason
  *
+ * The acknowledgement files above belong to the server in upload.target.
  * recording.json carries `rev`, raised on every write, so the server can ignore a stale copy that
  * arrives after a newer one.
  */
@@ -116,6 +119,36 @@ class RecordingStore(val root: File) {
     }
 
     fun pendingChunkCount(): Int = ids().sumOf { pendingChunks(it).size }
+
+    fun target(id: String): UploadTarget? =
+        File(dir(id), TARGET).takeIf { it.exists() }?.let { f -> runCatching { UploadTarget.fromJson(JSONObject(f.readText())) }.getOrNull() }
+
+    fun setTarget(id: String, t: UploadTarget) {
+        dir(id).mkdirs()
+        RecordingWriter.writeAtomically(File(dir(id), TARGET), t.toJson().toString())
+    }
+
+    /** Why the server refused this recording from the upload key [key]; null if it didn't (or a different key tried). */
+    fun refusal(id: String, key: String): String? =
+        File(dir(id), REFUSED).takeIf { it.exists() }?.readText()?.split('\n', limit = 2)?.takeIf { it.size == 2 && it[0] == key }?.get(1)
+    fun markRefused(id: String, key: String, why: String) = File(dir(id), REFUSED).writeText("$key\n$why")
+
+    /**
+     * Sends a recording to [t] from now on (the person chose to upload it as the account signed in
+     * now). Moving to another server forgets what the old one acknowledged, so every part still on the
+     * phone goes to the new one; parts already deleted after reaching the old server stay there.
+     */
+    fun retarget(id: String, t: UploadTarget) {
+        val old = target(id)
+        if (old != null && old.server != t.server) {
+            File(dir(id), META_UPLOADED).delete()
+            File(dir(id), SERVER_COMPLETE).delete()
+            File(dir(id), SERVER_MISSING).delete()
+            for (seq in finishedChunks(id)) if (chunkFile(id, seq).exists()) File(dir(id), RecordingWriter.chunkName(seq, ".uploaded")).delete()
+        }
+        File(dir(id), REFUSED).delete()
+        setTarget(id, t)
+    }
 
     fun bytesUsed(): Long = root.walkTopDown().filter { it.isFile }.sumOf { it.length() }
 
@@ -237,6 +270,8 @@ class RecordingStore(val root: File) {
         const val META_UPLOADED = "meta.uploaded"
         const val SERVER_COMPLETE = "server.complete"
         const val SERVER_MISSING = "server.missing"
+        const val TARGET = "upload.target"
+        const val REFUSED = "upload.refused"
         private val CHUNK_META = Regex("""chunk-(\d{6})\.meta\.json""")
         private val RAW_CHUNK = Regex("""chunk-(\d{6})\.ndjson""")
 
@@ -246,5 +281,33 @@ class RecordingStore(val root: File) {
         }
 
         fun sha256(b: ByteArray) = MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
+    }
+}
+
+/**
+ * Where a recording uploads: [server] (normalized URL), [key] (a short fingerprint of the upload
+ * token, never the token) and [account] (the server's id for the person, when the phone knows it).
+ * Fixed when the recording starts, so signing in as someone else later doesn't hand it to them.
+ */
+data class UploadTarget(val server: String, val key: String, val account: String?, val accountName: String? = null) {
+    /** Same destination: same server, and the same person (by account when both know it, else by key). */
+    fun sameAs(o: UploadTarget): Boolean =
+        server == o.server && (if (account != null && o.account != null) account == o.account else key == o.key)
+
+    fun toJson(): JSONObject = JSONObject().put("server", server).put("key", key)
+        .put("account", account ?: JSONObject.NULL).put("accountName", accountName ?: JSONObject.NULL)
+
+    companion object {
+        fun of(serverUrl: String, token: String, account: String? = null, accountName: String? = null) = UploadTarget(
+            serverUrl.trim().trimEnd('/').lowercase(),
+            if (token.isBlank()) "" else RecordingStore.sha256(token.toByteArray()).take(16),
+            account, accountName,
+        )
+
+        fun fromJson(o: JSONObject) = UploadTarget(
+            o.getString("server"), o.getString("key"),
+            o.optString("account").takeIf { !o.isNull("account") && it.isNotEmpty() },
+            o.optString("accountName").takeIf { !o.isNull("accountName") && it.isNotEmpty() },
+        )
     }
 }

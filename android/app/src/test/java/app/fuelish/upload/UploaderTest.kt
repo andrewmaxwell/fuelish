@@ -26,17 +26,33 @@ class UploaderTest {
     private val serverDropped = HashSet<String>() // "id/seq" the server pretends it never stored
     private val chunkMetaHeaders = HashMap<String, JSONObject>()
     private var requests = 0
+    private val accounts = HashMap<String, String>() // token -> account id, answered at /me (none: an older server, 404)
+    private val othersTrips = HashSet<String>() // recording ids the server says belong to someone else
+    private val asked = mutableListOf<String>() // recording ids requests were about
     private val base get() = "http://127.0.0.1:${server.address.port}"
 
     @Before
     fun start() {
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/api/v1/me") { ex ->
+            val tok = ex.requestHeaders.getFirst("Authorization")?.removePrefix("Bearer ")
+            val (code, text) = when {
+                accounts.isEmpty() -> 404 to "not found"
+                tok !in accounts -> 401 to "invalid token"
+                else -> 200 to "{\"account\":{\"id\":\"${accounts[tok]}\",\"name\":\"Name ${accounts[tok]}\"}}"
+            }
+            ex.sendResponseHeaders(code, text.length.toLong())
+            ex.responseBody.use { it.write(text.toByteArray()) }
+        }
         server.createContext("/api/v1/recordings/") { ex ->
             requests++
             val body = ex.requestBody.readBytes()
             val parts = ex.requestURI.path.removePrefix("/api/v1/recordings/").split("/")
+            asked += parts[0]
+            val auth = ex.requestHeaders.getFirst("Authorization")
             val (code, text) = when {
-                ex.requestHeaders.getFirst("Authorization") != "Bearer tok" -> 401 to "bad token"
+                auth != "Bearer tok" && auth?.removePrefix("Bearer ") !in accounts -> 401 to "bad token"
+                parts[0] in othersTrips && parts.size <= 3 && parts.getOrNull(1) != "verify" -> 403 to "recording belongs to someone else"
                 parts.size == 1 -> {
                     metas[parts[0]] = String(body)
                     200 to "{}"
@@ -267,6 +283,68 @@ class UploaderTest {
         assertEquals(5, outline.getJSONArray(0).length())
         assertEquals(1_000_000L + 5999 * 100L, outline.getJSONArray(outline.length() - 1).getLong(0)) // ends where the track did
         assertTrue(sent.toString().length <= Uploader.MAX_META_HEADER)
+    }
+
+    @Test
+    fun aTripSomeoneElseOwnsWaitsWithoutBlockingTheRest() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 2)
+        makeRecording(store, "b", 2)
+        othersTrips += "a"
+        val up = Uploader(store, base, "tok")
+        assertEquals(UploadResult.Done(2), up.uploadAll())
+        assertEquals(listOf("a"), up.held)
+        assertTrue(chunks.containsKey("b/0") && chunks.containsKey("b/1"))
+        assertTrue(store.refusal("a", up.current!!.key) != null)
+        // Not asked again on the next run with the same key.
+        asked.clear()
+        Uploader(store, base, "tok").uploadAll()
+        assertTrue("a" !in asked)
+    }
+
+    @Test
+    fun tripsRecordedAsSomeoneElseWaitAfterAnotherPersonSignsIn() {
+        val store = RecordingStore(tmp.newFolder())
+        accounts["tok"] = "dad"
+        accounts["tok2"] = "brother"
+        makeRecording(store, "dads", 1)
+        store.setTarget("dads", app.fuelish.record.UploadTarget.of(base, "tok", "dad", "Dad"))
+        makeRecording(store, "old", 1) // recorded before phones kept targets
+        // The brother signs in on the same phone: his key replaces dad's.
+        val up = Uploader(store, base, "tok2")
+        assertEquals(UploadResult.Done(1), up.uploadAll())
+        assertEquals(listOf("dads"), up.held)
+        assertTrue(!chunks.containsKey("dads/0") && chunks.containsKey("old/0"))
+        assertEquals("brother", store.target("old")!!.account)
+        // Dad signs back in (a new key, same account): his trip goes up.
+        accounts["tok3"] = "dad"
+        val again = Uploader(store, base, "tok3")
+        again.uploadAll()
+        assertTrue(again.held.isEmpty())
+        assertTrue(chunks.containsKey("dads/0"))
+    }
+
+    @Test
+    fun aTripRecordedWithoutAnAccountGoesWithTheFirstOneSignedIn() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 1)
+        store.setTarget("a", app.fuelish.record.UploadTarget.of(base, ""))
+        assertEquals(UploadResult.Done(1), Uploader(store, base, "tok").uploadAll())
+    }
+
+    @Test
+    fun movingATripToAnotherServerResendsWhatThePhoneStillHas() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 2)
+        store.setTarget("a", app.fuelish.record.UploadTarget.of("https://old.example", "tok"))
+        store.markChunkUploaded("a", 0) // the old server has part 0; the phone still has it
+        store.markMetaUploaded("a", store.metaHash("a"))
+        val up = Uploader(store, base, "tok")
+        up.uploadAll()
+        assertEquals(listOf("a"), up.held) // a different server: waits
+        store.retarget("a", up.current!!)
+        assertEquals(UploadResult.Done(2), Uploader(store, base, "tok").uploadAll())
+        assertTrue(chunks.containsKey("a/0") && chunks.containsKey("a/1") && metas.containsKey("a"))
     }
 
     @Test

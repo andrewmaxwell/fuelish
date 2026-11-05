@@ -1,8 +1,8 @@
 # Fuelish
 
-Records driving telemetry (phone sensors, GNSS, OBD-II through an OBDLink MX+) so trips
-can be analysed, mapped and compared later. Milestone 1 is about **collecting real
-data reliably**. Reporting and scoring come later.
+Records driving telemetry (phone sensors, GNSS, OBD-II through an OBDLink MX+) and shows
+each trip on a web page: maps, fuel use and cost, repeated-trip comparisons, insights.
+Several people can use one server, each signed in with Google and seeing whose trips are whose.
 
 ```
 android/   Android recorder (Kotlin, Compose). Foreground service, chunked local storage, WorkManager uploads
@@ -247,9 +247,12 @@ python3 tools/fuelish.py export recording.ndjson.gz out/
 
 ## What has been tested
 
-- **Worker** (5 tests in the Workers runtime): token scopes, metadata-before-chunks, idempotent re-upload, sha mismatch rejection,
-  conflicting content rejected, missing-chunk detection, completeness, signed-link download = exact concatenation, device-id ownership.
-- **Android JVM tests** (24, including auto-stop rules: disconnect grace period, brief drops, engine-off, adapter trouble never stops): JSON escaping; chunk rotation with every record accounted for; crash recovery; ELM/CAN parsing
+- **Worker** (41 tests in the Workers runtime, `cd server && npm test`): token scopes, metadata-before-chunks, idempotent re-upload,
+  sha mismatch rejection, conflicting content rejected, missing-chunk detection, completeness, signed-link download = exact
+  concatenation, device-id ownership; Google sign-in, invites, people and phones, signing in again after a session ends;
+  share links, prefs, app updates; input checks on metadata and chunk tracks, trip summaries and route outlines.
+- **Web** (26 tests, `node --test web/test/*.test.mjs`): the analysis math (route distance, fuel, costs, repeated trips).
+- **Android JVM tests** (56, including auto-stop rules: disconnect grace period, brief drops, engine-off, adapter trouble never stops): JSON escaping; chunk rotation with every record accounted for; crash recovery; ELM/CAN parsing
   (single + ISO-TP multi-frame); multi-PID splitting and SAE decoding; the read-only allowlist; scheduler fairness; uploader
   resume after errors, lost-ack duplicates, bad token, live recordings. The OBD recorder also runs end to end against a fake
   ELM327/STN adapter: discovery, VIN, benchmark finding the multi-PID limit, ignition-off wait then recovery, reconnect after
@@ -281,5 +284,4 @@ python3 tools/fuelish.py export recording.ndjson.gz out/
 
 ## Deliberately deferred
 
-Activity-recognition trip detection (for cars without Bluetooth), dashboards, scoring, route matching, fuel-economy estimation (needs MAF/AFR assumptions,
-to be added explicitly later), deleting recordings from the server, multi-user auth (Cloudflare Access can sit in front later).
+Activity-recognition trip detection (for cars without Bluetooth), driving scores, and deleting recordings from the server.

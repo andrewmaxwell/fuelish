@@ -1,6 +1,7 @@
 package app.fuelish.upload
 
 import app.fuelish.record.RecordingStore
+import app.fuelish.record.UploadTarget
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -10,6 +11,7 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 private val CONFLICT = UploadResult.Retry("conflict", 0)
+private val REFUSED = UploadResult.Retry("refused", 0)
 
 sealed class UploadResult {
     data class Done(val chunks: Int) : UploadResult()
@@ -39,6 +41,12 @@ class Uploader(
 ) {
     class Response(val code: Int, val body: String)
 
+    /** After a run: where uploads go now (the account the server says the key belongs to, if it said). */
+    var current: UploadTarget? = null
+        private set
+    /** After a run: recordings left waiting because they belong to another account or server, or were refused. */
+    val held = mutableListOf<String>()
+
     private fun UploadResult.withChunks(n: Int) = if (this is UploadResult.Retry) copy(chunks = n) else this
 
     /**
@@ -53,23 +61,44 @@ class Uploader(
         var uploaded = 0
         val conflicts = mutableListOf<String>()
         val stopped = UploadResult.Retry("cancelled", 0)
+        held.clear()
         try {
+            val now = whoAmI().let { it as? UploadTarget ?: return it as UploadResult }
+            current = now
             for (id in store.ids()) {
                 if (cancelled()) return stopped.withChunks(uploaded)
+                // Safe on the server it went to, whichever that was.
                 if (store.fullyUploaded(id)) {
                     if (deleteAfterUpload) store.dir(id).deleteRecursively()
                     continue
                 }
-                putMetaIfChanged(id)?.let { return it.withChunks(uploaded) }
+                if (!mayUpload(id, now)) {
+                    held += id
+                    continue
+                }
+                fun refused(r: UploadResult?): Boolean {
+                    if (r !== REFUSED) return false
+                    held += id
+                    return true
+                }
+                val m1 = putMetaIfChanged(id)
+                if (refused(m1)) continue
+                m1?.let { return it.withChunks(uploaded) }
+                var skip = false
                 for (seq in store.pendingChunks(id)) {
                     if (cancelled()) return stopped.withChunks(uploaded)
                     when (val r = putChunk(id, seq)) {
                         null -> uploaded++
                         CONFLICT -> conflicts += "$id/$seq"
+                        REFUSED -> { held += id; skip = true }
                         else -> return r.withChunks(uploaded)
                     }
+                    if (skip) break
                 }
-                putMetaIfChanged(id)?.let { return it.withChunks(uploaded) }
+                if (skip) continue
+                val m2 = putMetaIfChanged(id)
+                if (refused(m2)) continue
+                m2?.let { return it.withChunks(uploaded) }
                 verifyIfFinished(id)?.let { return it.withChunks(uploaded) }
                 if (deleteAfterUpload && store.fullyUploaded(id)) store.dir(id).deleteRecursively()
             }
@@ -81,6 +110,42 @@ class Uploader(
         if (conflicts.isNotEmpty()) return UploadResult.Retry("server has different content for chunks $conflicts", uploaded)
         val lost = store.needsAttention()
         return if (lost.isEmpty()) UploadResult.Done(uploaded) else UploadResult.Incomplete(uploaded, lost)
+    }
+
+    /**
+     * Which account this phone's key uploads as, from the server; for an older server that can't say,
+     * the key alone identifies it. A bad key is fatal: nothing can upload until it's fixed.
+     */
+    private fun whoAmI(): Any {
+        val r = request("GET", "$baseUrl/api/v1/me", emptyMap(), null, null)
+        if (r.code == 404) return UploadTarget.of(baseUrl, token)
+        if (r.code == 401) return UploadResult.Fatal("HTTP 401 ${r.body.take(200)} (check device token)")
+        if (r.code !in 200..299) return UploadResult.Retry("who am I: HTTP ${r.code} ${r.body.take(200)}", 0)
+        val acct = runCatching { org.json.JSONObject(r.body).optJSONObject("account") }.getOrNull()
+        return UploadTarget.of(baseUrl, token, acct?.optString("id")?.ifEmpty { null }, acct?.optString("name")?.ifEmpty { null })
+    }
+
+    /**
+     * Whether recording [id] goes to [now]. A recording keeps the server and account it was recorded
+     * under: after someone else signs in on the phone (or the phone moves to another server) it waits
+     * instead of uploading as them. One recorded with no account at all, or before phones kept
+     * targets, goes where uploads go now.
+     */
+    private fun mayUpload(id: String, now: UploadTarget): Boolean {
+        var t = store.target(id)
+        if (t == null || (t.key.isEmpty() && t.account == null)) {
+            t = now
+            store.setTarget(id, t)
+        } else if (t.account == null && now.account != null && t.server == now.server && t.key == now.key) {
+            t = t.copy(account = now.account, accountName = now.accountName)
+            store.setTarget(id, t)
+        }
+        return t.sameAs(now) && store.refusal(id, now.key) == null
+    }
+
+    private fun refuse(id: String, r: Response): UploadResult {
+        store.markRefused(id, current?.key ?: "", r.body.take(200).ifBlank { "HTTP ${r.code}" })
+        return REFUSED
     }
 
     private fun classify(r: Response, what: String): UploadResult? = when (r.code) {
@@ -95,6 +160,8 @@ class Uploader(
         if (store.uploadedMetaHash(id) == hash) return null
         val body = File(store.dir(id), RecordingStore.META).readBytes()
         val r = request("PUT", "$baseUrl/api/v1/recordings/$id", mapOf("Content-Type" to "application/json"), body, null)
+        // 403 here: the trip is someone else's on the server (or this key can't upload). Only it waits.
+        if (r.code == 403 || r.code == 409) return refuse(id, r)
         classify(r, "metadata $id")?.let { return it }
         // Hash of the bytes actually sent; if the file changed meanwhile it is re-sent next time.
         store.markMetaUploaded(id, RecordingStore.sha256(body))
@@ -164,6 +231,7 @@ class Uploader(
         )
         val r = request("PUT", "$baseUrl/api/v1/recordings/$id/chunks/$seq", headers, null, store.chunkFile(id, seq))
         if (r.code == 409) return CONFLICT
+        if (r.code == 403) return refuse(id, r)
         classify(r, "chunk $id/$seq")?.let { return it }
         store.markChunkUploaded(id, seq, deleteAfterUpload)
         return null
@@ -184,12 +252,14 @@ class Uploader(
             c.requestMethod = method
             c.connectTimeout = 20_000
             c.readTimeout = 120_000
-            c.doOutput = true
             c.setRequestProperty("Authorization", "Bearer $token")
             headers.forEach { (k, v) -> c.setRequestProperty(k, v) }
-            val len = body?.size?.toLong() ?: file!!.length()
-            c.setFixedLengthStreamingMode(len)
-            c.outputStream.use { os -> if (body != null) os.write(body) else file!!.inputStream().use { it.copyTo(os) } }
+            if (body != null || file != null) {
+                c.doOutput = true
+                val len = body?.size?.toLong() ?: file!!.length()
+                c.setFixedLengthStreamingMode(len)
+                c.outputStream.use { os -> if (body != null) os.write(body) else file!!.inputStream().use { it.copyTo(os) } }
+            }
             val code = c.responseCode
             val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText().orEmpty()
             return Response(code, text)

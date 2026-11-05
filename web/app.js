@@ -39,9 +39,19 @@ function tokenProblem(t) {
 
 // Every recording, newest first (the server pages them).
 // Whose: the header's "whose trips" choice.
-async function allRecordings() {
+// Fades the header links' edges where more links are scrolled out of sight, so it's clear there are more.
+function navEdges() {
+  const nav = document.getElementById("main-nav");
+  if (!nav || nav.hidden) return;
+  nav.classList.toggle("more-left", nav.scrollLeft > 2);
+  nav.classList.toggle("more-right", nav.scrollLeft + nav.clientWidth < nav.scrollWidth - 2);
+}
+document.getElementById("main-nav")?.addEventListener("scroll", navEdges, { passive: true });
+window.addEventListener("resize", navEdges);
+
+// Every trip in the person picker's choice (or `user`'s: an id, "" for everyone).
+async function allRecordings(user = Account.whoParam()) {
   let all = [], before = null;
-  const user = Account.whoParam();
   for (;;) {
     const q = [user ? `user=${encodeURIComponent(user)}` : "", before != null ? `before=${encodeURIComponent(before)}` : ""].filter(Boolean).join("&");
     const page = await api("/recordings" + (q ? "?" + q : ""));
@@ -235,9 +245,6 @@ async function route() {
   const nav = document.getElementById("main-nav");
   nav.hidden = false;
   nav.querySelectorAll("a").forEach((a) => (a.dataset.section === section ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
-  // On a narrow screen the links scroll sideways: keep the current one in view.
-  const here = nav.querySelector("[aria-current]");
-  if (here) nav.scrollLeft = Math.max(0, here.offsetLeft - nav.offsetLeft - (nav.clientWidth - here.offsetWidth) / 2);
   const trip = h.match(/^#\/r\/([A-Za-z0-9_-]+)(?:\/(\d+))?/);
   const insights = h.startsWith("#/insights");
   const routes = h.match(/^#\/routes(?:\/([A-Za-z0-9_.-]+))?/);
@@ -246,6 +253,11 @@ async function route() {
   const account = h.startsWith("#/account");
   const many = h.match(/^#\/(day|week)\/(\d{4}-\d{2}-\d{2})/) || h.match(/^#\/(outing)\/([A-Za-z0-9_-]+)/);
   document.body.classList.toggle("page-trip", !!(trip || many));
+  // On a narrow screen the links scroll sideways: keep the current one in view. Measured after the
+  // page class is set, since a trip page hides the header (and everything in it measures 0).
+  const here = nav.querySelector("[aria-current]");
+  if (here) nav.scrollLeft = Math.max(0, here.offsetLeft - nav.offsetLeft - (nav.clientWidth - here.offsetWidth) / 2);
+  navEdges();
   window.scrollTo(0, 0);
   app.innerHTML = `<p class="muted loading">Loading…</p>`;
   try {
@@ -398,6 +410,43 @@ async function tripPoints(id, detail, onProgress, { shared = false } = {}) {
   out.end = end;
   out.ecu = mainEcuOf(r);
   return out;
+}
+
+// The trip's outing and repeated journey, found among its owner's trips (all of them, whoever the
+// person picker shows). Links that lead to a list switch the picker to that person, so the outing or
+// comparison they open has the trip in it.
+async function tripContext(r, live) {
+  let recordings;
+  try {
+    ({ recordings } = await allRecordings(r.userId ?? ""));
+  } catch (e) {
+    if (e.message === "unauthorized") throw e;
+    return; // the page works without it
+  }
+  const box = document.getElementById("trip-context");
+  if (!live() || !box) return;
+  const id = r.id;
+  const who = Account.whoFor(r.userId);
+  // Does the picker's choice already include this trip? ("" is everyone; "me" is the signed-in person.)
+  const p = Account.whoParam();
+  const shown = p === "" || p === r.userId || (p === "me" && who === "me");
+  const sw = shown ? "" : ` data-who="${esc(who)}"`;
+  let html = "";
+  const o = outingOf(recordings, id);
+  if (o && o.length > 1) {
+    const i = o.findIndex((x) => x.id === id);
+    html += `<nav class="outing-nav">
+      <span>Trip ${i + 1} of ${o.length} in this outing</span>
+      ${i > 0 ? `<a href="#/r/${esc(o[i - 1].id)}">← Previous</a>` : ""}
+      ${i < o.length - 1 ? `<a href="#/r/${esc(o[i + 1].id)}">Next →</a>` : ""}
+      <a href="#/outing/${esc(o[0].id)}"${sw}>Whole outing</a>
+    </nav>`;
+  }
+  // Driven before? Link to its leaderboard.
+  const j = Repeats.journeyOf(Repeats.journeys(recordings, Prefs.get("places")).journeys, id);
+  if (j) html += `<nav class="outing-nav"><span>One of ${j.trips.length} trips ${esc(j.loop ? `looping from ${j.from.name}` : `from ${j.from.name} to ${j.to.name}`)}</span><a href="#/routes/${esc(j.key)}"${sw}>Compare them →</a></nav>`;
+  box.innerHTML = html;
+  box.querySelectorAll("[data-who]").forEach((a) => (a.onclick = () => Account.setWho(a.dataset.who)));
 }
 
 // A trip still recording or uploading: checks for new parts every 30 s while the page is visible
@@ -704,10 +753,7 @@ function momentsFor(pts, sm) {
 // `share` is a share-link token: the trip is shown read-only, without anything that needs signing in.
 async function showTrip(id, share = null, focusT = null) {
   const live = current();
-  // The list is only needed to find the other trips of this one's outing; the page works without it.
-  const [detail, list] = share
-    ? [await api(`/shared/${share}`), null]
-    : await Promise.all([api(`/recordings/${id}`), api("/recordings").catch(() => null)]);
+  const detail = await api(share ? `/shared/${share}` : `/recordings/${id}`);
   if (!live()) return;
   const { recording: r } = detail;
   id = r.id;
@@ -715,23 +761,6 @@ async function showTrip(id, share = null, focusT = null) {
   const pills = [share ? `<span class="pill">Shared trip</span>` : "", statusPill(r), m.vehicle ? `<span class="pill">${esc(m.vehicle)}</span>` : ""].join("");
   const day = new Date(r.startedWallMs).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
 
-  const o = list && outingOf(list.recordings, id);
-  // Driven before? Link to its leaderboard.
-  let repeat = "";
-  if (list) {
-    const j = Repeats.journeyOf(Repeats.journeys(list.recordings, Prefs.get("places")).journeys, id);
-    if (j) repeat = `<nav class="outing-nav"><span>One of ${j.trips.length} trips ${esc(j.loop ? `looping from ${j.from.name}` : `from ${j.from.name} to ${j.to.name}`)}</span><a href="#/routes/${esc(j.key)}">Compare them →</a></nav>`;
-  }
-  let outing = "";
-  if (o && o.length > 1) {
-    const i = o.findIndex((x) => x.id === id);
-    outing = `<nav class="outing-nav">
-      <span>Trip ${i + 1} of ${o.length} in this outing</span>
-      ${i > 0 ? `<a href="#/r/${esc(o[i - 1].id)}">← Previous</a>` : ""}
-      ${i < o.length - 1 ? `<a href="#/r/${esc(o[i + 1].id)}">Next →</a>` : ""}
-      <a href="#/outing/${esc(o[0].id)}">Whole outing</a>
-    </nav>`;
-  }
 
   app.innerHTML = `
     <div class="trip">
@@ -740,8 +769,7 @@ async function showTrip(id, share = null, focusT = null) {
         <h1>${esc(tripName(r.startedWallMs))}</h1>
         <p class="muted">${esc(day)} · ${esc(timeRange(r))}</p>
         <div class="pills">${pills}${share ? "" : `<div class="share" id="share"></div>`}</div>
-        ${outing}
-        ${repeat}
+        <div id="trip-context"></div>
         ${r.status === "recording" ? `<p class="hint" id="upd">Still recording; the route fills in as parts upload. <span id="upd-state"></span></p>`
           : !r.complete ? `<p class="hint" id="upd">${r.chunksReceived} of ${r.chunkCount ?? "?"} parts uploaded so far; the phone sends the rest on Wi-Fi. <span id="upd-state"></span></p>` : ""}
         ${m.note ? `<p class="note">${esc(m.note)}</p>` : ""}
@@ -756,6 +784,7 @@ async function showTrip(id, share = null, focusT = null) {
     </div>`;
 
   if (!share) shareControls(id);
+  if (!share) tripContext(r, live); // not awaited: the route doesn't wait for it
   if (!share && (r.status === "recording" || !r.complete)) watchForParts(r, live);
   const status = document.getElementById("rt-status");
   const pts = await tripPoints(id, detail, (i, n) => {

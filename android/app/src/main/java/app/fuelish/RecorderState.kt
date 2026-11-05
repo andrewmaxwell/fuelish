@@ -3,6 +3,7 @@ package app.fuelish
 import android.content.Context
 import app.fuelish.obd.ObdStatus
 import app.fuelish.record.RecordingStore
+import app.fuelish.record.UploadTarget
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.File
 import java.util.UUID
@@ -40,6 +41,8 @@ data class UploadStatus(
     val pending: Int = 0,
     val unconfirmed: Int = 0,
     val attention: Map<String, List<Int>> = emptyMap(),
+    /** Recordings waiting because they belong to another account or server, or the server refused them. */
+    val held: List<String> = emptyList(),
 ) {
     val waiting get() = pending > 0 || unconfirmed > 0
 }
@@ -98,6 +101,21 @@ object Prefs {
         if (pass == null || pass != want) return false
         p.edit().remove("startPass").apply()
         return true
+    }
+
+    /**
+     * Where a recording started now uploads: the configured server and key, with the account the
+     * server last said that key belongs to (learned on each upload; unknown until the first).
+     */
+    fun uploadTarget(c: Context): UploadTarget {
+        val cfg = config(c)
+        val t = UploadTarget.of(cfg.serverUrl, cfg.deviceToken)
+        val known = sp(c).getString("uploadTarget", null)?.let { runCatching { UploadTarget.fromJson(JSONObject(it)) }.getOrNull() }
+        return if (known != null && known.server == t.server && known.key == t.key) known else t
+    }
+
+    fun rememberUploadTarget(c: Context, t: UploadTarget) {
+        sp(c).edit().putString("uploadTarget", t.toJson().toString()).apply()
     }
 
     fun store(c: Context): RecordingStore {

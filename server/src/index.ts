@@ -770,6 +770,9 @@ async function me(who: Principal, env: Env): Promise<Response> {
     admin: who.admin,
     // Only someone signed in with Google (or the owner's original token) gets their details back.
     user: u && who.via !== "device" ? { id: u.id, name: u.name, email: u.email, picture: u.picture, admin: !!u.is_admin } : null,
+    // Whose trips this credential uploads as: a phone checks this so trips recorded under one account
+    // never quietly upload as another after someone else signs in on it.
+    account: u ? { id: u.id, name: u.name } : null,
     claimed: !!owned,
   });
 }
