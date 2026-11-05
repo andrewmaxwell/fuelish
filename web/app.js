@@ -20,7 +20,20 @@ const OUTING_GAP_MS = 30 * 60000;
 const OUTING_NEAR_M = 500;
 
 function token() {
-  try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; }
+  try { return cleanToken(localStorage.getItem(TOKEN_KEY) || ""); } catch { return ""; }
+}
+
+// A pasted token can carry characters that aren't part of it: spaces and line breaks, invisible
+// zero-width spaces or a byte-order mark (phone keyboards and password managers add these), or
+// quotes copied from a config file. A token is plain ASCII, so these are dropped.
+function cleanToken(s) {
+  return s.replace(/[\s\u00A0\u200B-\u200D\u2060\uFEFF"'`\u2018\u2019\u201C\u201D]/g, "");
+}
+
+// What's still wrong with a cleaned token, if anything: fetch refuses header values outside Latin-1.
+function tokenProblem(t) {
+  const bad = [...t].find((c) => c < "!" || c > "~");
+  return bad ? `That token contains a character a token can't have (U+${bad.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}). Copy it again from where it's stored.` : "";
 }
 
 // Every recording, newest first (the server pages them).
@@ -35,6 +48,8 @@ async function allRecordings() {
 }
 
 async function api(path, opts = {}) {
+  const problem = tokenProblem(token());
+  if (problem) { showLogin(problem); throw new Error("unauthorized"); }
   const res = await fetch("/api/v1" + path, {
     ...opts,
     headers: { Authorization: "Bearer " + token(), ...(opts.headers || {}) },
@@ -177,7 +192,10 @@ function showLogin(msg = "") {
     </form>`;
   document.getElementById("login").onsubmit = async (e) => {
     e.preventDefault();
-    try { localStorage.setItem(TOKEN_KEY, document.getElementById("tok").value.trim()); } catch {}
+    const t = cleanToken(document.getElementById("tok").value);
+    const problem = tokenProblem(t);
+    if (problem) return showLogin(problem);
+    try { localStorage.setItem(TOKEN_KEY, t); } catch {}
     route();
   };
 }
