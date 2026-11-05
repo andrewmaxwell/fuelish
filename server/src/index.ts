@@ -105,6 +105,16 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
     if (p.length === 2 && m === "DELETE") return revokeDevice(who, p[1], env);
     throw new HttpError(404, "not found");
   }
+  if (p[0] === "app") {
+    // Any phone or person may check for and fetch the app; only the owner publishes it.
+    if (p[1] === "latest" && p.length === 2 && m === "GET") return latestApp(env);
+    if (p[1] === "apk" && p.length === 3 && m === "GET") return downloadApp(p[2], env);
+    if (p[1] === "apk" && p.length === 2 && m === "PUT") {
+      needAdmin();
+      return publishApp(req, url, env);
+    }
+    throw new HttpError(404, "not found");
+  }
   if (p[0] === "admin") {
     needAdmin();
     if (p[1] === "phones" && p.length === 2 && m === "GET") return listPhones(env);
@@ -804,6 +814,53 @@ async function setUserDisabled(req: Request, who: Principal, id: string, env: En
   if (!r.meta.changes) throw new HttpError(404, "no such person");
   if (body.disabled) await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
   return json({ ok: true });
+}
+
+// ---------- app updates ----------
+
+// The Android app checks /app/latest when it opens and offers to install a newer build. The APK and a
+// small JSON describing it live in R2 next to the recordings. Old builds stay, under their version.
+const APP_LATEST = "app/latest.json";
+const MAX_APK_BYTES = 80 * 1024 * 1024;
+
+async function latestApp(env: Env): Promise<Response> {
+  const o = await env.RECORDINGS.get(APP_LATEST);
+  return json(o ? await o.json() : { versionCode: 0 });
+}
+
+async function publishApp(req: Request, url: URL, env: Env): Promise<Response> {
+  const versionCode = Number(url.searchParams.get("versionCode"));
+  const versionName = url.searchParams.get("versionName") ?? "";
+  if (!Number.isInteger(versionCode) || versionCode < 1) throw new HttpError(400, "versionCode must be a positive integer");
+  if (!/^[0-9A-Za-z._-]{1,40}$/.test(versionName)) throw new HttpError(400, "bad versionName");
+  const sha = (req.headers.get("X-Fuelish-Sha256") ?? "").toLowerCase();
+  if (!SHA_RE.test(sha)) throw new HttpError(400, "missing X-Fuelish-Sha256");
+  const current: any = await (await env.RECORDINGS.get(APP_LATEST))?.json();
+  if (current && versionCode <= current.versionCode) {
+    throw new HttpError(409, `version ${versionCode} isn't newer than the published ${current.versionCode}`);
+  }
+  const body = await readBounded(req, MAX_APK_BYTES, "apk");
+  if (hex(await crypto.subtle.digest("SHA-256", body)) !== sha) throw new HttpError(422, "sha256 mismatch");
+  // An APK is a zip: refuse anything else before phones are told to install it.
+  if (new Uint8Array(body, 0, 2).join() !== "80,75") throw new HttpError(400, "not an APK");
+  await env.RECORDINGS.put(`app/fuelish-${versionCode}.apk`, body, { sha256: sha, httpMetadata: { contentType: "application/vnd.android.package-archive" } });
+  const latest = { versionCode, versionName, sha256: sha, bytes: body.byteLength, publishedAtMs: Date.now() };
+  await env.RECORDINGS.put(APP_LATEST, JSON.stringify(latest), { httpMetadata: { contentType: "application/json" } });
+  return json(latest, 201);
+}
+
+async function downloadApp(version: string, env: Env): Promise<Response> {
+  if (!/^\d{1,9}$/.test(version)) throw new HttpError(400, "bad version");
+  const o = await env.RECORDINGS.get(`app/fuelish-${version}.apk`);
+  if (!o) throw new HttpError(404, "no such version");
+  return new Response(o.body, {
+    headers: {
+      "Content-Type": "application/vnd.android.package-archive",
+      "Content-Length": String(o.size),
+      "Content-Disposition": `attachment; filename="fuelish-${version}.apk"`,
+      "Cache-Control": "private, max-age=86400",
+    },
+  });
 }
 
 // ---------- helpers ----------

@@ -170,6 +170,18 @@ updates from an APK with the same key, so **back both files up** (a password man
 builds fall back to the debug key. The `debug` build also allows plain-HTTP uploads to `10.0.2.2`/`localhost`, for
 testing against `wrangler dev`.
 
+### Updating the app on everyone's phones
+
+```bash
+tools/publish-apk.sh
+```
+
+builds a release APK from a clean checkout and uploads it to the server (owner only: it uses `WEB_TOKEN`).
+Each phone checks when Fuelish opens (at most every 30 minutes) and shows **A new version of Fuelish is ready**
+above the recorder strip; a tap downloads it, checks its SHA-256 and opens Android's installer. The first time,
+Android asks to allow "Install unknown apps" for Fuelish. It never installs mid-recording. The version number is
+the git commit count, so every published build is newer than the last. Debug builds don't offer updates.
+
 First run on the phone:
 1. **Grant permissions** (location "while using the app", nearby devices/Bluetooth, notifications).
 2. **Allow unrestricted battery** (button on the main screen). This keeps recording and uploads alive with the screen off.

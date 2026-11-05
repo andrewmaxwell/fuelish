@@ -13,6 +13,12 @@ val releaseProps = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
+// Versions count commits, so every committed build is newer than the last one (in-app updates compare
+// versionCode). tools/publish-apk.sh only publishes from a clean checkout, so the number means one build.
+val gitCommits: Int = runCatching {
+    providers.exec { commandLine("git", "rev-list", "--count", "HEAD") }.standardOutput.asText.get().trim().toInt()
+}.getOrDefault(1)
+
 android {
     namespace = "app.fuelish"
     compileSdk {
@@ -23,8 +29,8 @@ android {
         applicationId = "app.fuelish"
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = gitCommits
+        versionName = "0.1.$gitCommits"
     }
 
     signingConfigs {

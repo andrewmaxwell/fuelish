@@ -55,6 +55,7 @@ import kotlinx.coroutines.launch
 import app.fuelish.Prefs
 import app.fuelish.RecorderService
 import app.fuelish.RecorderState
+import app.fuelish.upload.AppUpdater
 import kotlinx.coroutines.delay
 
 /**
@@ -106,6 +107,7 @@ class MainActivity : ComponentActivity() {
         var server by remember { mutableStateOf(Prefs.config(ctx).serverUrl) }
         LifecycleResumeEffect(Unit) {
             server = Prefs.config(ctx).serverUrl
+            lifecycleScope.launch { AppUpdater.check(this@MainActivity) }
             // Back from elsewhere: the trip list may have new trips. Other pages stay as they were.
             web.view.evaluateJavascript("""if (location.hash === "" || location.hash === "#/") window.dispatchEvent(new HashChangeEvent("hashchange"))""", null)
             onPauseOrDispose { }
@@ -125,6 +127,7 @@ class MainActivity : ComponentActivity() {
                     if (web.loadFailed) Offline(web::retry)
                 }
             }
+            UpdateBar()
             HorizontalDivider()
             RecorderStrip(refreshKey = recorderOpen) { recorderOpen = true }
         }
@@ -201,6 +204,49 @@ private fun Offline(retry: () -> Unit) {
             Muted("No connection to the server right now. Recording works without it; trips upload later.")
             Spacer(Modifier.height(16.dp))
             Button(onClick = retry) { Text("Try again") }
+        }
+    }
+}
+
+/**
+ * "Update available" above the recorder strip. Never installs mid-recording: replacing the app stops
+ * it, which would end the drive's recording.
+ */
+@Composable
+private fun UpdateBar() {
+    val ctx = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val state by AppUpdater.state.collectAsStateWithLifecycle()
+    val st by RecorderState.status.collectAsStateWithLifecycle()
+    val u = when (val s = state) {
+        is AppUpdater.State.Ready -> s.update
+        is AppUpdater.State.Downloading -> s.update
+        is AppUpdater.State.Failed -> s.update
+        AppUpdater.State.None -> return
+    }
+    val busy = state is AppUpdater.State.Downloading
+    Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.clickable(enabled = !busy && !st.recording) { scope.launch { AppUpdater.install(ctx, u) } }
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                when (val s = state) {
+                    is AppUpdater.State.Downloading -> "Downloading Fuelish ${u.versionName}… ${(s.fraction * 100).toInt()}%"
+                    is AppUpdater.State.Failed -> s.message
+                    else -> if (st.recording) "Update ready (${u.versionName}). Installs after this drive." else "A new version of Fuelish is ready (${u.versionName})."
+                },
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.weight(1f),
+            )
+            if (!busy && !st.recording) {
+                Text(
+                    if (state is AppUpdater.State.Failed) "Retry" else "Update",
+                    style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 12.dp),
+                )
+            }
         }
     }
 }

@@ -150,3 +150,35 @@ describe("accounts", () => {
     expect((await call("/recordings/old2", { method: "PUT", headers: DEVICE, body: meta("old2", "andrew-phone") })).status).toBe(200);
   });
 });
+
+describe("app updates", () => {
+  const apk = (n: number) => new Uint8Array([0x50, 0x4b, 3, 4, n, n, n]); // "PK…": looks like a zip
+  async function sha(b: Uint8Array) {
+    return [...new Uint8Array(await crypto.subtle.digest("SHA-256", b))].map((x) => x.toString(16).padStart(2, "0")).join("");
+  }
+  async function publish(code: number, body = apk(code), headers: Record<string, string> = WEB) {
+    return call(`/app/apk?versionCode=${code}&versionName=0.1.${code}`, { method: "PUT", headers: { ...headers, "X-Fuelish-Sha256": await sha(body) }, body });
+  }
+
+  it("says there's nothing until the owner publishes a build", async () => {
+    expect(await (await call("/app/latest", { headers: DEVICE })).json()).toEqual({ versionCode: 0 });
+  });
+
+  it("only lets the owner publish, and only newer, intact APKs", async () => {
+    expect((await publish(5, apk(5), DEVICE)).status).toBe(403);
+    expect((await publish(5, new Uint8Array([1, 2, 3]))).status).toBe(400);
+    const bad = await call("/app/apk?versionCode=5&versionName=x", { method: "PUT", headers: { ...WEB, "X-Fuelish-Sha256": "0".repeat(64) }, body: apk(5) });
+    expect(bad.status).toBe(422);
+    expect((await publish(5)).status).toBe(201);
+    expect((await publish(5)).status).toBe(409);
+    expect((await publish(4)).status).toBe(409);
+  });
+
+  it("serves the latest to a phone", async () => {
+    const latest: any = await (await call("/app/latest", { headers: DEVICE })).json();
+    expect(latest).toMatchObject({ versionCode: 5, versionName: "0.1.5", sha256: await sha(apk(5)), bytes: 7 });
+    const r = await call("/app/apk/5", { headers: DEVICE });
+    expect(new Uint8Array(await r.arrayBuffer())).toEqual(apk(5));
+    expect((await call("/app/apk/5")).status).toBe(401);
+  });
+});
