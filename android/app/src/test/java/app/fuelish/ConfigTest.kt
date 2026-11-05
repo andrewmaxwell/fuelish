@@ -21,6 +21,28 @@ class ConfigTest {
     }
 
     @Test
+    fun savedOldSensorDefaultsTakeTheTrimmedOnes() {
+        // What a phone that saved settings before the Nov 2026 trim has stored.
+        val saved = JSONObject("""{"sensors":{"acc":200,"gyro":200,"mag":50,"acc_unc":0,"gyro_unc":50,"mag_unc":50,"gravity":50,"linacc":100,"rotvec":100,"gamerot":50,"georot":0,"pressure":25,"light":0,"prox":0,"temp":0,"humidity":0,"heading":0},
+            "location":{"gpsIntervalMs":100,"fusedIntervalMs":1000,"gnssStatus":true,"gnssMeasurements":true,"gnssFullTracking":false,"gnssNavigationMessages":false,"nmea":false}}""")
+        val c = Config.parse(saved.toString())
+        assertEquals(0.0, c.sensors["gyro"])
+        assertEquals(0.0, c.sensors["rotvec"])
+        assertEquals(200.0, c.sensors["acc"])
+        assertEquals(50.0, c.sensorStoreHz["acc"])
+        assertEquals(false, c.location.getBoolean("gnssMeasurements"))
+        assertEquals(false, c.location.getBoolean("gnssStatus"))
+    }
+
+    @Test
+    fun editedSensorRatesStay() {
+        val c = Config.parse("""{"sensors":{"gyro":100},"location":{"gnssMeasurements":true}}""")
+        assertEquals(100.0, c.sensors["gyro"])
+        assertEquals(true, c.location.getBoolean("gnssMeasurements"))
+        assertEquals(true, refused("""{"sensorStoreHz":{"acc":"half"}}""") != null)
+    }
+
+    @Test
     fun editedListsStayAsTheUserSetThem() {
         val saved = JSONObject().put("obd", JSONObject().put("fast", org.json.JSONArray(listOf("0C", "0D"))))
         assertEquals(listOf("0C", "0D"), list(Config.parse(saved.toString()), "fast"))

@@ -122,6 +122,11 @@ class PhoneSensors(
             }
             val periodUs = if (hz < 0) SensorManager.SENSOR_DELAY_FASTEST else (1_000_000 / hz).toInt()
             val stream = "s:$key"
+            // Store at most storeHz: keep a sample once at least ~0.9 of the store period has passed since
+            // the last kept one (samples are kept as delivered, never averaged).
+            val storeHz = config.sensorStoreHz[key] ?: 0.0
+            val storeGapNs = if (storeHz > 0 && (hz < 0 || storeHz < hz)) (0.9e9 / storeHz).toLong() else 0L
+            var lastStoredTs = Long.MIN_VALUE
             val listener = object : SensorEventListener {
                 override fun onSensorChanged(e: SensorEvent) {
                     val rx = now()
@@ -129,6 +134,10 @@ class PhoneSensors(
                         val v = e.values
                         val dev = kotlin.math.abs(kotlin.math.sqrt((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).toDouble()) - SensorManager.GRAVITY_EARTH)
                         if (joltSinceFix.isNaN() || dev > joltSinceFix) joltSinceFix = dev
+                    }
+                    if (storeGapNs > 0) {
+                        if (lastStoredTs != Long.MIN_VALUE && e.timestamp - lastStoredTs < storeGapNs) return
+                        lastStoredTs = e.timestamp
                     }
                     emit(stream, e.timestamp, JsonLine("s", 120).s("s", key).n("ts", e.timestamp).n("rx", rx).floats("v", e.values).n("a", e.accuracy).build())
                 }
@@ -140,6 +149,7 @@ class PhoneSensors(
             }
             val ok = sm.registerListener(listener, sensor, periodUs, latencyUs, handler)
             if (ok) listeners += listener else problems += "could not register $key"
+            if (storeGapNs > 0) info.d("storeHz", storeHz)
             info.b("present", true).n("periodUs", periodUs).n("maxLatencyUs", latencyUs).b("registered", ok)
             info.beginObj("sensor")
             sensorJson(info, sensor)
@@ -197,14 +207,14 @@ class PhoneSensors(
         val fused = loc.optLong("fusedIntervalMs", 1000)
         if (fused > 0) request(LocationManager.FUSED_PROVIDER, fused)
 
-        if (loc.optBoolean("gnssStatus", true)) {
-            val cb = object : GnssStatus.Callback() {
-                override fun onSatelliteStatusChanged(st: GnssStatus) = gnssStatus(st)
-            }
-            lm.registerGnssStatusCallback(executor, cb)
-            gnssStatusCallback = cb
+        // Always listened to for the status screen's satellite count; written only when gnssStatus is on.
+        val writeStatus = loc.optBoolean("gnssStatus", false)
+        val statusCb = object : GnssStatus.Callback() {
+            override fun onSatelliteStatusChanged(st: GnssStatus) = gnssStatus(st, writeStatus)
         }
-        if (loc.optBoolean("gnssMeasurements", true) && caps.hasMeasurements()) {
+        lm.registerGnssStatusCallback(executor, statusCb)
+        gnssStatusCallback = statusCb
+        if (loc.optBoolean("gnssMeasurements", false) && caps.hasMeasurements()) {
             val cb = object : GnssMeasurementsEvent.Callback() {
                 override fun onGnssMeasurementsReceived(e: GnssMeasurementsEvent) = gnssMeasurements(e)
             }
@@ -264,7 +274,12 @@ class PhoneSensors(
         return j.build()
     }
 
-    private fun gnssStatus(st: GnssStatus) {
+    private fun gnssStatus(st: GnssStatus, write: Boolean) {
+        if (!write) {
+            satellitesUsed = (0 until st.satelliteCount).count { st.usedInFix(it) }
+            satellitesVisible = st.satelliteCount
+            return
+        }
         val rx = now()
         var used = 0
         val j = JsonLine("gnss_status", 4096).n("rx", rx).n("n", st.satelliteCount)

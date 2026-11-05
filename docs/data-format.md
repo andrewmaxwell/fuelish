@@ -39,8 +39,8 @@ batching latency.
 | `accuracy` | sensor accuracy change | `s`, `rx`, `a` |
 | `loc` | each location fix | `p` (provider: `gps` / `fused`), `et`, `rx`, `time`, `lat`, `lon`, `alt`, `msl`, `hAcc`, `vAcc`, `speed` (m/s), `speedAcc`, `bearing`, `bearingAcc`, `sats`, `mock`. Missing fields were not provided. |
 | `gnss_info` | start | GNSS chipset model/year and capabilities |
-| `gnss_status` | ~1 Hz | per-satellite constellation, svid, C/N0, elevation, azimuth, used-in-fix |
-| `gnss_meas` | ~1 Hz | raw GNSS clock + measurements (pseudorange rate, ADR, received SV time, ...) for post-processing |
+| `gnss_status` | ~1 Hz, if `location.gnssStatus` (off by default) | per-satellite constellation, svid, C/N0, elevation, azimuth, used-in-fix |
+| `gnss_meas` | ~1 Hz, if `location.gnssMeasurements` (off by default) | raw GNSS clock + measurements (pseudorange rate, ADR, received SV time, ...) for post-processing |
 | `gnss_nav`, `nmea` | if enabled | navigation messages / NMEA sentences |
 | `batt` | every `batteryIntervalS` | percent, charge counter (µAh), current (µA), voltage, temperature, plugged, thermal status, process CPU ms |
 | `stats` | every 10 s | writer totals: records written, dropped, queue depth |
@@ -53,6 +53,17 @@ batching latency.
 | `obd` | each decoded value | `tx`, `rx`, `ecu` (CAN header), `pid`, `data` (hex data bytes), `f` (field), `val`, `u` (unit). PIDs without a decoder have only `data`. |
 | `obd_adapter` | every 5 s | adapter-measured battery voltage (`ATRV`) |
 | `obd_stats` | every 10 s | requests/s, mean latency, per-PID polls/answers/tier/interval |
+
+### What a default recording holds (since Nov 2026)
+
+Only streams the app uses or is likely to: GPS and fused location, OBD (decoded and raw), battery,
+the accelerometer and the barometer. The accelerometer runs at 200 Hz so `jolt` still sees short
+bumps, but only ~50 Hz is written (`sensorStoreHz.acc`; whole samples kept as delivered, never
+averaged; `sensor_info` carries `storeHz`). The barometer runs at 5 Hz (road grade). Gyroscope,
+magnetometer, the fused orientation sensors and raw GNSS (`gnss_status`, `gnss_meas`) are off; each
+can be turned back on in the settings JSON. The satellite count on the status screen still works
+without `gnss_status` records. That's ~0.17 MB per driving minute instead of ~1.8 MB. A phone whose
+saved settings still hold the old default blocks exactly takes the new ones.
 
 Sensor keys: `acc`, `acc_unc`, `gyro`, `gyro_unc`, `mag`, `mag_unc`, `gravity`,
 `linacc`, `rotvec`, `gamerot`, `georot`, `pressure`, `light`, `prox`, `temp`,

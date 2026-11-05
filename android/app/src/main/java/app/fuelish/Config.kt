@@ -19,6 +19,10 @@ class Config(val json: JSONObject) {
     /** Sensor key -> requested rate in Hz (0 = off, -1 = fastest the device allows). */
     val sensors: Map<String, Double>
         get() = json.optJSONObject("sensors")?.let { o -> o.keys().asSequence().associateWith { o.getDouble(it) } } ?: emptyMap()
+    /** Sensor key -> highest rate written to the recording (absent or 0 = every sample). The sensor still
+     *  runs at its [sensors] rate for on-phone measures like jolt; only every Nth sample is stored. */
+    val sensorStoreHz: Map<String, Double>
+        get() = json.optJSONObject("sensorStoreHz")?.let { o -> o.keys().asSequence().associateWith { o.optDouble(it, 0.0) } } ?: emptyMap()
     val sensorMaxLatencyMs get() = json.optInt("sensorMaxReportLatencyMs", 200)
 
     val location get() = json.getJSONObject("location")
@@ -38,18 +42,19 @@ class Config(val json: JSONObject) {
           "chunkSeconds": 60,
           "chunkMaxBytes": 33554432,
           "sensors": {
-            "acc": 200, "gyro": 200, "mag": 50,
-            "acc_unc": 0, "gyro_unc": 50, "mag_unc": 50,
-            "gravity": 50, "linacc": 100,
-            "rotvec": 100, "gamerot": 50, "georot": 0,
-            "pressure": 25, "light": 0, "prox": 0, "temp": 0, "humidity": 0, "heading": 0
+            "acc": 200, "gyro": 0, "mag": 0,
+            "acc_unc": 0, "gyro_unc": 0, "mag_unc": 0,
+            "gravity": 0, "linacc": 0,
+            "rotvec": 0, "gamerot": 0, "georot": 0,
+            "pressure": 5, "light": 0, "prox": 0, "temp": 0, "humidity": 0, "heading": 0
           },
+          "sensorStoreHz": { "acc": 50 },
           "sensorMaxReportLatencyMs": 200,
           "location": {
             "gpsIntervalMs": 100,
             "fusedIntervalMs": 1000,
-            "gnssStatus": true,
-            "gnssMeasurements": true,
+            "gnssStatus": false,
+            "gnssMeasurements": false,
             "gnssFullTracking": false,
             "gnssNavigationMessages": false,
             "nmea": false
@@ -103,6 +108,20 @@ class Config(val json: JSONObject) {
             "medium" to listOf(listOf("0E", "06", "07", "44", "34", "24", "14", "15", "4C", "61", "62", "5E", "0F", "47")),
         )
 
+        /**
+         * Earlier sensor and location defaults (Nov 2026 and before: every motion sensor at 50–200 Hz and raw
+         * GNSS, ~1.8 MB a driving minute, ~75% of it never read). A stored block still exactly equal to the
+         * old default is treated as "never edited" and takes the current default.
+         */
+        private const val OLD_SENSORS_DEFAULT = """{"acc":200,"gyro":200,"mag":50,"acc_unc":0,"gyro_unc":50,"mag_unc":50,"gravity":50,"linacc":100,"rotvec":100,"gamerot":50,"georot":0,"pressure":25,"light":0,"prox":0,"temp":0,"humidity":0,"heading":0}"""
+        private const val OLD_LOCATION_DEFAULT = """{"gpsIntervalMs":100,"fusedIntervalMs":1000,"gnssStatus":true,"gnssMeasurements":true,"gnssFullTracking":false,"gnssNavigationMessages":false,"nmea":false}"""
+
+        private fun sameJson(a: JSONObject, b: JSONObject): Boolean =
+            a.length() == b.length() && a.keys().asSequence().all { k ->
+                val x = a.opt(k); val y = b.opt(k)
+                if (x is Number && y is Number) x.toDouble() == y.toDouble() else x == y
+            }
+
         fun parse(userJson: String?): Config {
             val base = JSONObject(DEFAULTS)
             if (!userJson.isNullOrBlank()) merge(base, upgrade(JSONObject(userJson)))
@@ -140,6 +159,10 @@ class Config(val json: JSONObject) {
             val sensors = merged.getJSONObject("sensors")
             for (k in sensors.keys()) {
                 if (sensors.opt(k) !is Number) out += "sensors.$k must be a number" else num(sensors, k, "sensors.", -1.0, 1000.0)
+            }
+            val store = merged.getJSONObject("sensorStoreHz")
+            for (k in store.keys()) {
+                if (store.opt(k) !is Number) out += "sensorStoreHz.$k must be a number" else num(store, k, "sensorStoreHz.", 0.0, 1000.0)
             }
             val loc = merged.getJSONObject("location")
             for (k in listOf("gpsIntervalMs", "fusedIntervalMs")) num(loc, k, "location.", -1.0, 600_000.0)
@@ -185,11 +208,13 @@ class Config(val json: JSONObject) {
                 val d = defaults.get(k)
                 val m = merged.opt(k)
                 if (kind(d) != kind(m)) { out += "$path$k must be ${kind(d)}"; continue }
-                if (d is JSONObject && path.isEmpty() && k != "sensors") sameKinds(d, m as JSONObject, "$k.", out)
+                if (d is JSONObject && path.isEmpty() && k != "sensors" && k != "sensorStoreHz") sameKinds(d, m as JSONObject, "$k.", out)
             }
         }
 
         fun upgrade(user: JSONObject): JSONObject {
+            user.optJSONObject("sensors")?.let { if (sameJson(it, JSONObject(OLD_SENSORS_DEFAULT))) user.remove("sensors") }
+            user.optJSONObject("location")?.let { if (sameJson(it, JSONObject(OLD_LOCATION_DEFAULT))) user.remove("location") }
             val obd = user.optJSONObject("obd") ?: return user
             for ((key, olds) in OLD_OBD_DEFAULTS) {
                 val stored = obd.optJSONArray(key)?.let { a -> (0 until a.length()).map { a.getString(it).uppercase() } } ?: continue
