@@ -26,8 +26,13 @@ import androidx.compose.runtime.setValue
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
 class TripsWeb(ctx: Context, private val onSignIn: (invite: String, legacyToken: String) -> Unit) {
     val view = WebView(ctx).apply {
+        // Debug builds: inspect the page from chrome://inspect on the computer.
+        if (ctx.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) WebView.setWebContentsDebuggingEnabled(true)
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
+        // Fill the space it's given. Compose's default (wrap content) makes the page's vh/dvh units 0,
+        // which collapsed the trip map to nothing.
+        layoutParams = android.view.ViewGroup.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT)
         // No white flash before the page paints in dark mode; the page sets its own background.
         setBackgroundColor(Color.TRANSPARENT)
         webViewClient = object : WebViewClient() {
