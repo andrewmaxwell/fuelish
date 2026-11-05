@@ -37,6 +37,7 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -125,7 +126,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             HorizontalDivider()
-            RecorderStrip { recorderOpen = true }
+            RecorderStrip(refreshKey = recorderOpen) { recorderOpen = true }
         }
     }
 
@@ -206,7 +207,7 @@ private fun Offline(retry: () -> Unit) {
 
 /** One line along the bottom: what the recorder is doing right now. Tap it to open the recorder. */
 @Composable
-private fun RecorderStrip(open: () -> Unit) {
+private fun RecorderStrip(refreshKey: Any, open: () -> Unit) {
     val ctx = LocalContext.current
     val st by RecorderState.status.collectAsStateWithLifecycle()
     val up by RecorderState.upload.collectAsStateWithLifecycle()
@@ -217,7 +218,13 @@ private fun RecorderStrip(open: () -> Unit) {
             delay(1000)
         }
     }
-    val cfg = remember(st.recording, st.stopping) { Prefs.config(ctx) }
+    // Settings change on the recorder screen (auto-record, car): re-read on the way back, and on resume.
+    var resumed by remember { mutableIntStateOf(0) }
+    LifecycleResumeEffect(Unit) {
+        resumed++
+        onPauseOrDispose { }
+    }
+    val cfg = remember(st.recording, st.stopping, refreshKey, resumed) { Prefs.config(ctx) }
     val locationOk = ctx.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
     val auto = cfg.auto
     val autoOn = auto.optBoolean("enabled") && auto.optString("carAddress").isNotBlank()
