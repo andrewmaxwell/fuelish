@@ -180,5 +180,6 @@ describe("app updates", () => {
     const r = await call("/app/apk/5", { headers: DEVICE });
     expect(new Uint8Array(await r.arrayBuffer())).toEqual(apk(5));
     expect((await call("/app/apk/5")).status).toBe(401);
+    expect(new Uint8Array(await (await call("/app/apk/latest", { headers: WEB })).arrayBuffer())).toEqual(apk(5));
   });
 });

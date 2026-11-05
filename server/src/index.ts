@@ -849,7 +849,13 @@ async function publishApp(req: Request, url: URL, env: Env): Promise<Response> {
   return json(latest, 201);
 }
 
+// `version` is a number, or "latest" (the website's download button).
 async function downloadApp(version: string, env: Env): Promise<Response> {
+  if (version === "latest") {
+    const latest: any = await (await env.RECORDINGS.get(APP_LATEST))?.json();
+    if (!latest) throw new HttpError(404, "no app published yet");
+    version = String(latest.versionCode);
+  }
   if (!/^\d{1,9}$/.test(version)) throw new HttpError(400, "bad version");
   const o = await env.RECORDINGS.get(`app/fuelish-${version}.apk`);
   if (!o) throw new HttpError(404, "no such version");

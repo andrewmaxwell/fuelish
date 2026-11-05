@@ -12,6 +12,14 @@ const Account = (() => {
   let me = null, users = null, pending = null;
 
   const inApp = () => typeof window.FuelishApp?.signIn === "function";
+  const onAndroid = () => /Android/i.test(navigator.userAgent);
+  const APP_KEY = "fuelish.appBanner";
+
+  // The Android app, for a phone that should record. Downloads from the server (signed-in only), so
+  // the first install needs no computer; after that the app updates itself.
+  const appDownload = (cls = "primary") =>
+    `<a class="button ${cls}" href="/api/v1/app/apk/latest" download="fuelish.apk">Download the Fuelish app</a>`;
+  const appSteps = `<p class="muted">Chrome downloads it; open the download and allow installing. The first time, Android asks to allow installs from Chrome. Then open Fuelish and sign in with the same Google account.</p>`;
   const legacy = () => me?.via === "legacy";
 
   // Who's signed in, or null. Doesn't go through api(): a 401 here just means "not signed in".
@@ -64,7 +72,19 @@ const Account = (() => {
       link.title = me.user ? `${me.user.name}: account` : "Account";
     }
     const banner = document.getElementById("banner");
-    banner.hidden = !legacy();
+    // On an Android phone's browser (not the app), offer the app once until it's dismissed.
+    let dismissed = false;
+    try { dismissed = !!localStorage.getItem(APP_KEY); } catch {}
+    const offerApp = !!me?.user && onAndroid() && !inApp() && !dismissed;
+    banner.hidden = !legacy() && !offerApp;
+    if (offerApp && !legacy() && banner.dataset.ready !== "app") {
+      banner.dataset.ready = "app";
+      banner.innerHTML = `<p><b>Record your drives on this phone?</b> Get the Fuelish app.</p>${appDownload()}<button class="ghost" id="app-later">Not now</button>`;
+      document.getElementById("app-later").onclick = () => {
+        try { localStorage.setItem(APP_KEY, "1"); } catch {}
+        banner.hidden = true;
+      };
+    }
     if (legacy() && !banner.dataset.ready) {
       banner.dataset.ready = "1";
       banner.innerHTML = `<p><b>${me.claimed ? "Sign in with Google" : "Set up sign-in"}:</b> ${me.claimed ? "you're using the original web token." : "you're the owner. Sign in with Google once to switch from the token and invite your family."}</p><div class="g-slot"></div><p class="bad" hidden></p>`;
@@ -212,7 +232,9 @@ const Account = (() => {
         <p>${esc(info.from)} invited you to record your drives and see what they cost.</p>
         <div class="g-slot"></div>
         <p class="bad" hidden></p>
-        ${inApp() ? "" : `<p class="muted">Recording on an Android phone? Install the Fuelish app and sign in there with the same Google account. You only use this link once.</p>`}
+        ${inApp() ? "" : onAndroid()
+          ? `<p class="muted">After you sign up, you can download the Fuelish app here to record your drives.</p>`
+          : `<p class="muted">Recording on an Android phone? After you sign up, open Fuelish on the phone, sign in, and download the app from your Account page.</p>`}
       </div>`;
     googleButton(app.querySelector(".g-slot"), { invite: code, text: "signup_with", error: app.querySelector(".login .bad") });
   }
@@ -240,6 +262,12 @@ const Account = (() => {
             : `<p>Signed in with the original web token.</p>`}
           <button class="ghost" id="signout">Sign out</button>
         </section>
+        ${m.user && !inApp() ? `
+        <section class="card">
+          <h2>Android app</h2>
+          ${onAndroid() ? `<p>Records your drives in the background and uploads them as yours.</p>${appDownload()}${appSteps}`
+            : `<p class="muted">To record drives, open this page on an Android phone (sign in with the same Google account) and download the app from here.</p>`}
+        </section>` : ""}
         ${m.user ? `
         <section class="card">
           <h2>Your phones</h2>
