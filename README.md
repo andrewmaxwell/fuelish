@@ -125,6 +125,23 @@ npx wrangler deploy
 The deploy prints the URL (e.g. `https://fuelish.<account>.workers.dev`). Open it and sign in with `WEB_TOKEN`.
 The token is kept in that browser's localStorage. Downloads use signed links that expire after 15 minutes.
 
+### Accounts (Sign in with Google)
+
+People sign in with Google; there are no passwords. The Google Cloud project **Fuelish** has one web OAuth client
+(its ID is `GOOGLE_CLIENT_ID` in `wrangler.jsonc`, `web/account.js` and the Android `GoogleSignIn.kt`; it isn't
+secret) and two Android clients for package `app.fuelish`, one per signing key (release and debug SHA-1). Its
+authorized JavaScript origins are the workers.dev URL and `http://localhost:8787`.
+
+- **The owner** claims the server once: sign in with `WEB_TOKEN` as before, then **Continue with Google** in the
+  banner. That account becomes the owner and gets every trip uploaded so far.
+- **Everyone else** joins with an invite link (Account → Make an invite link; one person, two weeks).
+- **Phones**: signing in inside the Android app also gives that phone its own upload key, so its recordings count
+  as that person's. Keys are listed (and removable) on the Account page. A phone that uploaded with the shared
+  `DEVICE_TOKEN` counts as the owner's; Account → Phones that have uploaded moves its trips to someone else.
+- **Seeing trips**: everyone signed in can see everyone's trips; the header's "whose trips" picker starts on your own.
+- `WEB_TOKEN` and `DEVICE_TOKEN` keep working (as the owner). Sessions are an HttpOnly cookie for a year; requests
+  that change something must carry `X-Fuelish: 1`, which another site can't add.
+
 After that, deploys are automatic: every push to `main` that touches `server/` or `web/` runs the typecheck and
 tests, applies D1 migrations, then deploys (`.github/workflows/deploy.yml`). It needs a Cloudflare API token with
 **Workers Scripts: Edit** and **D1: Edit** on the account, stored as the `CLOUDFLARE_API_TOKEN` repo secret:
@@ -147,13 +164,16 @@ Enable USB debugging on the Pixel (Settings → About phone → tap Build number
 ~/Library/Android/sdk/platform-tools/adb install -r android/app/build/outputs/apk/release/app-release.apk
 ```
 
-The release APK is signed with the local debug key (fine for sideloading to your own phone). The `debug` build also
-allows plain-HTTP uploads to `10.0.2.2`/`localhost`, for testing against `wrangler dev`.
+Release APKs are signed with the key in `~/.android/fuelish-release.jks` (its passwords are in
+`~/.android/fuelish-release.properties`). Google sign-in is registered against that key, and an installed app only
+updates from an APK with the same key, so **back both files up** (a password manager is fine). Without them, release
+builds fall back to the debug key. The `debug` build also allows plain-HTTP uploads to `10.0.2.2`/`localhost`, for
+testing against `wrangler dev`.
 
 First run on the phone:
 1. **Grant permissions** (location "while using the app", nearby devices/Bluetooth, notifications).
 2. **Allow unrestricted battery** (button on the main screen). This keeps recording and uploads alive with the screen off.
-3. **Settings** → server URL + `DEVICE_TOKEN` → Save.
+3. **Sign in with Google** on the Trips page (the server URL is filled in). That also sets up uploads from this phone.
 4. Pair the MX+ in Android Bluetooth settings (press the button on the adapter), then pick it under Settings → OBD adapter.
 
 ### Auto-record with the car's Bluetooth

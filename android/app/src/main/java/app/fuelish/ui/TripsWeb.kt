@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
+import android.webkit.JavascriptInterface
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -22,8 +23,8 @@ import androidx.compose.runtime.setValue
  * Only the configured server's pages load inside it. Anything else (map attribution links, raw data
  * downloads, a shared link opened elsewhere) goes to the browser.
  */
-@SuppressLint("SetJavaScriptEnabled")
-class TripsWeb(ctx: Context) {
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+class TripsWeb(ctx: Context, private val onSignIn: (invite: String, legacyToken: String) -> Unit) {
     val view = WebView(ctx).apply {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
@@ -46,6 +47,29 @@ class TripsWeb(ctx: Context) {
             }
         }
         setDownloadListener { url, _, _, _, _ -> openOutside(context, Uri.parse(url)) }
+        addJavascriptInterface(Bridge(), "FuelishApp")
+    }
+
+    /**
+     * What the page can ask of the app: `FuelishApp.signIn(invite, legacyToken)`. Runs only for our
+     * own server's page (links to other sites open in the browser, but check anyway).
+     */
+    private inner class Bridge {
+        @JavascriptInterface
+        fun signIn(invite: String?, legacyToken: String?) {
+            view.post {
+                if (view.url?.let { isOurs(Uri.parse(it)) } == true) onSignIn(invite.orEmpty(), legacyToken.orEmpty())
+            }
+        }
+
+        /** The page signed out. The phone keeps its upload key: recording isn't tied to the page's sign-in. */
+        @JavascriptInterface
+        fun signedOut() {}
+    }
+
+    /** Tells the page how the native sign-in went. */
+    fun signInDone(ok: Boolean, message: String = "") {
+        view.evaluateJavascript("window.Account && Account.nativeDone($ok, ${org.json.JSONObject.quote(message)})", null)
     }
 
     /** True when the page couldn't load; the app shows its own message over the WebView's error page. */

@@ -19,6 +19,10 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Public value (it's in every page that shows the Google button): the "Fuelish web" OAuth client.
+  "vars": {
+    "GOOGLE_CLIENT_ID": "1033825280710-td79ais1l0e1bq8m1sq9a5uf6ccvfmfo.apps.googleusercontent.com"
+  },
   "r2_buckets": [
     { "binding": "RECORDINGS", "bucket_name": "fuelish-recordings" }
   ]

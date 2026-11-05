@@ -127,7 +127,11 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit) {
                     val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))
                     ctx.startActivity(i)
                 }
-                SetupRow(serverOk, "Upload server", if (serverOk) cfg.serverUrl.removePrefix("https://") else "Where recordings are sent", "Set up", openSettings)
+                when {
+                    serverOk -> SetupRow(true, "Signed in", cfg.serverUrl.removePrefix("https://"), null) {}
+                    cfg.serverUrl.isNotBlank() -> SetupRow(false, "Sign in", "Sign in with Google on the Trips page. Your recordings upload as yours.", "Sign in", showTrips)
+                    else -> SetupRow(false, "Upload server", "Where recordings are sent", "Set up", openSettings)
+                }
                 SetupRow(
                     obdChosen, "OBD adapter",
                     if (obdChosen) cfg.obd.optString("deviceName") else "Optional. Pair the OBDLink, then choose it here",

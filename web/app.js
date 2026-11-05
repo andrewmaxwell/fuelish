@@ -1,6 +1,7 @@
 // Fuelish web: the list of trips, one trip's route map and friction circle,
 // and map views of several trips at once (a day, a week, or one outing of linked trips).
-// Plain JS, no build step. The read token lives in localStorage on this browser only.
+// Plain JS, no build step. Signing in is with Google (account.js) and a session cookie; the original
+// shared read token still works and lives in localStorage on this browser only.
 
 const app = document.getElementById("app");
 const TOKEN_KEY = "fuelish.token";
@@ -37,10 +38,13 @@ function tokenProblem(t) {
 }
 
 // Every recording, newest first (the server pages them).
+// Whose: the header's "whose trips" choice.
 async function allRecordings() {
   let all = [], before = null;
+  const user = Account.whoParam();
   for (;;) {
-    const page = await api("/recordings" + (before != null ? `?before=${encodeURIComponent(before)}` : ""));
+    const q = [user ? `user=${encodeURIComponent(user)}` : "", before != null ? `before=${encodeURIComponent(before)}` : ""].filter(Boolean).join("&");
+    const page = await api("/recordings" + (q ? "?" + q : ""));
     all = all.concat(page.recordings);
     if (page.next == null || !page.recordings.length) return { recordings: all };
     before = page.next;
@@ -48,14 +52,18 @@ async function allRecordings() {
 }
 
 async function api(path, opts = {}) {
-  const problem = tokenProblem(token());
+  const t = token();
+  const problem = t ? tokenProblem(t) : "";
   if (problem) { showLogin(problem); throw new Error("unauthorized"); }
   const res = await fetch("/api/v1" + path, {
     ...opts,
-    headers: { Authorization: "Bearer " + token(), ...(opts.headers || {}) },
+    // The session cookie goes along by itself; X-Fuelish tells the server this page sent it.
+    headers: { "X-Fuelish": "1", ...(t ? { Authorization: "Bearer " + t } : {}), ...(opts.headers || {}) },
   });
-  // Without a token this is a request left over from before signing out: nothing to report.
-  if (res.status === 401) { if (token()) showLogin("That token didn't work."); throw new Error("unauthorized"); }
+  if (res.status === 401) {
+    showLogin(t ? "That token didn't work." : "You've been signed out. Sign in again.");
+    throw new Error("unauthorized");
+  }
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || res.statusText);
   return body;
@@ -179,36 +187,16 @@ function totals(recs) {
 function showLogin(msg = "") {
   // Whatever was loading belongs to the old session: stop it from drawing over the sign-in form.
   leavePage();
+  Account.forget();
   document.getElementById("main-nav").hidden = true;
   document.body.classList.remove("page-trip");
-  document.getElementById("logout").hidden = true;
-  app.innerHTML = `
-    <form class="card login" id="login">
-      <h1>Sign in</h1>
-      <p class="muted">Paste the web token configured on the Worker as <code>WEB_TOKEN</code>. It stays in this browser.</p>
-      <input type="password" id="tok" autocomplete="current-password" placeholder="Token" required>
-      <button class="primary">Sign in</button>
-      ${msg ? `<p class="bad">${esc(msg)}</p>` : ""}
-    </form>`;
-  document.getElementById("login").onsubmit = async (e) => {
-    e.preventDefault();
-    const t = cleanToken(document.getElementById("tok").value);
-    const problem = tokenProblem(t);
-    if (problem) return showLogin(problem);
-    try { localStorage.setItem(TOKEN_KEY, t); } catch {}
-    route();
-  };
-}
-
-document.getElementById("logout").onclick = () => {
-  try { localStorage.removeItem(TOKEN_KEY); } catch {}
-  // Forget everything loaded with the old token.
+  Account.renderHeader();
   routeCache.clear();
   engineCache.clear();
   tripRowsCache.clear();
   Prefs.clear();
-  showLogin();
-};
+  Account.showLogin(msg);
+}
 
 // Ends the current page: later results from it are ignored, and what it set up is released.
 function leavePage() {
@@ -223,16 +211,23 @@ async function route() {
   const share = location.hash.match(/^#\/s\/([A-Za-z0-9_-]+)/);
   if (share) {
     document.body.classList.add("page-trip");
-    document.getElementById("logout").hidden = true;
     app.innerHTML = `<p class="muted loading">Loading…</p>`;
     try { await showTrip(null, share[1]); } catch (e) { if (live()) app.innerHTML = `<p class="bad loading">${esc(e.message)}</p>`; }
     return;
   }
-  if (!token()) return showLogin();
-  document.getElementById("logout").hidden = false;
+  // An invite opens before anyone is signed in.
+  const invite = location.hash.match(/^#\/invite\/([A-Za-z0-9_-]+)/);
+  if (invite) {
+    document.body.classList.remove("page-trip");
+    document.getElementById("main-nav").hidden = true;
+    return Account.showInvite(invite[1]);
+  }
+  if (!(await Account.load())) return showLogin();
+  if (!live()) return;
+  Account.renderHeader();
   const h = location.hash;
   // The section links in the header, with the current one marked.
-  const section = h.startsWith("#/routes") ? "routes" : h.startsWith("#/costs") ? "costs" : h.startsWith("#/insights") ? "insights" : h.startsWith("#/cvt") ? "cvt" : "trips";
+  const section = h.startsWith("#/routes") ? "routes" : h.startsWith("#/costs") ? "costs" : h.startsWith("#/insights") ? "insights" : h.startsWith("#/cvt") ? "cvt" : h.startsWith("#/account") ? "account" : "trips";
   const nav = document.getElementById("main-nav");
   nav.hidden = false;
   nav.querySelectorAll("a").forEach((a) => (a.dataset.section === section ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
@@ -244,6 +239,7 @@ async function route() {
   const routes = h.match(/^#\/routes(?:\/([A-Za-z0-9_.-]+))?/);
   const cvt = h.startsWith("#/cvt");
   const costs = h.startsWith("#/costs");
+  const account = h.startsWith("#/account");
   const many = h.match(/^#\/(day|week)\/(\d{4}-\d{2}-\d{2})/) || h.match(/^#\/(outing)\/([A-Za-z0-9_-]+)/);
   document.body.classList.toggle("page-trip", !!(trip || many));
   window.scrollTo(0, 0);
@@ -256,6 +252,7 @@ async function route() {
     else if (routes) await showRoutes(routes[1] || null);
     else if (cvt) await showCvt();
     else if (costs) await showCosts();
+    else if (account) await Account.showAccount();
     else if (many) await showMany(many[1], many[2]);
     else await showList();
   } catch (e) {

@@ -1,15 +1,20 @@
 // Fuelish API: receives recording metadata and gzip chunks from the phone,
 // stores chunks in R2 and metadata in D1, and serves them back to the web app.
 
+import {
+  AuthError, INVITE_TTL_MS, SESSION_TTL_MS, identify, randomToken, safeEqual, sessionCookie, signIn, signOut, verifyGoogleIdToken,
+  type Principal, type Scope,
+} from "./auth";
+
 export interface Env {
   DB: D1Database;
   RECORDINGS: R2Bucket;
   ASSETS: Fetcher;
-  DEVICE_TOKEN: string; // scope: upload
-  WEB_TOKEN: string; // scope: read
+  DEVICE_TOKEN: string; // original shared upload token (counts as the owner's phone)
+  WEB_TOKEN: string; // original shared read token (counts as the owner); also signs download links
+  GOOGLE_CLIENT_ID: string; // the web OAuth client: Google ID tokens must be issued for it
+  TEST_GOOGLE_JWKS?: string;
 }
-
-type Scope = "upload" | "read";
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const SHA_RE = /^[0-9a-f]{64}$/;
@@ -28,7 +33,7 @@ export default {
     try {
       return await route(req, url, env, ctx);
     } catch (e) {
-      if (e instanceof HttpError) return json({ error: e.message }, e.status);
+      if (e instanceof HttpError || e instanceof AuthError) return json({ error: e.message }, e.status);
       console.error(e);
       return json({ error: "internal error" }, 500);
     }
@@ -58,12 +63,55 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   // Share links work without a token: one recording, trimmed, read-only.
   if (m === "GET" && p[0] === "shared" && p.length === 2) return getShared(p[1], env);
 
-  const scopes = await authenticate(req, env);
+  const who = await identify(req, env);
+
+  // Signing in needs no credentials (but takes the original web token into account, for the owner).
+  if (p[0] === "auth") {
+    if (m === "POST" && p[1] === "google" && p.length === 2) return googleSignIn(req, who, env);
+    if (m === "POST" && p[1] === "logout" && p.length === 2) {
+      await signOut(req, env);
+      return json({ ok: true }, 200, { "Set-Cookie": sessionCookie("", 0) });
+    }
+    throw new HttpError(404, "not found");
+  }
+  // An invite's status, so its page can say who it's from before anyone signs in.
+  if (m === "GET" && p[0] === "invites" && p.length === 2) return inviteInfo(p[1], env);
+
+  if (!who) throw new HttpError(401, "missing bearer token");
+  const scopes = who.scopes;
   const need = (s: Scope) => {
     if (!scopes.includes(s)) throw new HttpError(403, `requires ${s} scope`);
   };
+  const needAdmin = () => {
+    if (!who.admin) throw new HttpError(403, "only the owner can do that");
+  };
 
-  if (m === "GET" && p[0] === "me" && p.length === 1) return json({ scopes });
+  if (m === "GET" && p[0] === "me" && p.length === 1) return me(who, env);
+
+  if (p[0] === "users" && p.length === 1 && m === "GET") {
+    need("read");
+    return listUsers(env);
+  }
+  if (p[0] === "invites") {
+    needAdmin();
+    if (p.length === 1 && m === "GET") return listInvites(env);
+    if (p.length === 1 && m === "POST") return createInvite(who, env);
+    if (p.length === 2 && m === "DELETE") return revokeInvite(p[1], env);
+    throw new HttpError(404, "not found");
+  }
+  if (p[0] === "devices") {
+    need("read");
+    if (p.length === 1 && m === "GET") return listDevices(who, env);
+    if (p.length === 2 && m === "DELETE") return revokeDevice(who, p[1], env);
+    throw new HttpError(404, "not found");
+  }
+  if (p[0] === "admin") {
+    needAdmin();
+    if (p[1] === "phones" && p.length === 2 && m === "GET") return listPhones(env);
+    if (p[1] === "phones" && p.length === 3 && m === "PUT") return setPhoneOwner(req, p[2], env);
+    if (p[1] === "users" && p.length === 3 && m === "PUT") return setUserDisabled(req, who, p[2], env);
+    throw new HttpError(404, "not found");
+  }
 
   if (p[0] === "prefs") {
     need("read");
@@ -75,14 +123,14 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   if (p[0] !== "recordings") throw new HttpError(404, "not found");
   if (p.length === 1 && m === "GET") {
     need("read");
-    return listRecordings(url, env);
+    return listRecordings(url, who, env);
   }
   const id = p[1];
   if (!id || !ID_RE.test(id)) throw new HttpError(400, "bad recording id");
 
   if (p.length === 2 && m === "PUT") {
     need("upload");
-    return putRecording(req, id, env);
+    return putRecording(req, id, who, env);
   }
   if (p.length === 2 && m === "GET") {
     need("read");
@@ -94,7 +142,7 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   }
   if (p.length === 4 && p[2] === "chunks" && m === "PUT") {
     need("upload");
-    return putChunk(req, id, parseSeq(p[3]), env);
+    return putChunk(req, id, parseSeq(p[3]), who, env);
   }
   if (p[2] === "shares") {
     need("read");
@@ -114,26 +162,6 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
 }
 
 // ---------- auth ----------
-
-async function authenticate(req: Request, env: Env): Promise<Scope[]> {
-  const h = req.headers.get("Authorization") ?? "";
-  const token = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
-  if (!token) throw new HttpError(401, "missing bearer token");
-  const scopes: Scope[] = [];
-  if (env.DEVICE_TOKEN && (await safeEqual(token, env.DEVICE_TOKEN))) scopes.push("upload");
-  if (env.WEB_TOKEN && (await safeEqual(token, env.WEB_TOKEN))) scopes.push("read");
-  if (!scopes.length) throw new HttpError(401, "invalid token");
-  return scopes;
-}
-
-async function safeEqual(a: string, b: string): Promise<boolean> {
-  const enc = new TextEncoder();
-  const [ha, hb] = await Promise.all([
-    crypto.subtle.digest("SHA-256", enc.encode(a)),
-    crypto.subtle.digest("SHA-256", enc.encode(b)),
-  ]);
-  return crypto.subtle.timingSafeEqual(ha, hb);
-}
 
 async function hmacHex(key: string, msg: string): Promise<string> {
   const k = await crypto.subtle.importKey(
@@ -197,7 +225,7 @@ async function readBounded(req: Request, max: number, what: string): Promise<Arr
 // Metadata arrives in the order requests finish, not the order the phone wrote it, so each copy
 // carries `rev` (raised on every write). An older revision never replaces a newer one, and a
 // finished recording is never reopened by a late "recording" snapshot.
-async function putRecording(req: Request, id: string, env: Env): Promise<Response> {
+async function putRecording(req: Request, id: string, who: Principal, env: Env): Promise<Response> {
   const text = new TextDecoder().decode(await readBounded(req, MAX_META_BYTES, "metadata"));
   let meta: any;
   try {
@@ -216,19 +244,21 @@ async function putRecording(req: Request, id: string, env: Env): Promise<Respons
   const chunkCount = Number.isInteger(meta.chunkCount) && status !== "recording" ? meta.chunkCount : null;
   const now = Date.now();
   await env.DB.prepare(
-    `INSERT INTO recordings (id, device_id, status, started_at_ms, ended_at_ms, chunk_count, meta_json, created_at_ms, updated_at_ms)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+    `INSERT INTO recordings (id, device_id, status, started_at_ms, ended_at_ms, chunk_count, meta_json, created_at_ms, updated_at_ms, user_id)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)
      ON CONFLICT (id) DO UPDATE SET
        status = excluded.status, ended_at_ms = excluded.ended_at_ms, chunk_count = excluded.chunk_count,
        meta_json = excluded.meta_json, updated_at_ms = excluded.updated_at_ms
      WHERE recordings.device_id = excluded.device_id
+       AND (recordings.user_id IS NULL OR excluded.user_id IS NULL OR recordings.user_id = excluded.user_id)
        AND COALESCE(json_extract(excluded.meta_json, '$.rev'), 0) >= COALESCE(json_extract(recordings.meta_json, '$.rev'), 0)
        AND NOT (recordings.status != 'recording' AND excluded.status = 'recording')`,
   )
-    .bind(id, deviceId, status, startedAt, endedAt, chunkCount, text, now)
+    .bind(id, deviceId, status, startedAt, endedAt, chunkCount, text, now, who.userId)
     .run();
-  const row = await env.DB.prepare("SELECT device_id, meta_json FROM recordings WHERE id = ?").bind(id).first<{ device_id: string; meta_json: string }>();
+  const row = await env.DB.prepare("SELECT device_id, meta_json, user_id FROM recordings WHERE id = ?").bind(id).first<{ device_id: string; meta_json: string; user_id: string | null }>();
   if (row?.device_id !== deviceId) throw new HttpError(409, "recording id belongs to another device");
+  if (!canWrite(who, row.user_id)) throw new HttpError(403, "recording belongs to someone else");
   // A stale copy is acknowledged (the phone has a newer one queued anyway) but not stored.
   return json({ ok: true, stale: row.meta_json !== text });
 }
@@ -251,7 +281,12 @@ function chunkKey(id: string, seq: number, sha: string): string {
   return `recordings/${id}/chunk-${String(seq).padStart(6, "0")}-${sha}.ndjson.gz`;
 }
 
-async function putChunk(req: Request, id: string, seq: number, env: Env): Promise<Response> {
+// A phone key may only add to its own person's trips; the original shared token predates people.
+function canWrite(who: Principal, owner: string | null): boolean {
+  return who.via === "legacy" || owner == null || owner === who.userId;
+}
+
+async function putChunk(req: Request, id: string, seq: number, who: Principal, env: Env): Promise<Response> {
   const sha = (req.headers.get("X-Fuelish-Sha256") ?? "").toLowerCase();
   if (!SHA_RE.test(sha)) throw new HttpError(400, "missing X-Fuelish-Sha256");
   const metaHeader = req.headers.get("X-Fuelish-Meta");
@@ -262,8 +297,9 @@ async function putChunk(req: Request, id: string, seq: number, env: Env): Promis
     throw new HttpError(400, "X-Fuelish-Meta must be base64url JSON");
   }
 
-  const rec = await env.DB.prepare("SELECT id, chunk_count FROM recordings WHERE id = ?").bind(id).first<{ chunk_count: number | null }>();
+  const rec = await env.DB.prepare("SELECT id, chunk_count, user_id FROM recordings WHERE id = ?").bind(id).first<{ chunk_count: number | null; user_id: string | null }>();
   if (!rec) throw new HttpError(404, "upload recording metadata first");
+  if (!canWrite(who, rec.user_id)) throw new HttpError(403, "recording belongs to someone else");
   if (rec.chunk_count != null && seq >= rec.chunk_count) throw new HttpError(400, `recording has only ${rec.chunk_count} chunks`);
 
   const existing = await env.DB.prepare("SELECT sha256 FROM chunks WHERE recording_id = ? AND seq = ?")
@@ -314,19 +350,24 @@ export function parseCursor(before: string | null): { ms: number; id: string } {
   return { ms: Number(m[1]), id: m[2] ?? "" };
 }
 
-async function listRecordings(url: URL, env: Env): Promise<Response> {
+// `user`: one person's trips ("me" for the caller's own); without it, everyone's.
+async function listRecordings(url: URL, who: Principal, env: Env): Promise<Response> {
   const { ms, id } = parseCursor(url.searchParams.get("before"));
+  let user = url.searchParams.get("user");
+  if (user === "me") user = who.userId ?? "";
+  if (user != null && !/^[A-Za-z0-9_-]{0,64}$/.test(user)) throw new HttpError(400, "bad user");
   const { results } = await env.DB.prepare(
     `SELECT r.id, r.device_id, r.status, r.started_at_ms, r.ended_at_ms, r.chunk_count, r.meta_json, r.updated_at_ms,
             COUNT(c.seq) AS chunks_received, COUNT(CASE WHEN c.seq < r.chunk_count THEN 1 END) AS chunks_in_range,
             COALESCE(SUM(c.bytes), 0) AS bytes,
             json_group_array(json_extract(c.meta_json, '$.track')) AS tracks
-     FROM (SELECT * FROM recordings WHERE started_at_ms < ?1 OR (started_at_ms = ?1 AND id < ?2)
+     FROM (SELECT * FROM recordings WHERE (started_at_ms < ?1 OR (started_at_ms = ?1 AND id < ?2))
+             AND (?4 IS NULL OR COALESCE(user_id, '') = ?4)
            ORDER BY started_at_ms DESC, id DESC LIMIT ?3) r
      LEFT JOIN (SELECT * FROM chunks ORDER BY seq) c ON c.recording_id = r.id
      GROUP BY r.id ORDER BY r.started_at_ms DESC, r.id DESC`,
   )
-    .bind(ms, id, PAGE_SIZE)
+    .bind(ms, id, PAGE_SIZE, user)
     .all<any>();
   const last = results.at(-1);
   return json({
@@ -404,6 +445,7 @@ function recordingRow(r: any) {
   return {
     id: r.id,
     deviceId: r.device_id,
+    userId: r.user_id ?? null,
     status: r.status,
     startedWallMs: r.started_at_ms,
     endedWallMs: r.ended_at_ms,
@@ -620,12 +662,156 @@ async function download(p: string[], env: Env, ctx: ExecutionContext): Promise<R
   });
 }
 
+// ---------- accounts ----------
+
+async function googleSignIn(req: Request, who: Principal | null, env: Env): Promise<Response> {
+  // Same rule as other changes made with a cookie: a page on another site can't sign someone in.
+  if (req.headers.get("X-Fuelish") !== "1") throw new HttpError(403, "missing X-Fuelish header");
+  let body: any;
+  try {
+    body = JSON.parse(new TextDecoder().decode(await readBounded(req, 16 * 1024, "sign-in")));
+  } catch (e) {
+    if (e instanceof HttpError) throw e;
+    throw new HttpError(400, "sign-in body is not JSON");
+  }
+  if (typeof body?.credential !== "string") throw new HttpError(400, "missing credential");
+  const google = await verifyGoogleIdToken(body.credential, env);
+  const device = body.device && typeof body.device.name === "string" ? { name: body.device.name } : null;
+  const r = await signIn(env, google, {
+    invite: typeof body.invite === "string" ? body.invite : null,
+    caller: who,
+    device,
+    userAgent: req.headers.get("User-Agent"),
+  });
+  return json(
+    { user: r.user, claimed: r.claimed, ...(r.deviceToken ? { deviceToken: r.deviceToken } : {}) },
+    200,
+    { "Set-Cookie": sessionCookie(r.sessionToken, SESSION_TTL_MS / 1000) },
+  );
+}
+
+async function me(who: Principal, env: Env): Promise<Response> {
+  const u = who.userId ? await env.DB.prepare("SELECT id, name, email, picture, is_admin FROM users WHERE id = ?").bind(who.userId).first<any>() : null;
+  const owned = await env.DB.prepare("SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1").first();
+  return json({
+    scopes: who.scopes,
+    via: who.via,
+    admin: who.admin,
+    // Only someone signed in with Google (or the owner's original token) gets their details back.
+    user: u && who.via !== "device" ? { id: u.id, name: u.name, email: u.email, picture: u.picture, admin: !!u.is_admin } : null,
+    claimed: !!owned,
+  });
+}
+
+async function listUsers(env: Env): Promise<Response> {
+  const { results } = await env.DB.prepare(
+    `SELECT u.id, u.name, u.picture, u.is_admin, u.disabled_at_ms, (SELECT COUNT(*) FROM recordings r WHERE r.user_id = u.id) AS trips
+     FROM users u ORDER BY u.created_at_ms`,
+  ).all<any>();
+  return json({
+    users: results.map((u) => ({ id: u.id, name: u.name, picture: u.picture, admin: !!u.is_admin, disabled: u.disabled_at_ms != null, trips: u.trips })),
+  });
+}
+
+async function createInvite(who: Principal, env: Env): Promise<Response> {
+  if (!who.userId) throw new HttpError(409, "sign in with Google first, then invite people");
+  const code = randomToken(16);
+  const now = Date.now();
+  await env.DB.prepare("INSERT INTO invites (code, created_by, created_at_ms, expires_at_ms) VALUES (?, ?, ?, ?)")
+    .bind(code, who.userId, now, now + INVITE_TTL_MS)
+    .run();
+  return json({ code, createdAtMs: now, expiresAtMs: now + INVITE_TTL_MS }, 201);
+}
+
+async function listInvites(env: Env): Promise<Response> {
+  const { results } = await env.DB.prepare(
+    `SELECT i.code, i.created_at_ms, i.expires_at_ms, i.used_at_ms, u.name AS used_by_name
+     FROM invites i LEFT JOIN users u ON u.id = i.used_by WHERE i.revoked_at_ms IS NULL ORDER BY i.created_at_ms DESC LIMIT 50`,
+  ).all<any>();
+  return json({
+    invites: results.map((i) => ({ code: i.code, createdAtMs: i.created_at_ms, expiresAtMs: i.expires_at_ms, usedAtMs: i.used_at_ms, usedBy: i.used_by_name })),
+  });
+}
+
+async function revokeInvite(code: string, env: Env): Promise<Response> {
+  await env.DB.prepare("UPDATE invites SET revoked_at_ms = ? WHERE code = ? AND used_by IS NULL").bind(Date.now(), code).run();
+  return json({ ok: true });
+}
+
+async function inviteInfo(code: string, env: Env): Promise<Response> {
+  const i = await env.DB.prepare(
+    "SELECT i.*, u.name AS from_name FROM invites i JOIN users u ON u.id = i.created_by WHERE i.code = ?",
+  ).bind(code).first<any>();
+  const usable = !!i && !i.used_by && i.revoked_at_ms == null && i.expires_at_ms > Date.now();
+  return json({ usable, from: usable ? i.from_name : null });
+}
+
+async function listDevices(who: Principal, env: Env): Promise<Response> {
+  const { results } = await env.DB.prepare(
+    `SELECT k.id, k.name, k.created_at_ms, k.last_used_ms, k.user_id, u.name AS user_name
+     FROM device_keys k JOIN users u ON u.id = k.user_id
+     WHERE k.revoked_at_ms IS NULL AND (?1 = 1 OR k.user_id = ?2) ORDER BY k.created_at_ms`,
+  )
+    .bind(who.admin ? 1 : 0, who.userId)
+    .all<any>();
+  return json({
+    devices: results.map((d) => ({ id: d.id, name: d.name, createdAtMs: d.created_at_ms, lastUsedMs: d.last_used_ms, userId: d.user_id, userName: d.user_name })),
+  });
+}
+
+async function revokeDevice(who: Principal, id: string, env: Env): Promise<Response> {
+  const r = await env.DB.prepare("UPDATE device_keys SET revoked_at_ms = ? WHERE id = ? AND revoked_at_ms IS NULL AND (?3 = 1 OR user_id = ?4)")
+    .bind(Date.now(), id, who.admin ? 1 : 0, who.userId)
+    .run();
+  if (!r.meta.changes) throw new HttpError(404, "no such phone");
+  return json({ ok: true });
+}
+
+// Every phone that has uploaded, whose trips they count as, and its latest vehicle label. The owner
+// uses this to give trips from a phone that used the original shared token to the right person.
+async function listPhones(env: Env): Promise<Response> {
+  const { results } = await env.DB.prepare(
+    `SELECT device_id, COUNT(*) AS trips, MAX(started_at_ms) AS last_ms,
+            (SELECT json_extract(meta_json, '$.vehicle') FROM recordings r2 WHERE r2.device_id = r.device_id ORDER BY started_at_ms DESC LIMIT 1) AS vehicle,
+            (SELECT json_extract(meta_json, '$.device.model') FROM recordings r2 WHERE r2.device_id = r.device_id ORDER BY started_at_ms DESC LIMIT 1) AS model,
+            json_group_array(DISTINCT COALESCE(user_id, '')) AS owners
+     FROM recordings r GROUP BY device_id ORDER BY last_ms DESC`,
+  ).all<any>();
+  return json({
+    phones: results.map((p) => ({
+      deviceId: p.device_id, trips: p.trips, lastMs: p.last_ms, vehicle: p.vehicle ?? null, model: p.model ?? null,
+      owners: (JSON.parse(p.owners) as string[]).map((o) => o || null),
+    })),
+  });
+}
+
+async function setPhoneOwner(req: Request, deviceId: string, env: Env): Promise<Response> {
+  if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(deviceId)) throw new HttpError(400, "bad device id");
+  const body: any = await req.json().catch(() => null);
+  const userId = body?.userId;
+  if (typeof userId !== "string" || !(await env.DB.prepare("SELECT 1 FROM users WHERE id = ?").bind(userId).first())) {
+    throw new HttpError(400, "unknown person");
+  }
+  const r = await env.DB.prepare("UPDATE recordings SET user_id = ? WHERE device_id = ?").bind(userId, deviceId).run();
+  return json({ ok: true, trips: r.meta.changes });
+}
+
+async function setUserDisabled(req: Request, who: Principal, id: string, env: Env): Promise<Response> {
+  const body: any = await req.json().catch(() => null);
+  if (typeof body?.disabled !== "boolean") throw new HttpError(400, "send {disabled: true|false}");
+  if (id === who.userId) throw new HttpError(400, "you can't turn yourself off");
+  const r = await env.DB.prepare("UPDATE users SET disabled_at_ms = ? WHERE id = ? AND is_admin = 0").bind(body.disabled ? Date.now() : null, id).run();
+  if (!r.meta.changes) throw new HttpError(404, "no such person");
+  if (body.disabled) await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
+  return json({ ok: true });
+}
+
 // ---------- helpers ----------
 
-function json(body: unknown, status = 200): Response {
+function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...extra },
   });
 }
 

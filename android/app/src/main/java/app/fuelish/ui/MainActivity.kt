@@ -49,6 +49,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import app.fuelish.Prefs
 import app.fuelish.RecorderService
 import app.fuelish.RecorderState
@@ -68,7 +70,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        web = TripsWeb(this)
+        web = TripsWeb(this) { invite, legacy -> signIn(invite, legacy) }
         // Until the server is set and location is granted, the recorder's setup is what matters.
         recorderOpen = savedInstanceState?.getBoolean("recorderOpen")
             ?: (Prefs.config(this).serverUrl.isBlank() || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
@@ -124,6 +126,17 @@ class MainActivity : ComponentActivity() {
             }
             HorizontalDivider()
             RecorderStrip { recorderOpen = true }
+        }
+    }
+
+    private fun signIn(invite: String, legacyToken: String) {
+        val server = Prefs.config(this).serverUrl
+        lifecycleScope.launch {
+            when (val r = GoogleSignIn.signIn(this@MainActivity, server, invite, legacyToken)) {
+                GoogleSignIn.Result.Ok -> web.signInDone(true)
+                GoogleSignIn.Result.Cancelled -> web.signInDone(false)
+                is GoogleSignIn.Result.Failed -> web.signInDone(false, r.message)
+            }
         }
     }
 

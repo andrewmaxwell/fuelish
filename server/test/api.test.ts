@@ -51,7 +51,7 @@ describe("auth", () => {
   it("separates upload and read scopes", async () => {
     expect((await call("/recordings", { headers: DEVICE })).status).toBe(403);
     expect((await call("/recordings/rec1", { method: "PUT", headers: WEB, body: meta() })).status).toBe(403);
-    expect(await (await call("/me", { headers: WEB })).json()).toEqual({ scopes: ["read"] });
+    expect(await (await call("/me", { headers: WEB })).json()).toMatchObject({ scopes: ["read"], via: "legacy" });
   });
 });
 

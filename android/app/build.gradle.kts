@@ -1,6 +1,16 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// Release key lives outside the repo (~/.android/fuelish-release.{jks,properties}). Google sign-in
+// is registered against its SHA-1, and every phone's install must keep the same key to update, so
+// back both files up. Without them (another machine), release builds fall back to the debug key.
+val releaseProps = Properties().apply {
+    val f = File(System.getProperty("user.home"), ".android/fuelish-release.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -17,12 +27,19 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        if (releaseProps.isNotEmpty()) create("release") {
+            storeFile = file(releaseProps.getProperty("storeFile"))
+            storePassword = releaseProps.getProperty("storePassword")
+            keyAlias = releaseProps.getProperty("keyAlias")
+            keyPassword = releaseProps.getProperty("keyPassword")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Personal sideloaded app: sign release builds with the debug key so
-            // `assembleRelease` produces an installable APK without a keystore.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
     buildFeatures { compose = true }
@@ -34,6 +51,10 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
     implementation("androidx.work:work-runtime-ktx:2.12.0")
+    // Google sign-in (Android's own account picker; Google doesn't allow its sign-in page in a WebView).
+    implementation("androidx.credentials:credentials:1.5.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
