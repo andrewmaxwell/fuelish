@@ -92,8 +92,8 @@ class Config(val json: JSONObject) {
             "enabled": false,
             "carAddress": "",
             "carName": "",
-            "stopAfterCarDisconnectS": 120,
-            "stopAfterEngineOffS": 300
+            "stopAfterCarDisconnectS": 10,
+            "stopAfterEngineOffS": 60
           }
         }
         """.trimIndent()
@@ -215,6 +215,11 @@ class Config(val json: JSONObject) {
         fun upgrade(user: JSONObject): JSONObject {
             user.optJSONObject("sensors")?.let { if (sameJson(it, JSONObject(OLD_SENSORS_DEFAULT))) user.remove("sensors") }
             user.optJSONObject("location")?.let { if (sameJson(it, JSONObject(OLD_LOCATION_DEFAULT))) user.remove("location") }
+            // Old stop waits (2 min after Bluetooth, 5 min after engine off) recorded the walk away from the car.
+            user.optJSONObject("auto")?.let { a ->
+                if (a.optDouble("stopAfterCarDisconnectS") == 120.0) a.remove("stopAfterCarDisconnectS")
+                if (a.optDouble("stopAfterEngineOffS") == 300.0) a.remove("stopAfterEngineOffS")
+            }
             val obd = user.optJSONObject("obd") ?: return user
             for ((key, olds) in OLD_OBD_DEFAULTS) {
                 val stored = obd.optJSONArray(key)?.let { a -> (0 until a.length()).map { a.getString(it).uppercase() } } ?: continue

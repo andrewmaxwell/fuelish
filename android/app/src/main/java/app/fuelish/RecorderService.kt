@@ -127,8 +127,8 @@ class RecorderService : Service() {
         private var lastCounts = emptyMap<String, Long>()
         /** Only recordings that started automatically also stop automatically. */
         private val autoStop = if (trigger == TRIGGER_MANUAL) null else AutoStopPolicy(
-            cfg.auto.optLong("stopAfterCarDisconnectS", 120) * 1_000_000_000,
-            cfg.auto.optLong("stopAfterEngineOffS", 300) * 1_000_000_000,
+            cfg.auto.optLong("stopAfterCarDisconnectS", 10) * 1_000_000_000,
+            cfg.auto.optLong("stopAfterEngineOffS", 60) * 1_000_000_000,
         )
         @Volatile private var stopRequested = false
         private var ticks = 0L

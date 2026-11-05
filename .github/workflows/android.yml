@@ -1,0 +1,63 @@
+# Tests the Android app and publishes the release APK on every push to main that touches it, so
+# phones offer the update the next time Fuelish opens.
+# Needs three repo secrets (see README, "Publishing the app"):
+#   FUELISH_RELEASE_JKS_B64      base64 of ~/.android/fuelish-release.jks
+#   FUELISH_RELEASE_PROPERTIES   contents of ~/.android/fuelish-release.properties
+#   FUELISH_WEB_TOKEN            the owner's WEB_TOKEN
+# Without them it still runs the tests and says publishing was skipped.
+name: Android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "tools/publish-apk.sh"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+# Publish in push order: each build's version is its commit count, and the server refuses an older one.
+concurrency:
+  group: android-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the version number is the commit count
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Unit tests
+        working-directory: android
+        run: ./gradlew --no-daemon testDebugUnitTest
+      - name: Release key
+        id: key
+        env:
+          JKS_B64: ${{ secrets.FUELISH_RELEASE_JKS_B64 }}
+          PROPS: ${{ secrets.FUELISH_RELEASE_PROPERTIES }}
+          WEB_TOKEN: ${{ secrets.FUELISH_WEB_TOKEN }}
+        run: |
+          if [ -z "$JKS_B64" ] || [ -z "$PROPS" ] || [ -z "$WEB_TOKEN" ]; then
+            echo "::warning::Release secrets aren't set, so this build wasn't published."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p ~/.android
+          echo "$JKS_B64" | base64 -d > ~/.android/fuelish-release.jks
+          { printf '%s\n' "$PROPS" | grep -v '^storeFile='; echo "storeFile=$HOME/.android/fuelish-release.jks"; } > ~/.android/fuelish-release.properties
+          chmod 600 ~/.android/fuelish-release.*
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        if: steps.key.outputs.ready == 'true'
+        env:
+          WEB_TOKEN: ${{ secrets.FUELISH_WEB_TOKEN }}
+        run: tools/publish-apk.sh
+      - name: Remove the release key
+        if: always()
+        run: rm -f ~/.android/fuelish-release.*

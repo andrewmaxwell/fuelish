@@ -35,6 +35,15 @@ class ConfigTest {
     }
 
     @Test
+    fun savedOldStopWaitsTakeTheShortOnes() {
+        val c = Config.parse("""{"auto":{"enabled":true,"carAddress":"AA:BB:CC:DD:EE:FF","stopAfterCarDisconnectS":120,"stopAfterEngineOffS":300}}""")
+        assertEquals(10, c.auto.getInt("stopAfterCarDisconnectS"))
+        assertEquals(60, c.auto.getInt("stopAfterEngineOffS"))
+        assertEquals("AA:BB:CC:DD:EE:FF", c.auto.getString("carAddress"))
+        assertEquals(30, Config.parse("""{"auto":{"stopAfterCarDisconnectS":30}}""").auto.getInt("stopAfterCarDisconnectS"))
+    }
+
+    @Test
     fun editedSensorRatesStay() {
         val c = Config.parse("""{"sensors":{"gyro":100},"location":{"gnssMeasurements":true}}""")
         assertEquals(100.0, c.sensors["gyro"])

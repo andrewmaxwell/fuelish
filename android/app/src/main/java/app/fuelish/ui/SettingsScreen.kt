@@ -147,7 +147,7 @@ fun SettingsScreen(close: () -> Unit) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Record automatically", style = MaterialTheme.typography.bodyLarge)
-                    Muted("Starts when your phone connects to the car's Bluetooth and stops about 2 minutes after you park.")
+                    Muted("Starts when your phone connects to the car's Bluetooth and stops about 10 seconds after you park.")
                 }
                 Switch(checked = on, onCheckedChange = { v -> update { getJSONObject("auto").put("enabled", v) } })
             }

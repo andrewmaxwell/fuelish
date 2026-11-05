@@ -182,6 +182,18 @@ above the recorder strip; a tap downloads it, checks its SHA-256 and opens Andro
 Android asks to allow "Install unknown apps" for Fuelish. It never installs mid-recording. The version number is
 the git commit count, so every published build is newer than the last. Debug builds don't offer updates.
 
+**Automatically:** `.github/workflows/android.yml` runs the unit tests and then `tools/publish-apk.sh` on every
+push to main that touches `android/`. It needs the release key and owner token as repo secrets, set once from
+this Mac (nothing is printed):
+
+```bash
+base64 -i ~/.android/fuelish-release.jks | gh secret set FUELISH_RELEASE_JKS_B64
+gh secret set FUELISH_RELEASE_PROPERTIES < ~/.android/fuelish-release.properties
+grep '^WEB_TOKEN=' server/.secrets.env | cut -d= -f2- | tr -d '"'"'"' \r' | gh secret set FUELISH_WEB_TOKEN
+```
+
+Until they're set, the workflow only runs the tests and warns that it skipped publishing.
+
 First run on the phone:
 1. **Grant permissions** (location "while using the app", nearby devices/Bluetooth, notifications).
 2. **Allow unrestricted battery** (button on the main screen). This keeps recording and uploads alive with the screen off.
@@ -199,9 +211,11 @@ Settings → **Auto-record**: turn it on, pick the Civic's Bluetooth entry (not 
   Location in a service started that way needs "Allow all the time".
 - **If Android refuses anyway** (e.g. the permission was revoked), you get a "Car connected: tap to record"
   notification; one tap opens Fuelish and starts recording.
-- **Stop:** 120 s after the car's Bluetooth disconnects (a reconnect within that window cancels it, so
-  brief drops don't split a drive), or after the MX+ reports the car not answering for 300 s. An MX+ link failure alone
-  never stops a recording. Both delays are `auto.stopAfterCarDisconnectS` / `auto.stopAfterEngineOffS` in the JSON (0 disables).
+- **Stop:** 10 s after the car's Bluetooth disconnects, once the engine has stopped answering OBD (if it still
+  answers, the car is running and it was a Bluetooth glitch, so the drive goes on), or after the MX+ reports the car
+  not answering for 60 s with Bluetooth still on. An MX+ link failure alone never stops a recording. Trips split by a
+  stop are joined into one outing on the web. Both delays are `auto.stopAfterCarDisconnectS` /
+  `auto.stopAfterEngineOffS` in the JSON (0 disables).
 - Recordings you start by hand are never stopped automatically. Every recording stores `trigger`
   (`manual`, `car_bluetooth`, `car_bluetooth_notification`) and `stopReason` (`manual`, `car_disconnected`, `engine_off`,
   `service_destroyed`). The car connect/disconnect events are in the data too.
@@ -278,9 +292,9 @@ python3 tools/fuelish.py export recording.ndjson.gz out/
 - [ ] **Auto-record with the real car**: does the Civic's Bluetooth connection start recording with the phone locked in your pocket?
   The emulator test couldn't send the real Bluetooth broadcast, so the Bluetooth exemption itself is unverified. With the battery
   exemption on as well, start should work either way. Check the recording's `trigger` and how many seconds after starting the car it began.
-  Also check that switching the car off ends the recording with `stopReason: car_disconnected` about 2 minutes later, and that a gas stop
+  Also check that switching the car off ends the recording with `stopReason: car_disconnected` about 10 seconds later, and that a gas stop
   behaves the way you'd like.
-- [ ] **Phone mount**: record how the phone is mounted in the note field. Bump/road-surface analysis needs the phone rigidly mounted, and the orientation (gravity/rotation vector) is recorded so it can be rotated into the car frame later.
+- [ ] **Phone mount**: record how the phone is mounted in the note field. Bump/road-surface analysis needs the phone rigidly mounted, and the accelerometer's average (gravity) plus GPS heading is enough to rotate it into the car frame later.
 
 ## Deliberately deferred
 
