@@ -157,6 +157,21 @@ class UploaderTest {
     }
 
     @Test
+    fun reportsEachTripOnceWhenTheServerHasAllOfIt() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "done", 2)
+        makeRecording(store, "live", 2, status = "recording")
+        val ready = mutableListOf<String>()
+        val up = Uploader(store, base, "tok", deleteAfterUpload = true) { id ->
+            assertTrue(store.dir(id).exists()) // still on the phone, so its details can be read
+            ready += id
+        }
+        up.uploadAll()
+        up.uploadAll()
+        assertEquals(listOf("done"), ready)
+    }
+
+    @Test
     fun badTokenIsFatal() {
         val store = RecordingStore(tmp.newFolder())
         makeRecording(store, "a", 1)
@@ -256,7 +271,7 @@ class UploaderTest {
         val store = RecordingStore(tmp.newFolder())
         makeRecording(store, "a", 5)
         var n = 0
-        val r = Uploader(store, base, "tok") { n++ >= 3 }.uploadAll()
+        val r = Uploader(store, base, "tok", cancelled = { n++ >= 3 }).uploadAll()
         assertTrue(r is UploadResult.Retry)
         assertTrue(store.pendingChunks("a").isNotEmpty())
     }

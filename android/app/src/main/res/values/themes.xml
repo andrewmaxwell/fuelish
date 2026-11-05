@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Light/dark follows the phone. The in-app trips page reads this for prefers-color-scheme. -->
+    <style name="Theme.Fuelish" parent="@android:style/Theme.Material.Light.NoActionBar" />
+</resources>

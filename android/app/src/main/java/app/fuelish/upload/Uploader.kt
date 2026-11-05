@@ -34,6 +34,8 @@ class Uploader(
     private val deleteAfterUpload: Boolean = false,
     /** Checked between requests: true once the job was cancelled, so it stops at the next safe point. */
     private val cancelled: () -> Boolean = { false },
+    /** Called once per recording when the server confirms it has all of it (before any local delete). */
+    private val onServerComplete: (id: String) -> Unit = {},
 ) {
     class Response(val code: Int, val body: String)
 
@@ -117,6 +119,7 @@ class Uploader(
         val body = runCatching { org.json.JSONObject(r.body) }.getOrNull() ?: return null
         if (body.optBoolean("complete")) {
             store.markServerComplete(id)
+            runCatching { onServerComplete(id) }
             return null
         }
         val missing = body.optJSONArray("missing")?.let { a -> (0 until a.length()).map { a.getInt(it) } } ?: emptyList()

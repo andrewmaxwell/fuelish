@@ -62,6 +62,13 @@ docs/      data-format.md: every record type, clock and file
    (route, charts, engine data), with no phone settings, Bluetooth addresses or raw data. **Stop sharing**
    turns the link off.
 
+**One app on the phone.** The Android app opens on the web page (trips, maps, insights) shown inside it, loaded from
+the server URL in Settings. A strip along the bottom shows what the recorder is doing (recording time, uploads, or
+what starts the next recording); tap it for the recorder screen. Sign in to the web page once in the app with the
+web token: it stays signed in. When the server confirms it has all of a trip, a "Trip ready" notification opens
+straight to it. If the page can't load (no signal), the app says so instead of showing a browser error. A browser
+"Add to Home screen" shortcut to the web page is no longer needed on the phone.
+
 **OBD is read-only by construction:** `ElmAllowlist` lets through only AT/ST adapter setup, mode 01 (live data),
 03/07/0A (read stored, pending and permanent codes) and 09 (VIN/calibration). Anything else, including 04 (clear codes), throws
 before reaching the adapter. On connect the recorder discovers which PIDs the car says it supports

@@ -10,6 +10,7 @@ class FuelishApp : Application() {
         super.onCreate()
         RecorderService.createChannel(this)
         CarBluetooth.createChannel(this)
+        app.fuelish.upload.TripReady.createChannel(this)
         Executors.newSingleThreadExecutor().execute {
             // A fresh process has no active recording, so anything still marked "recording"
             // was cut short by a crash or kill: finish it and queue it for upload.

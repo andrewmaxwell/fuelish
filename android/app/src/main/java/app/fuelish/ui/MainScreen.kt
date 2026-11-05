@@ -61,7 +61,7 @@ val PERMISSIONS = arrayOf(
 )
 
 @Composable
-fun MainScreen(openSettings: () -> Unit) {
+fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit) {
     val ctx = LocalContext.current
     val st by RecorderState.status.collectAsStateWithLifecycle()
     val up by RecorderState.upload.collectAsStateWithLifecycle()
@@ -101,8 +101,9 @@ fun MainScreen(openSettings: () -> Unit) {
 
     Column(Modifier.safeDrawingPadding().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = showTrips) { Text("‹ Trips") }
             Column(Modifier.weight(1f)) {
-                Text("Fuelish", style = MaterialTheme.typography.headlineMedium)
+                Text("Recorder", style = MaterialTheme.typography.headlineSmall)
                 Muted(cfg.vehicle)
             }
             TextButton(onClick = openSettings) { Text("Settings") }
