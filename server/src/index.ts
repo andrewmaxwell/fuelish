@@ -2,6 +2,7 @@
 // stores chunks in R2 and metadata in D1, and serves them back to the web app.
 
 import { VIN_RE, decodeVin } from "./vehicles";
+import { fuelProfile, sumProfiles } from "./fuelprofile";
 import {
   AuthError, INVITE_TTL_MS, SESSION_TTL_MS, identify, randomToken, safeEqual, sessionCookie, signIn, signOut, verifyGoogleIdToken,
   type Principal, type Scope,
@@ -152,7 +153,7 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   if (p[0] === "prefs") {
     need("read");
     if (p.length === 1 && m === "GET") return getPrefs(env);
-    if (p.length === 2 && m === "PUT") return putPref(req, p[1], env);
+    if (p.length === 2 && m === "PUT") return putPref(req, p[1], who, env);
     throw new HttpError(404, "not found");
   }
 
@@ -361,7 +362,15 @@ async function putChunk(req: Request, id: string, seq: number, who: Principal, e
   } catch {
     throw new HttpError(400, "X-Fuelish-Meta must be base64url JSON");
   }
-  checkChunkMeta(JSON.parse(chunkMeta));
+  const parsedMeta = JSON.parse(chunkMeta);
+  checkChunkMeta(parsedMeta);
+  // The server's own summary of the engine data, for telling towing apart (see fuelprofile.ts).
+  const profile = fuelProfile(parsedMeta);
+  if (profile) chunkMeta = JSON.stringify({ ...parsedMeta, fuelProfile: profile });
+  else if ("fuelProfile" in parsedMeta) {
+    delete parsedMeta.fuelProfile;
+    chunkMeta = JSON.stringify(parsedMeta);
+  }
 
   const rec = await env.DB.prepare("SELECT id, chunk_count, user_id FROM recordings WHERE id = ?").bind(id).first<{ chunk_count: number | null; user_id: string | null }>();
   if (!rec) throw new HttpError(404, "upload recording metadata first");
@@ -427,6 +436,7 @@ async function listRecordings(url: URL, who: Principal, env: Env): Promise<Respo
             COUNT(c.seq) AS chunks_received, COUNT(CASE WHEN c.seq < r.chunk_count THEN 1 END) AS chunks_in_range,
             COALESCE(SUM(c.bytes), 0) AS bytes,
             json_group_array(COALESCE(json_extract(c.meta_json, '$.track'), json_extract(c.meta_json, '$.routeOutline'))) AS tracks,
+            json_group_array(json_extract(c.meta_json, '$.fuelProfile')) AS profiles,
             COUNT(CASE WHEN json_extract(c.meta_json, '$.track') IS NULL AND json_extract(c.meta_json, '$.routeOutline') IS NULL
                          AND json_extract(c.meta_json, '$.streams."loc:gps"') IS NOT NULL THEN 1 END) AS untracked
      FROM (SELECT * FROM recordings WHERE (started_at_ms < ?1 OR (started_at_ms = ?1 AND id < ?2))
@@ -450,7 +460,13 @@ async function listRecordings(url: URL, who: Principal, env: Env): Promise<Respo
       }
       // routeGaps: chunks with GPS whose route the list couldn't see (summary left out before
       // phones sent an outline). Their trip may say less than was driven; the trip page has it all.
-      return { ...row, trip, routeGaps: r.untracked ?? 0 };
+      let fuelProfile = null;
+      try {
+        fuelProfile = sumProfiles(JSON.parse(r.profiles ?? "[]"));
+      } catch (e) {
+        console.error(`fuel profile for ${r.id}:`, e);
+      }
+      return { ...row, trip, routeGaps: r.untracked ?? 0, fuelProfile };
     }),
     next: results.length === PAGE_SIZE ? `${last.started_at_ms}:${last.id}` : null,
   });
@@ -633,12 +649,49 @@ export function validPref(key: string, v: any): string | null {
     }
     return null;
   }
+  // Per vehicle (by the name trips carry): what a mile costs in wear, lost value and anything else.
+  if (key === "vehicles") {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return "vehicles must be an object";
+    if (Object.keys(v).length > 50) return "at most 50 vehicles";
+    for (const [name, c] of Object.entries<any>(v)) {
+      if (!name.trim() || name.length > 120) return "vehicle names are 1-120 characters";
+      if (!c || typeof c !== "object" || Array.isArray(c)) return `costs for ${name} must be an object`;
+      for (const [k, x] of Object.entries(c)) {
+        if (!["wearPerMile", "valuePerMile", "otherPerMile"].includes(k)) return `unknown vehicle cost ${k}`;
+        if (!num(x, 100)) return `${k} must be a number from 0 to 100`;
+      }
+    }
+    return null;
+  }
+  // Per person (by user id): what an hour of their time is worth to them.
+  if (key === "people") {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return "people must be an object";
+    if (Object.keys(v).length > 100) return "at most 100 people";
+    for (const [id, c] of Object.entries<any>(v)) {
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return "bad person id";
+      if (!c || typeof c !== "object" || Array.isArray(c)) return "each person's settings must be an object";
+      for (const [k, x] of Object.entries(c)) {
+        if (k !== "timePerHour") return `unknown personal setting ${k}`;
+        if (!num(x, 10000)) return "timePerHour must be a number from 0 to 10000";
+      }
+    }
+    return null;
+  }
+  // Corrections to towing detection: recording id -> towing or not.
+  if (key === "towing") {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return "towing must be an object";
+    if (Object.keys(v).length > 2000) return "at most 2000 corrections";
+    for (const [id, x] of Object.entries(v)) {
+      if (!ID_RE.test(id) || typeof x !== "boolean") return "towing maps recording ids to true or false";
+    }
+    return null;
+  }
   return `unknown setting ${key}`;
 }
 
-async function putPref(req: Request, key: string, env: Env): Promise<Response> {
+async function putPref(req: Request, key: string, who: Principal, env: Env): Promise<Response> {
   if (!PREF_RE.test(key)) throw new HttpError(400, "bad pref key");
-  const text = new TextDecoder().decode(await readBounded(req, MAX_PREF_BYTES, "pref"));
+  let text = new TextDecoder().decode(await readBounded(req, MAX_PREF_BYTES, "pref"));
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -647,6 +700,16 @@ async function putPref(req: Request, key: string, env: Env): Promise<Response> {
   }
   const bad = validPref(key, value);
   if (bad) throw new HttpError(400, bad);
+  // Everyone sets their own time's worth; only the owner can change someone else's.
+  if (key === "people" && !who.admin) {
+    if (!who.userId) throw new HttpError(403, "sign in to set your own time");
+    const row = await env.DB.prepare("SELECT value_json FROM prefs WHERE key = 'people'").first<{ value_json: string }>();
+    const stored = row ? JSON.parse(row.value_json) : {};
+    const mine = (value as any)[who.userId];
+    if (mine) stored[who.userId] = mine;
+    else delete stored[who.userId];
+    text = JSON.stringify(stored);
+  }
   await env.DB.prepare(
     `INSERT INTO prefs (key, value_json, updated_at_ms) VALUES (?1, ?2, ?3)
      ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,

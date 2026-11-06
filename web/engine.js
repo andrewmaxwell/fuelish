@@ -12,10 +12,21 @@ const Engine = (() => {
   const J_PER_GAL = 32.9 * 3.6e6;
   const ENGINE_EFF = 0.25;
   const CRR = 0.012, CDA = 0.68, AIR = 1.2; // CdA ≈ 0.30 × 2.25 m² for a compact sedan
-  /** Rough loaded weight (car, driver, fuel) by vehicle name; braking waste scales with it. */
   // Names come from the VIN decoder ("2019 RAM 1500 5.7L") or whatever someone typed.
-  const massKg = (vehicle = "") => (/civic/i.test(vehicle) ? 1360
-    : /truck|pickup|f-?[1-4]50|silverado|\bram\b|tundra|sierra|tacoma|colorado|canyon|ranger|frontier|titan|gladiator/i.test(vehicle) ? 2600 : 1500);
+  const isTruck = (vehicle = "") => /truck|pickup|f-?[1-4]50|silverado|\bram\b|tundra|sierra|tacoma|colorado|canyon|ranger|frontier|titan|gladiator|ridgeline|maverick|santa cruz/i.test(vehicle);
+  // A travel trailer or camper behind: a few tonnes more, and a big flat front in the wind.
+  const TRAILER_KG = 2500, TRAILER_CDA = 2.3;
+  /**
+   * Rough loaded weight (vehicle, driver, fuel, and the trailer when towing) and drag area (CdA, m²)
+   * by vehicle name; braking waste scales with the weight, the cost of speed with the drag.
+   */
+  function body(vehicle = "", towing = false) {
+    const b = /civic/i.test(vehicle) ? { mass: 1360, cda: CDA } // CdA ≈ 0.30 × 2.25 m²
+      : isTruck(vehicle) ? { mass: 2600, cda: 1.4 } // full-size pickup: Cd ≈ 0.45 × 3.1 m²
+      : { mass: 1500, cda: 0.75 };
+    return towing ? { mass: b.mass + TRAILER_KG, cda: b.cda + TRAILER_CDA, towing: true } : b;
+  }
+  const massKg = (vehicle = "", towing = false) => body(vehicle, towing).mass;
   const galOf = (g) => g / FUEL_G_PER_L / L_PER_GAL;
   // EPA window-sticker ratings (fueleconomy.gov) for the cars Fuelish knows, to put a drive's mpg
   // in context. Matched on the vehicle name; anything else gets no comparison.
@@ -261,8 +272,8 @@ const Engine = (() => {
   //
   // Braking is reported apart, as a rough energy estimate in gallons-equivalent: it isn't measured
   // fuel, it assumes level road, and it can't tell the brakes from engine braking.
-  function summary(rows, { vehicle = "", tripMiles = null, tripMs = null } = {}) {
-    const mass = massKg(vehicle);
+  function summary(rows, { vehicle = "", towing = false, tripMiles = null, tripMs = null } = {}) {
+    const { mass, cda } = body(vehicle, towing);
     let fuelG = 0, meters = 0, fuelMeters = 0, idleMs = 0, cutMs = 0, bothSecs = 0, idleG = 0, richG = 0, brakeJ = 0;
     // Highway (45 mph and up) vs town (everything slower, idling included): miles and fuel each.
     const split = { highway: { meters: 0, fuelG: 0 }, town: { meters: 0, fuelG: 0 } };
@@ -294,7 +305,7 @@ const Engine = (() => {
       }
       if (a.speed != null && b.speed != null) {
         const v0 = a.speed / 3.6, v1 = b.speed / 3.6, vm = (v0 + v1) / 2;
-        const decel = (v0 - v1) / dt, coast = 9.81 * CRR + (0.5 * AIR * CDA * vm * vm) / mass;
+        const decel = (v0 - v1) / dt, coast = 9.81 * CRR + (0.5 * AIR * cda * vm * vm) / mass;
         if (decel > coast) brakeJ += mass * (decel - coast) * vm * dt;
       }
       if (b.speed === 0 && b.rpm > 300) idleMs += dt * 1000;
@@ -418,7 +429,7 @@ const Engine = (() => {
   const cToF = (c) => (c * 9) / 5 + 32;
   const mph = (kmh) => kmh * KMH_TO_MPH;
 
-  const physics = { J_PER_GAL, ENGINE_EFF, CRR, CDA, AIR, massKg };
+  const physics = { J_PER_GAL, ENGINE_EFF, CRR, CDA, AIR, massKg, body, isTruck };
 
   return { physics, align, relCost, fuelLabel, epa, recorded, rawOnly, hasSummary, merge, fromChunks, fromRaw, derive, calibrate, summary, smoothMpg, HIGHWAY_MPH, attach, cToF, mph, galOf, FUEL_G_PER_L, L_PER_GAL };
 })();

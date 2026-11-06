@@ -50,15 +50,20 @@ document.getElementById("main-nav")?.addEventListener("scroll", navEdges, { pass
 window.addEventListener("resize", navEdges);
 
 // Every trip in the person picker's choice (or `user`'s: an id, "" for everyone).
+// Each comes marked towing or not (Towing.mark), from its vehicle's other trips and any correction.
 async function allRecordings(user = Account.whoParam()) {
   let all = [], before = null;
+  const prefs = Prefs.load().catch(() => null);
   for (;;) {
     const q = [user ? `user=${encodeURIComponent(user)}` : "", before != null ? `before=${encodeURIComponent(before)}` : ""].filter(Boolean).join("&");
     const page = await api("/recordings" + (q ? "?" + q : ""));
     all = all.concat(page.recordings);
-    if (page.next == null || !page.recordings.length) return { recordings: all };
+    if (page.next == null || !page.recordings.length) break;
     before = page.next;
   }
+  await prefs;
+  Towing.mark(all, Prefs.get("towing"));
+  return { recordings: all };
 }
 
 async function api(path, opts = {}) {
@@ -87,7 +92,7 @@ const Prefs = (() => {
   let data = null, loading = null, failed = false, queue = Promise.resolve();
   async function load() {
     if (data) return data;
-    loading ||= api("/prefs").then((b) => { data = b.prefs || {}; failed = false; Costs.use(data.costs); return data; })
+    loading ||= api("/prefs").then((b) => { data = b.prefs || {}; failed = false; Costs.use(data.costs, data.vehicles, data.people); return data; })
       .catch((e) => { if (e.message === "unauthorized") throw e; failed = true; Costs.use(null); return {}; })
       .finally(() => { loading = null; });
     return loading;
@@ -379,8 +384,16 @@ async function showList() {
   if (!live()) return;
   if (!recordings.length) {
     // Someone new: say what happens next, where they are (in the app, or on the web).
+    // In the app, say what actually starts a recording on this phone: auto-record might be off.
+    let rec = {};
+    try { rec = JSON.parse(window.FuelishApp?.recordMode?.() || "{}"); } catch {}
+    const how = rec.mode === "auto"
+      ? `Get in and drive: recording starts by itself when your phone connects to ${esc(rec.car || "the car")}, and stops shortly after you park.`
+      : rec.mode === "manual"
+        ? `Before you set off, tap the bar at the bottom, then Start recording. When you get there, tap Stop recording.`
+        : `First finish setting up the recorder: tap the bar at the bottom.`;
     app.innerHTML = Account.inApp()
-      ? `<div class="empty"><h1>Your first drive goes here</h1><p class="muted">Drive somewhere. A few minutes after you park, the trip shows up here with its route, cost and mpg.</p><p class="muted">It uploads on Wi-Fi. To send it sooner, tap the bar at the bottom, then Upload now.</p></div>`
+      ? `<div class="empty"><h1>Your first drive goes here</h1><p class="muted">${how}</p><p class="muted">A few minutes after the recording stops, the trip shows up here with its route, cost and mpg. It uploads on Wi-Fi. To send it sooner, tap the bar at the bottom, then Upload now.</p></div>`
       : `<div class="empty"><h1>No trips yet</h1><p class="muted">Trips show up here after the Fuelish app on your Android phone records a drive and uploads it.</p>${/Android/i.test(navigator.userAgent) ? "" : `<p class="muted">No app yet? Open this page on your phone and get it from the Account page.</p>`}</div>`;
     return;
   }
@@ -439,7 +452,7 @@ const scoreJobs = new Map(); // slot key -> recordings
 function scoreSlot(recs) {
   recs = recs.filter((r) => r.trip || r.routeGaps > 0); // what its page draws and scores
   if (!recs.some(moved)) return "";
-  const key = recs.map((r) => `${r.id}@${r.updatedAtMs}`).join(",");
+  const key = recs.map((r) => `${r.id}@${r.updatedAtMs}${r.towing ? "+tow" : ""}`).join(",");
   scoreJobs.set(key, recs);
   return `<span class="card-score" data-score="${esc(key)}" hidden></span>`;
 }
@@ -607,10 +620,11 @@ async function tripContext(r, live) {
     ({ recordings } = await allRecordings(r.userId ?? ""));
   } catch (e) {
     if (e.message === "unauthorized") throw e;
-    return; // the page works without it
+    return null; // the page works without it
   }
   const box = document.getElementById("trip-context");
-  if (!live() || !box) return;
+  const rec = recordings.find((x) => x.id === r.id) ?? null;
+  if (!live() || !box) return rec;
   const id = r.id;
   const who = Account.whoFor(r.userId);
   // Does the picker's choice already include this trip? ("" is everyone; "me" is the signed-in person.)
@@ -622,9 +636,44 @@ async function tripContext(r, live) {
   if (o && legsOf(o).length > 1) html += stretchNav(o, id, sw);
   // Driven before? Link to its leaderboard.
   const j = Repeats.journeyOf(Repeats.journeys(recordings, Prefs.get("places")).journeys, id);
-  if (j) html += `<nav class="outing-nav"><span>One of ${j.trips.length} trips ${esc(j.loop ? `looping from ${j.from.name}` : `from ${j.from.name} to ${j.to.name}`)}</span><a href="#/routes/${esc(j.key)}"${sw}>Compare them →</a></nav>`;
+  if (j) html += `<nav class="outing-nav"><span>One of ${j.trips.length} ${j.towing ? "towing " : ""}trips ${esc(j.loop ? `looping from ${j.from.name}` : `from ${j.from.name} to ${j.to.name}`)}</span><a href="#/routes/${esc(j.key)}"${sw}>Compare them →</a></nav>`;
+  if (rec) html += towingNav(rec);
   box.innerHTML = html;
   box.querySelectorAll("[data-who]").forEach((a) => (a.onclick = () => Account.setWho(a.dataset.who)));
+  box.querySelectorAll("[data-tow]").forEach((b) => (b.onclick = () => setTowing(rec, b.dataset.tow === "1", b)));
+  return rec;
+}
+
+// Whether the trip was towing, why Fuelish thinks so, and a way to correct it. Shown for trucks, and
+// for any trip marked towing.
+function towingNav(r) {
+  if (!r.towing && !Engine.physics.isTruck(r.meta?.vehicle) && r.towingSource !== "you") return "";
+  const pct = r.towingRatio != null ? Math.round((r.towingRatio - 1) * 100) : null;
+  const what = esc(r.meta?.vehicle || "vehicle");
+  const why = {
+    you: "you marked it",
+    detected: r.towing && pct != null ? `it burned about ${pct}% more fuel than this ${what} usually does at the same speeds` : "fuel use was normal for this vehicle",
+    before: "it came right after a towing trip",
+  }[r.towingSource] ?? "too little to compare with yet";
+  return `<nav class="outing-nav towing-nav"><span><b>${r.towing ? "Towing" : "Not towing"}</b> · ${why}. Towing trips are compared only with other towing trips.</span>
+    <button type="button" class="link" data-tow="${r.towing ? "0" : "1"}">${r.towing ? "Wasn't towing?" : "Was towing?"}</button></nav>`;
+}
+
+// Saves a correction. Agreeing with the detection again removes the correction instead.
+async function setTowing(r, towing, btn) {
+  btn.disabled = true;
+  try {
+    await Prefs.update("towing", (cur) => {
+      const next = { ...(cur || {}) };
+      if (r.towingDetected === towing) delete next[r.id]; else next[r.id] = towing;
+      return next;
+    });
+    route();
+  } catch (e) {
+    if (e.message === "unauthorized") return;
+    btn.disabled = false;
+    btn.textContent = `Couldn't save (${e.message}). Try again`;
+  }
 }
 
 // An outing's page and its trips' pages are one page: this row across the top switches between the
@@ -755,7 +804,7 @@ function sideRoute(sm, { engine = false, trips = 0 } = {}) {
 // The score and what to change, as one list: the score ring, then one line per habit that cost gas
 // (name, amount, a bar on one scale), largest first. A line opens to say what happened and how to
 // change it; braking stops are buttons that show the stop on the map. The lines add up to the score.
-function coachCard(el, { pts, rows, e, vehicle, price, focus }) {
+function coachCard(el, { pts, rows, e, vehicle, towing = false, price, focus }) {
   if (!el) return;
   let target = coachTarget();
   const amount = (gal) => (price != null ? money(gal * price) : `${gallons(gal)} gal`);
@@ -763,8 +812,8 @@ function coachCard(el, { pts, rows, e, vehicle, price, focus }) {
   const opened = new Set();
   const render = () => {
     el.querySelectorAll("details[data-k]").forEach((d) => (d.open ? opened.add(d.dataset.k) : opened.delete(d.dataset.k)));
-    const list = Coach.items({ pts, rows, e, vehicle, price, targetMph: target });
-    const sc = Coach.score({ pts, rows, e, vehicle, targetMph: target });
+    const list = Coach.items({ pts, rows, e, vehicle, towing, price, targetMph: target });
+    const sc = Coach.score({ pts, rows, e, vehicle, towing, targetMph: target });
     el.hidden = false;
     const max = Math.max(...list.map((it) => it.gal), 1e-9);
     const body = (it) => {
@@ -802,7 +851,7 @@ function coachCard(el, { pts, rows, e, vehicle, price, focus }) {
       : `<p class="hint">Nothing stood out on this drive: no abrupt stops, long idles or fast cruising worth changing.</p>`);
     const sp = list.find((it) => it.key === "speed");
     if (sc) about("score", "The driving score", `<p>100 means every drop went to covering the distance; each point below is 1% of this drive's gas spent on something you could have changed. Where you drove doesn't count against you: only stops sharper than a gentle coast-down (counted in full from about 0.2 g average), cruising above ${target} mph, pressing hard, and standstills over a minute.</p>`);
-    about("coach", "What you could change", `<p>Braking is the energy lost beyond what air and tires would have taken anyway (${Math.round(Engine.physics.massKg(vehicle))} kg, 25% engine efficiency), from GPS speed. It isn't measured fuel: it assumes a level road (going downhill reads as braking), and it can't tell the brakes from engine braking. Speed compares each second above the cruising speed with the same miles at that speed, using how fuel per mile grows with speed${sp ? (sp.source === "drive" ? ", measured from your own steady driving on this drive" : ", from air drag (this drive had too little steady cruising to measure it)") : ""}. Pressing hard and idling are measured from the engine.</p>`);
+    about("coach", "What you could change", `<p>Braking is the energy lost beyond what air and tires would have taken anyway (${Math.round(Engine.physics.massKg(vehicle, towing))} kg${towing ? " with a trailer" : ""}, 25% engine efficiency), from GPS speed. It isn't measured fuel: it assumes a level road (going downhill reads as braking), and it can't tell the brakes from engine braking. Speed compares each second above the cruising speed with the same miles at that speed, using how fuel per mile grows with speed${sp ? (sp.source === "drive" ? ", measured from your own steady driving on this drive" : ", from air drag (this drive had too little steady cruising to measure it)") : ""}. Pressing hard and idling are measured from the engine.</p>`);
   };
   render();
   el.onclick = (ev) => {
@@ -838,10 +887,10 @@ function about(key, title, html) {
 }
 
 // Highway vs town, where the fuel went, trip cost, car health: everything that needs the engine.
-function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle = trip?.meta?.vehicle ?? "", coach = null } = {}) {
+function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle = trip?.meta?.vehicle ?? "", towing = !!trip?.towing, coach = null } = {}) {
   const figs = document.getElementById("figs");
   if (!figs) return;
-  if (coach) coachCard(document.getElementById("coach"), { ...coach, e, vehicle, price: gas?.price ?? null });
+  if (coach) coachCard(document.getElementById("coach"), { ...coach, e, vehicle, towing, price: gas?.price ?? null });
   const cost = (g) => (gas ? money(g * gas.price) : null);
   const mi = sm.miles.toFixed(sm.miles < 10 ? 1 : 0);
   // With fuel readings over less of the drive, mpg is only for the part they cover, and gas for the
@@ -1006,7 +1055,9 @@ async function showTrip(id, share = null, focusT = null) {
     </div>`;
 
   if (!share) shareControls(id);
-  if (!share) tripContext(r, live); // not awaited: the route doesn't wait for it
+  // Not awaited: the route doesn't wait for it. It also says whether the trip was towing, which the
+  // engine figures then take into account.
+  const context = share ? Promise.resolve(null) : tripContext(r, live);
   if (!share && (r.status === "recording" || !r.complete)) watchForParts(r, live);
   const status = document.getElementById("rt-status");
   const pts = await tripPoints(id, detail, (i, n) => {
@@ -1028,7 +1079,7 @@ async function showTrip(id, share = null, focusT = null) {
     view.focusAt = best;
   }
   // Engine results don't wait for the gas price; the cost fills in when (if) it arrives.
-  const engineOpts = { gas: null, vehicle: m.vehicle, trip: r };
+  const engineOpts = { gas: null, vehicle: m.vehicle, towing: false, trip: r };
   let engineRows = pts.engine;
   const showEngine = () => {
     if (!engineRows.length || !live()) return;
@@ -1037,6 +1088,9 @@ async function showTrip(id, share = null, focusT = null) {
   };
   if (view.focusAt != null) view.pick(view.focusAt);
   showEngine();
+  context.then((rec) => {
+    if (rec?.towing && live()) { r.towing = true; engineOpts.towing = true; showEngine(); }
+  });
   withTimeout(Gas.forTrip(pts[0].lat, pts[0].lon, r.startedWallMs), 8000).then((gas) => {
     if (gas && live()) { engineOpts.gas = gas; showEngine(); }
   });
@@ -1153,7 +1207,7 @@ async function engineOnly(r, pts, status, live) {
   }
   status.textContent = "Location wasn't recorded on this drive. Its engine data is beside the map.";
   document.querySelectorAll(".map-controls, #rt-legend").forEach((el) => { el.style.display = "none"; });
-  const e = Engine.summary(rows, { vehicle: r.meta.vehicle, tripMs: endOf(r) - r.startedWallMs });
+  const e = Engine.summary(rows, { vehicle: r.meta.vehicle, towing: !!r.towing, tripMs: endOf(r) - r.startedWallMs });
   let movingMs = 0, maxKmh = null;
   for (let i = 1; i < rows.length; i++) {
     const dt = rows[i].t - rows[i - 1].t;
@@ -1239,7 +1293,21 @@ async function showInsights() {
   const first = trips[0].r.startedWallMs, last = trips.at(-1).r.startedWallMs;
   const d = (ms) => new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
   sub.textContent = `${plural(trips.length, "drive")} with engine data${first === last ? `, ${d(first)}` : `, ${d(first)} – ${d(last)}`}.${failedNote(trips)}`;
-  Insights.render(document.getElementById("ins"), trips);
+  // Towing and unloaded driving each get their own curves: mixed, neither would describe either.
+  const towed = trips.filter((t) => t.r.towing);
+  if (!towed.length || towed.length === trips.length) {
+    if (towed.length) sub.textContent += " All of them towing.";
+    Insights.render(document.getElementById("ins"), trips);
+    return;
+  }
+  const host = document.getElementById("ins");
+  host.insertAdjacentHTML("beforebegin", `<div class="seg ins-tow" role="group"><button type="button" data-tow="0" aria-pressed="true">Not towing (${trips.length - towed.length})</button><button type="button" data-tow="1" aria-pressed="false">Towing (${towed.length})</button></div>`);
+  const pick = (tow) => {
+    document.querySelectorAll(".ins-tow button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tow === (tow ? "1" : "0"))));
+    Insights.render(host, trips.filter((t) => !!t.r.towing === tow));
+  };
+  document.querySelectorAll(".ins-tow button").forEach((b) => (b.onclick = () => pick(b.dataset.tow === "1")));
+  pick(false);
 }
 
 // ---------- repeated trips, costs, transmission ----------
@@ -1291,7 +1359,7 @@ async function showRoutes(key) {
   const trips = await engineTrips(j.trips, live, (msg) => { if (sub) sub.textContent = `${plural(j.trips.length, "trip")} · ${msg.toLowerCase()}`; });
   if (!live()) return;
   sub.textContent = `${plural(j.trips.length, "trip")}, ${new Date(j.trips[0].startedWallMs).toLocaleDateString([], { month: "short", day: "numeric" })} – ${new Date(j.trips.at(-1).startedWallMs).toLocaleDateString([], { month: "short", day: "numeric" })}`;
-  const engine = new Map(trips.map((t) => [t.r.id, { e: Engine.summary(t.rows, { vehicle: t.r.meta.vehicle, ...t.scope }), gas: t.gas }]));
+  const engine = new Map(trips.map((t) => [t.r.id, { e: Engine.summary(t.rows, { vehicle: t.r.meta.vehicle, towing: !!t.r.towing, ...t.scope }), gas: t.gas }]));
   const rows = Repeats.score(j, engine, endOf);
   let boardKey = "gal";
   try { boardKey = localStorage.getItem("fuelish.board") || "gal"; } catch {}
@@ -1319,7 +1387,8 @@ async function showCosts() {
   Costs.page(document.getElementById("costs"), trips, {
     durationOf: (r) => endOf(r) - r.startedWallMs,
     otherTrips: done.filter((r) => moved(r) && !counted.has(r.id)).length,
-    save: (v) => Prefs.set("costs", v),
+    me: Account.meId(),
+    save: (key, change) => Prefs.update(key, change),
     onLeave,
   });
 }
@@ -1448,9 +1517,9 @@ function coachTarget() {
 async function driveFigures(recs) {
   const d = await loadDrive(recs);
   if (!d.rows.length || d.pts.length < 2) return null;
-  const vehicle = recs[0].meta.vehicle ?? "";
-  const e = Engine.summary(d.rows, { vehicle, tripMiles: Route.summary(d.pts).miles, tripMs: d.drivingMs });
-  const score = Coach.score({ pts: d.pts, rows: d.rows, e, vehicle, targetMph: coachTarget() })?.score ?? null;
+  const vehicle = recs[0].meta.vehicle ?? "", towing = recs.some((r) => r.towing);
+  const e = Engine.summary(d.rows, { vehicle, towing, tripMiles: Route.summary(d.pts).miles, tripMs: d.drivingMs });
+  const score = Coach.score({ pts: d.pts, rows: d.rows, e, vehicle, towing, targetMph: coachTarget() })?.score ?? null;
   const gal = e.galTrip ?? e.gal, start = recs.find((r) => r.trip?.path?.length)?.trip.path[0];
   const gas = gal != null ? await withTimeout(Gas.forTrip(start?.[0], start?.[1], recs[0].startedWallMs), 8000) : null;
   return {
@@ -1553,7 +1622,7 @@ async function showMany(kind, key) {
     if (!live()) return;
     // Scored and costed as one drive: the trips back to back, without the stops.
     const whole = { ...shown[0], startedWallMs: 0, driveEndWallMs: d.drivingMs };
-    view.setEngine(d.rows, { partial: engines.some((e, i) => !e.length && lists[i].length), gas, vehicle: shown[0].meta.vehicle, trip: whole });
+    view.setEngine(d.rows, { partial: engines.some((e, i) => !e.length && lists[i].length), gas, vehicle: shown[0].meta.vehicle, towing: shown.some((r) => r.towing), trip: whole });
   }
 
   // Hovering a trip in the list (or an outing's trip in the row up top) brings it forward on the map.
@@ -1686,7 +1755,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
   onLeave(() => { mq.removeEventListener("change", recolor); ro.disconnect(); view.map.remove(); });
 
   // Engine data arrives with the route, or later for older drives read from raw chunks.
-  function setEngine(rows, { partial = false, gas = null, vehicle = "", trip = null } = {}) {
+  function setEngine(rows, { partial = false, gas = null, vehicle = "", towing = false, trip = null } = {}) {
     if (!rows.length || !document.getElementById("map")) return;
     Engine.attach(pts, Engine.relCost(Engine.smoothMpg(rows)));
     hasEngine = true;
@@ -1699,7 +1768,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
     const scope = { tripMiles: sm.miles, tripMs: trip ? endOf(trip) - trip.startedWallMs : null };
     // Coaching and the score need `trip`: one recording, or several taken as one drive.
     const coach = trip ? { pts, rows, focus: (i) => { view.map.setView([pts[i].lat, pts[i].lon], Math.max(view.map.getZoom(), 16)); pick(i); } } : null;
-    sideEngine(sm, Engine.summary(rows, { vehicle, ...scope }), { gas, partial, trip, vehicle, coach });
+    sideEngine(sm, Engine.summary(rows, { vehicle, towing, ...scope }), { gas, partial, trip, vehicle, towing, coach });
   }
 
   return { ...view, setEngine, pick };

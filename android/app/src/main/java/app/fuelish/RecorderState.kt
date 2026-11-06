@@ -164,6 +164,32 @@ object Prefs {
     fun skippedAdapter(c: Context) = sp(c).getBoolean("skippedAdapter", false)
     fun setSkippedAdapter(c: Context, skipped: Boolean) = sp(c).edit().putBoolean("skippedAdapter", skipped).apply()
 
+    /** The server turned this phone's upload key away (401): recordings wait until someone signs in again. */
+    fun signInNeeded(c: Context) = sp(c).getBoolean("signInNeeded", false)
+    fun setSignInNeeded(c: Context, needed: Boolean) = sp(c).edit().putBoolean("signInNeeded", needed).apply()
+
+    /**
+     * Whether recording starts by itself ("auto") or with Start/Stop ("manual"); "" until setup asks.
+     * Turning auto-record on in Settings counts as choosing it.
+     */
+    fun recordMode(c: Context): String {
+        val a = config(c).auto
+        if (a.optBoolean("enabled") && a.optString("carAddress").isNotBlank()) return "auto"
+        return sp(c).getString("recordMode", "").orEmpty()
+    }
+    fun setRecordMode(c: Context, mode: String) = sp(c).edit().putString("recordMode", mode).apply()
+
+    /** The adapter address that passed the parked connection test in setup ("" if none has). */
+    fun adapterChecked(c: Context) = sp(c).getString("adapterChecked", "").orEmpty()
+    fun setAdapterChecked(c: Context, address: String) = sp(c).edit().putString("adapterChecked", address).apply()
+    /** The adapter whose test was put off ("test on the first drive"); setup doesn't hold up on it. */
+    fun adapterTestSkipped(c: Context) = sp(c).getString("adapterTestSkipped", "").orEmpty()
+    fun setAdapterTestSkipped(c: Context, address: String) = sp(c).edit().putString("adapterTestSkipped", address).apply()
+
+    /** A VIN read on a drive whose name lookup failed (no signal): looked up again once online. */
+    fun pendingVin(c: Context) = sp(c).getString("pendingVin", "").orEmpty()
+    fun setPendingVin(c: Context, vin: String) = sp(c).edit().putString("pendingVin", vin).apply()
+
     fun store(c: Context): RecordingStore {
         val base = c.getExternalFilesDir(null) ?: c.filesDir
         return RecordingStore(File(base, "recordings"))

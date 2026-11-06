@@ -1,6 +1,12 @@
 // What driving costs, counting more than gas: your time, wear on the car, mileage-driven loss of
 // value, and the carbon it emits. Every assumption is editable on the Costs page and saved on the
-// server (prefs "costs"), so they're the same in any browser.
+// server, so they're the same in any browser:
+//   prefs "people"    { <user id>: { timePerHour } }: each person's own time
+//   prefs "vehicles"  { <vehicle name>: { wearPerMile, valuePerMile, otherPerMile } }: each vehicle's
+//                     per-mile costs (a truck wears faster and loses more value a mile than a sedan)
+//   prefs "costs"     carbon (the same for everyone), and the starting values for anyone or any
+//                     vehicle without their own (from before these were split)
+// A trip is costed with its driver's time and its vehicle's per-mile costs (forTrip).
 //
 // Per trip:   fuel     gallons (from the engine: car-reported or an airflow estimate, see
 //                      Engine.summary) × that week's regional average gas price
@@ -29,12 +35,33 @@ const Costs = (() => {
     ["carbonPerTonne", "Cost of carbon", "$ per tonne CO₂", "The harm a tonne of CO₂ does, in dollars. EPA's 2023 estimate is $190. Set 0 to leave it out."],
     ["otherPerMile", "Anything else", "$ per mile", "Pay-per-mile insurance, tolls you always pay, and so on."],
   ];
-  let settings = { ...DEFAULTS };
+  const PERSON = ["timePerHour"];
+  const VEHICLE = ["wearPerMile", "valuePerMile", "otherPerMile"];
+  const SHARED = ["co2KgPerGal", "carbonPerTonne"];
+  // A pickup's starting point (AAA "Your Driving Costs", half-ton pickups): more in tires, brakes and
+  // repairs a mile, and more value lost to each mile, than a small sedan.
+  const TRUCK = { wearPerMile: 0.13, valuePerMile: 0.11, otherPerMile: 0 };
+  let settings = { ...DEFAULTS }; // the shared "costs" value, with defaults filled in
+  let vehicles = {}, people = {};
   const get = () => settings;
-  function use(saved) {
+  const ok = (x) => Number.isFinite(x) && x >= 0;
+  function use(saved, savedVehicles = {}, savedPeople = {}) {
     settings = { ...DEFAULTS };
-    for (const k of Object.keys(DEFAULTS)) if (Number.isFinite(saved?.[k]) && saved[k] >= 0) settings[k] = saved[k];
+    for (const k of Object.keys(DEFAULTS)) if (ok(saved?.[k])) settings[k] = saved[k];
+    vehicles = savedVehicles && typeof savedVehicles === "object" ? savedVehicles : {};
+    people = savedPeople && typeof savedPeople === "object" ? savedPeople : {};
   }
+  const vehicleName = (r) => (r?.meta?.vehicle || "").trim();
+  /** The per-mile costs for a vehicle: its own, else a truck's or the shared starting values. */
+  function vehicleCosts(name) {
+    const base = Engine.physics.isTruck(name) ? TRUCK : settings;
+    const own = vehicles[name] || {};
+    return Object.fromEntries(VEHICLE.map((k) => [k, ok(own[k]) ? own[k] : base[k]]));
+  }
+  /** A person's time: their own, else the shared starting value. */
+  const personTime = (id) => (ok(people[id]?.timePerHour) ? people[id].timePerHour : settings.timePerHour);
+  /** The settings one trip is costed with: its driver's time, its vehicle's per-mile costs, shared carbon. */
+  const forTrip = (r) => ({ ...settings, timePerHour: personTime(r?.userId), ...vehicleCosts(vehicleName(r)) });
 
   /**
    * Cost of one trip. `gal` may be null (no engine data): fuel is then left out unless `mpgGuess`
@@ -97,7 +124,7 @@ const Costs = (() => {
   function tripParts({ trip: r, sm, e, gas }) {
     const end = r.driveEndWallMs ?? r.endedWallMs ?? r.updatedAtMs;
     const minutes = Math.max(0, (end - r.startedWallMs) / 60000);
-    const c = trip({ minutes, miles: sm.miles, gal: e.galTrip ?? e.gal, price: gas?.price ?? null, fuelSource: e.fuelSource, extrapolated: e.extrapolated });
+    const c = trip({ minutes, miles: sm.miles, gal: e.galTrip ?? e.gal, price: gas?.price ?? null, fuelSource: e.fuelSource, extrapolated: e.extrapolated }, forTrip(r));
     return {
       summary: `${money(c.total)} all in`,
       body: `<p class="sec-meta">${money(c.car)} car costs, ${money(c.total)} with your time and carbon${c.perMile ? ` · ${money(c.perMile)}/mi` : ""}</p>
@@ -202,20 +229,32 @@ const Costs = (() => {
 
   /**
    * The Costs page. `trips`: [{ r, rows, gas }] (every drive with engine data); `durationOf(r)` gives
-   * door-to-door ms; `save(settings)` stores edited assumptions.
+   * door-to-door ms; `save(key, change)` stores an edited pref ("people", "vehicles" or "costs"),
+   * `change(current)` giving its new value; `me` is the signed-in person's id (their time is edited).
    */
-  function page(host, trips, { durationOf, save, otherTrips = 0, onLeave = () => {} }) {
+  function page(host, trips, { durationOf, save, me = null, otherTrips = 0, onLeave = () => {} }) {
     const price = trips.findLast((t) => t.gas)?.gas.price ?? null;
-    const summaries = trips.map((t) => ({ t, e: Engine.summary(t.rows, { vehicle: t.r.meta.vehicle, ...t.scope }) }));
+    // Each vehicle in these drives gets its own per-mile costs; the one driven most leads.
+    const counts = new Map();
+    for (const t of trips) { const n = vehicleName(t.r); counts.set(n, (counts.get(n) || 0) + 1); }
+    const names = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a));
+    const mainR = trips.find((t) => vehicleName(t.r) === names[0])?.r ?? null;
+    const fieldsOf = (keys) => FIELDS.filter(([k]) => keys.includes(k));
+    const input = (name, value, label, unit, help) =>
+      `<label><span>${esc(label)}</span><span class="cost-input"><input type="number" min="0" step="any" inputmode="decimal" name="${esc(name)}" value="${value}"><small>${esc(unit)}</small></span><small class="hint">${esc(help)}</small></label>`;
+    const myTime = () => (me ? personTime(me) : settings.timePerHour);
+    const summaries = trips.map((t) => ({ t, e: Engine.summary(t.rows, { vehicle: t.r.meta.vehicle, towing: !!t.r.towing, ...t.scope }) }));
     // The answer first; the assumptions behind it fold away under it.
     host.innerHTML = `
       <section class="ins-sec" id="cost-totals"></section>
       <section class="ins-sec">
         <details class="cost-assume" id="cost-assume">
           <summary><h2>What these count</h2><span class="hint" id="cost-assume-line"></span></summary>
-          <p class="lede">Gas is from the engine (an airflow estimate on cars that don't report fuel use) at the regional average price for each week. Everything else is an assumption: set it to what it's worth to you. Changes are saved for every browser.</p>
-          <form class="cost-form" id="cost-form">${FIELDS.map(([k, label, unit, help]) => `
-            <label><span>${esc(label)}</span><span class="cost-input"><input type="number" min="0" step="any" inputmode="decimal" name="${k}" value="${settings[k]}"><small>${esc(unit)}</small></span><small class="hint">${esc(help)}</small></label>`).join("")}
+          <p class="lede">Gas is from the engine (an airflow estimate on cars that don't report fuel use) at the regional average price for each week. Everything else is an assumption: set it to what it's worth to you. Your time is yours alone; each vehicle has its own per-mile costs; carbon is the same for everyone. Changes are saved for every browser.</p>
+          <form class="cost-form" id="cost-form">
+            <h3>Your time</h3>${fieldsOf(PERSON).map(([k, label, unit, help]) => input(`p:${k}`, myTime(), label, unit, help)).join("")}
+            ${names.map((n, i) => `<h3>${esc(n || "Vehicle without a name")}</h3>${fieldsOf(VEHICLE).map(([k, label, unit, help]) => input(`v${i}:${k}`, vehicleCosts(n)[k], label, unit, k === "wearPerMile" && Engine.physics.isTruck(n) ? "Maintenance, repairs and tires. AAA's yearly estimate for a half-ton pickup is near 13¢ a mile." : help)).join("")}`).join("")}
+            <h3>For everyone</h3>${fieldsOf(SHARED).map(([k, label, unit, help]) => input(`s:${k}`, settings[k], label, unit, help)).join("")}
             <div class="cost-actions"><button type="button" class="ghost" id="cost-reset">Back to defaults</button><span class="save-state" id="cost-save" role="status" aria-live="polite"></span></div>
           </form>
         </details>
@@ -233,18 +272,24 @@ const Costs = (() => {
         <p class="lede">For trips you make again and again, <a href="#/routes">Repeated trips</a> ranks every run, and compares the different ways you've driven them by gas, time and total cost.</p>
       </section>`;
 
-    const bins = steadyBins(trips);
+    // Speed and cold-start comparisons use the vehicle driven most, not towing: a trailer, or another
+    // vehicle, burns differently at every speed.
+    const plain = trips.filter((t) => !t.r.towing && vehicleName(t.r) === names[0]);
+    const towedOut = trips.filter((t) => t.r.towing && vehicleName(t.r) === names[0]).length;
+    const bins = steadyBins(plain);
     const gpm = galPerMileCurve(bins);
-    const cold = coldStarts(trips);
+    const cold = coldStarts(plain);
     const idleRows = trips.flatMap((t) => t.rows.filter((r) => r.speed === 0 && r.rpm > 300 && r.coolant >= 75 && r.gph != null));
     const idleGph = median(idleRows.map((r) => r.gph));
 
     function render() {
-      host.querySelector("#cost-assume-line").textContent = `Your time ${money(settings.timePerHour)}/h · wear ${cents(settings.wearPerMile)}/mi · lost value ${cents(settings.valuePerMile)}/mi · carbon ${money(settings.carbonPerTonne)}/t. Change…`;
+      const sMain = forTrip(mainR);
+      if (me) sMain.timePerHour = myTime();
+      host.querySelector("#cost-assume-line").textContent = `Your time ${money(myTime())}/h · ${names.length > 1 ? `${names[0] || "vehicle"}: ` : ""}wear ${cents(sMain.wearPerMile)}/mi · lost value ${cents(sMain.valuePerMile)}/mi · carbon ${money(settings.carbonPerTonne)}/t. Change…`;
       // Totals over every drive with engine data.
       let sum = { minutes: 0, miles: 0 }, parts = {};
       for (const { t, e } of summaries) {
-        const c = trip({ minutes: durationOf(t.r) / 60000, miles: e.miles, gal: e.galTrip ?? e.gal, price: t.gas?.price ?? price, fuelSource: e.fuelSource, extrapolated: e.extrapolated });
+        const c = trip({ minutes: durationOf(t.r) / 60000, miles: e.miles, gal: e.galTrip ?? e.gal, price: t.gas?.price ?? price, fuelSource: e.fuelSource, extrapolated: e.extrapolated }, forTrip(t.r));
         sum.minutes += durationOf(t.r) / 60000;
         sum.miles += e.miles;
         for (const i of c.items) {
@@ -270,7 +315,7 @@ const Costs = (() => {
         host.querySelector("#cost-speed").innerHTML = `<p class="hint">Not enough steady driving yet (at least a minute at each speed), or no gas price.</p>`;
         note.textContent = "";
       } else {
-        const rows = gpm.map((g) => ({ mph: g.mph, ...perMileAt(g.mph, g.gpm, price) }));
+        const rows = gpm.map((g) => ({ mph: g.mph, ...perMileAt(g.mph, g.gpm, price, sMain) }));
         const best = rows.reduce((a, b) => (b.total < a.total ? b : a));
         const bestFuel = rows.reduce((a, b) => (b.fuel < a.fuel ? b : a));
         // Same colors as the cost bar above; the total in the text color, heavier.
@@ -284,9 +329,10 @@ const Costs = (() => {
         const top = rows.at(-1), low = rows[0];
         // At the edge of the data the real minimum may lie beyond it: say so rather than call it the best.
         const where = (r) => (r === top ? `at ${r.mph} mph or faster (the fastest you've held steady long enough to measure)` : r === low ? `at ${r.mph} mph or slower (the slowest measured)` : `around ${r.mph} mph`);
-        note.textContent = settings.timePerHour > 0
-          ? `With your time at ${money(settings.timePerHour)}/h, steady driving is cheapest ${where(best)}, ${cents(best.total)} a mile. Gas alone is cheapest ${where(bestFuel)}, ${cents(bestFuel.fuel)} a mile${top !== bestFuel ? `; at ${top.mph} mph it's ${cents(top.fuel)}` : ""}. Speed limits and traffic come first, of course: this is only what each choice costs.`
-          : `Counting gas, wear and carbon only, steady driving is cheapest ${where(best)}, ${cents(best.total)} a mile.`;
+        const whose = `${names.length > 1 ? ` For the ${names[0] || "vehicle driven most"}.` : ""}${towedOut ? ` Towing drives (${towedOut}) aren't counted here.` : ""}`;
+        note.textContent = (sMain.timePerHour > 0
+          ? `With your time at ${money(sMain.timePerHour)}/h, steady driving is cheapest ${where(best)}, ${cents(best.total)} a mile. Gas alone is cheapest ${where(bestFuel)}, ${cents(bestFuel.fuel)} a mile${top !== bestFuel ? `; at ${top.mph} mph it's ${cents(top.fuel)}` : ""}. Speed limits and traffic come first, of course: this is only what each choice costs.`
+          : `Counting gas, wear and carbon only, steady driving is cheapest ${where(best)}, ${cents(best.total)} a mile.`) + whose;
       }
 
       // Idling.
@@ -294,7 +340,7 @@ const Costs = (() => {
       const idleMin = summaries.reduce((n, { e }) => n + e.idleMs / 60000, 0);
       host.querySelector("#cost-idle").innerHTML = `<h2>Idling</h2>
         ${idleGph != null && price != null ? `<p class="lede">Warmed up, the engine burns about ${idleGph.toFixed(2)} gal an hour at a standstill: ${cents((idleGph * price) / 60)} a minute in gas, ${money(idleGph * price)} an hour.
-          You've idled ${fmtMin(idleMin)} in these drives, about ${money(idleTotal)} of gas. Counting your time too, a minute stopped costs ${cents((idleGph * price) / 60 + settings.timePerHour / 60)}.</p>
+          You've idled ${fmtMin(idleMin)} in these drives, about ${money(idleTotal)} of gas. Counting your time too, a minute stopped costs ${cents((idleGph * price) / 60 + myTime() / 60)}.</p>
           <p class="hint">A rule of thumb from Argonne National Laboratory: switching the engine off for stops longer than about 10 seconds saves more fuel than the restart uses.</p>`
           : `<p class="lede">Not enough warm idling recorded yet.</p>`}`;
 
@@ -315,43 +361,84 @@ const Costs = (() => {
     const form = host.querySelector("#cost-form"), stateEl = host.querySelector("#cost-save");
     let timer = 0;
     const setState = (text, cls = "") => { stateEl.className = `save-state ${cls}`; stateEl.innerHTML = text; };
+    // Which prefs have edits not yet saved: "people" (your time), "vehicles", "costs" (shared).
+    const dirty = new Set();
+    const write = (key) => {
+      if (key === "people") {
+        const mine = people[me];
+        return save("people", (cur) => {
+          const next = { ...(cur || {}) };
+          if (mine) next[me] = { ...mine }; else delete next[me];
+          return next;
+        });
+      }
+      if (key === "vehicles") {
+        const shown = Object.fromEntries(names.filter((n) => n).map((n) => [n, vehicles[n]]));
+        return save("vehicles", (cur) => {
+          const next = { ...(cur || {}) };
+          for (const [n, v] of Object.entries(shown)) if (v) next[n] = { ...v }; else delete next[n];
+          return next;
+        });
+      }
+      return save("costs", () => ({ ...settings }));
+    };
     async function persist() {
       clearTimeout(timer);
       timer = 0;
-      const value = { ...settings };
+      const keys = [...dirty];
+      dirty.clear();
       setState("Saving…");
       try {
-        await save(value);
-        if (JSON.stringify(value) === JSON.stringify(settings)) setState("Saved", "ok");
+        await Promise.all(keys.map(write));
+        if (!dirty.size && !timer) setState("Saved", "ok");
       } catch (e) {
+        keys.forEach((k) => dirty.add(k));
         if (e.message === "unauthorized") return;
         setState(`Couldn't save (${esc(e.message)}). These numbers apply here only until it's saved. <button type="button" class="link" id="cost-retry">Try again</button>`, "bad");
         host.querySelector("#cost-retry").onclick = persist;
       }
     }
-    form.addEventListener("input", () => {
-      const next = { ...settings };
-      for (const [k] of FIELDS) {
-        const v = parseFloat(form.elements[k].value);
-        if (Number.isFinite(v) && v >= 0) next[k] = v;
+    // One field changed: it goes to your time, its vehicle, or the shared settings. Your time with
+    // nobody signed in (the original token), and a vehicle without a name, change the shared values.
+    form.addEventListener("input", (ev) => {
+      const name = ev.target?.name || "";
+      const v = parseFloat(ev.target.value);
+      if (!name || !(Number.isFinite(v) && v >= 0)) return;
+      const [group, k] = name.split(":");
+      if (group === "p" && me) {
+        people = { ...people, [me]: { timePerHour: v } };
+        dirty.add("people");
+      } else if (group.startsWith("v") && names[+group.slice(1)]) {
+        const n = names[+group.slice(1)];
+        vehicles = { ...vehicles, [n]: { ...vehicleCosts(n), [k]: v } };
+        dirty.add("vehicles");
+      } else {
+        settings = { ...settings, [k]: v };
+        dirty.add("costs");
       }
-      use(next);
       render();
       setState("Not saved yet");
       clearTimeout(timer);
       timer = setTimeout(persist, 600);
     });
     host.querySelector("#cost-reset").onclick = () => {
-      use({});
-      for (const [k] of FIELDS) form.elements[k].value = settings[k];
+      if (me) { people = { ...people }; delete people[me]; dirty.add("people"); }
+      vehicles = { ...vehicles };
+      for (const n of names) delete vehicles[n];
+      settings = { ...DEFAULTS };
+      dirty.add("vehicles").add("costs");
+      for (const el of form.querySelectorAll("input[name]")) {
+        const [group, k] = el.name.split(":");
+        el.value = group === "p" ? myTime() : group.startsWith("v") ? vehicleCosts(names[+group.slice(1)])[k] : settings[k];
+      }
       render();
       persist();
     };
     // Leaving with an edit still waiting: save it now rather than drop it.
-    onLeave(() => { if (timer) { clearTimeout(timer); timer = 0; save({ ...settings }).catch(() => {}); } });
+    onLeave(() => { if (timer) { clearTimeout(timer); timer = 0; [...dirty].forEach((k) => write(k).catch(() => {})); dirty.clear(); } });
   }
 
   const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
-  return { DEFAULTS, FIELDS, get, use, trip, perMileAt, breakdownHtml, tripParts, page, money, cents, steadyBins, galPerMileCurve, coldStarts };
+  return { DEFAULTS, FIELDS, get, use, forTrip, vehicleCosts, personTime, trip, perMileAt, breakdownHtml, tripParts, page, money, cents, steadyBins, galPerMileCurve, coldStarts };
 })();

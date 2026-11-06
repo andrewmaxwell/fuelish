@@ -114,6 +114,11 @@ describe("accounts", () => {
 
     // Someone else without a link still can't get in; the named address can, with no code.
     expect((await signIn({ sub: "g-stranger", email: "stranger@example.com", name: "Stranger" })).status).toBe(403);
+    // Even with the link's code, the wrong Google account is turned away and the invite stays usable.
+    const wrong = await signIn({ sub: "g-bro-work", email: "bro@work.example.com", name: "Bro" }, { invite: inv.code });
+    expect(wrong.status).toBe(403);
+    expect((await wrong.json() as any).error).toContain("bro@example.com");
+    expect((await (await call(`/invites/${inv.code}`)).json() as any).usable).toBe(true);
     const r = await signIn({ sub: "g-bro", email: "bro@example.com", name: "Bro" }, { device: { name: "Pixel 9" } });
     expect(r.status).toBe(200);
     expect(await (await call(`/invites/${inv.code}`)).json()).toEqual({ usable: false, from: null });
@@ -135,6 +140,15 @@ describe("accounts", () => {
     const me: any = await (await call("/me", { headers: dadPhone })).json();
     expect(me.account).toEqual({ id: dadId, name: "Dad" });
     expect(me.user).toBeNull();
+  });
+
+  it("lets each person set only their own time's worth", async () => {
+    const dad = sessionOf(await signIn(DAD));
+    const put = (h: Record<string, string>, v: unknown) => call("/prefs/people", { method: "PUT", headers: { ...h, ...POST }, body: JSON.stringify(v) });
+    expect((await put(andrew, { someone: { timePerHour: 40 } })).status).toBe(200);
+    expect((await put(dad, { [dadId]: { timePerHour: 15 }, someone: { timePerHour: 0 } })).status).toBe(200);
+    const got: any = await (await call("/prefs", { headers: andrew })).json();
+    expect(got.prefs.people).toEqual({ someone: { timePerHour: 40 }, [dadId]: { timePerHour: 15 } });
   });
 
   it("only lets the owner invite or manage people", async () => {

@@ -17,8 +17,11 @@ sealed class UploadResult {
     data class Done(val chunks: Int) : UploadResult()
     /** Everything sendable was sent, but the server lacks chunks the phone no longer has: id -> seqs. */
     data class Incomplete(val chunks: Int, val missing: Map<String, List<Int>>) : UploadResult()
-    /** Bad token or URL: retrying will not help until settings change. */
-    data class Fatal(val message: String) : UploadResult()
+    /**
+     * Bad token or URL: retrying will not help until settings change. [signInNeeded]: the server no
+     * longer accepts this phone's key (removed, or the account changed), so signing in again fixes it.
+     */
+    data class Fatal(val message: String, val signInNeeded: Boolean = false) : UploadResult()
     /** Network or server trouble: retry later with backoff. */
     data class Retry(val message: String, val chunks: Int) : UploadResult()
 }
@@ -119,7 +122,7 @@ class Uploader(
     private fun whoAmI(): Any {
         val r = request("GET", "$baseUrl/api/v1/me", emptyMap(), null, null)
         if (r.code == 404) return UploadTarget.of(baseUrl, token)
-        if (r.code == 401) return UploadResult.Fatal("HTTP 401 ${r.body.take(200)} (check device token)")
+        if (r.code == 401) return UploadResult.Fatal("HTTP 401 ${r.body.take(200)} (check device token)", signInNeeded = true)
         if (r.code !in 200..299) return UploadResult.Retry("who am I: HTTP ${r.code} ${r.body.take(200)}", 0)
         val acct = runCatching { org.json.JSONObject(r.body).optJSONObject("account") }.getOrNull()
         return UploadTarget.of(baseUrl, token, acct?.optString("id")?.ifEmpty { null }, acct?.optString("name")?.ifEmpty { null })
@@ -150,7 +153,8 @@ class Uploader(
 
     private fun classify(r: Response, what: String): UploadResult? = when (r.code) {
         in 200..299 -> null
-        401, 403 -> UploadResult.Fatal("$what: HTTP ${r.code} ${r.body.take(200)} (check device token)")
+        401 -> UploadResult.Fatal("$what: HTTP 401 ${r.body.take(200)} (check device token)", signInNeeded = true)
+        403 -> UploadResult.Fatal("$what: HTTP 403 ${r.body.take(200)} (check device token)")
         404 -> UploadResult.Fatal("$what: HTTP 404 ${r.body.take(200)} (check server URL)")
         else -> UploadResult.Retry("$what: HTTP ${r.code} ${r.body.take(200)}", 0)
     }

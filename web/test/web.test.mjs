@@ -10,7 +10,7 @@ export function load(...files) {
   const ctx = vm.createContext({ console, fetch: async () => ({ ok: false }), setTimeout, Promise, Map, Set, Math, Date, JSON });
   for (const f of files) vm.runInContext(readFileSync(new URL(f, dir), "utf8") + "\n;globalThis.__last = 1;", ctx, { filename: f });
   // Top-level const declarations aren't properties of the context; expose them.
-  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}) })", ctx);
+  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}) })", ctx);
 }
 const { Engine, Route, extent } = load("route.js", "engine.js");
 
@@ -357,4 +357,53 @@ test("weighs trucks named by the VIN decoder as trucks", () => {
   assert.equal(Engine.physics.massKg("2016 Honda Civic 2.0L"), 1360);
   assert.equal(Engine.physics.massKg("2020 Toyota Camry 2.5L"), 1500);
   assert.equal(Engine.physics.massKg("2022 Hyundai Tramonto"), 1500); // "ram" inside a word isn't a Ram
+});
+
+// A trip's fuel profile: `secs` in each of a few highway and town bins, burning `rate` g/s.
+const profile = (rate, secs = 200) => ({ v: 1, b: { "9|1": [secs, rate * secs], "5|1": [secs, rate * 0.8 * secs], "5|2": [secs / 2, rate * 1.5 * (secs / 2)] } });
+const truckTrip = (id, rate, start, extra = {}) => ({ id, deviceId: "d", status: "stopped", startedWallMs: start, endedWallMs: start + 600000, meta: { vehicle: "2018 RAM 1500" }, fuelProfile: profile(rate), ...extra });
+
+test("towing is told apart from the same truck's ordinary trips", () => {
+  const { Towing } = load("route.js", "engine.js", "towing.js");
+  const day = 86400000;
+  const recs = [
+    truckTrip("a", 2.0, 1 * day), truckTrip("b", 2.1, 2 * day), truckTrip("c", 1.9, 3 * day),
+    truckTrip("tow1", 3.4, 4 * day), truckTrip("tow2", 3.2, 5 * day),
+    // A short stop for fuel right after towing: too short to judge, so it follows the trip before.
+    truckTrip("fuel", 3.0, 5 * day + 700000, { fuelProfile: profile(3.0, 20) }),
+  ];
+  Towing.mark(recs, {});
+  assert.deepEqual(recs.map((r) => [r.id, r.towing]), [["a", false], ["b", false], ["c", false], ["tow1", true], ["tow2", true], ["fuel", true]]);
+  assert.equal(recs.find((r) => r.id === "tow1").towingSource, "detected");
+  assert.equal(recs.find((r) => r.id === "fuel").towingSource, "before");
+  // A correction wins.
+  Towing.mark(recs, { tow2: false });
+  assert.equal(recs.find((r) => r.id === "tow2").towing, false);
+  assert.equal(recs.find((r) => r.id === "tow2").towingSource, "you");
+});
+
+test("a truck that mostly tows still finds its unloaded trips", () => {
+  const { Towing } = load("route.js", "engine.js", "towing.js");
+  const recs = [1, 2, 3, 4].map((i) => truckTrip(`t${i}`, 3.3 + i * 0.05, i * 1e8)).concat([truckTrip("u1", 2.0, 9e8), truckTrip("u2", 2.1, 10e8)]);
+  Towing.mark(recs, {});
+  assert.deepEqual(recs.filter((r) => r.towing).map((r) => r.id).sort(), ["t1", "t2", "t3", "t4"]);
+});
+
+test("nothing to compare with, or no engine data: not towing", () => {
+  const { Towing } = load("route.js", "engine.js", "towing.js");
+  const recs = [truckTrip("only", 3.0, 1), { id: "civic", deviceId: "d2", status: "stopped", startedWallMs: 5, meta: { vehicle: "2016 Honda Civic" } }];
+  Towing.mark(recs, {});
+  assert.deepEqual(recs.map((r) => r.towing), [false, false]);
+});
+
+test("each trip is costed with its driver's time and its vehicle's per-mile costs", () => {
+  const { Costs } = load("route.js", "engine.js", "costs.js");
+  Costs.use({ timePerHour: 20, wearPerMile: 0.09 }, { "2016 Honda Civic": { wearPerMile: 0.08 } }, { dad: { timePerHour: 40 } });
+  const civic = Costs.forTrip({ userId: "me", meta: { vehicle: "2016 Honda Civic" } });
+  const truck = Costs.forTrip({ userId: "dad", meta: { vehicle: "2018 RAM 1500" } });
+  assert.equal(civic.wearPerMile, 0.08);
+  assert.equal(civic.timePerHour, 20); // no time of their own: the shared starting value
+  assert.equal(truck.timePerHour, 40);
+  assert.equal(truck.wearPerMile, 0.13); // a pickup's own starting point, not the sedan's
+  assert.ok(Costs.trip({ minutes: 60, miles: 50, gal: 2, price: 3 }, truck).total > Costs.trip({ minutes: 60, miles: 50, gal: 2, price: 3 }, civic).total);
 });

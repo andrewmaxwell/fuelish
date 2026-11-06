@@ -92,6 +92,10 @@ Android/data/app.fuelish/files/recordings/<id>/
                              `fuel_est_gs`, fuel g/s computed per airflow sample from the air-fuel target
                              read within the last second (0 in fuel cut), and `fuel_cut`, the share of
                              those samples in fuel cut.
+                             The server adds `fuelProfile` to each chunk with an engine summary when it's
+                             uploaded: seconds and grams of fuel per bin of speed and acceleration (see
+                             server/src/fuelprofile.ts). The trip list sums them per recording, and the web
+                             app compares a trip's with the same vehicle's other trips to tell towing.
                              If a sidecar is too big for the upload header, the phone drops a whole
                              summary (rows and format keys together) and lists it in `summaryOmitted`;
                              the web app rebuilds that chunk's summary from its raw data. A dropped track

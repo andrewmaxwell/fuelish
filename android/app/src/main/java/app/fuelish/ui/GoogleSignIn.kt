@@ -89,6 +89,7 @@ object GoogleSignIn {
                     json?.optString("deviceToken")?.takeIf { it.isNotBlank() }?.let { token ->
                         val cfg = JSONObject(Prefs.config(activity).json.toString()).put("deviceToken", token)
                         Prefs.saveConfig(activity, cfg.toString())
+                        Prefs.setSignInNeeded(activity, false)
                         // Whose trips this phone now records: new recordings upload as this person.
                         json.optJSONObject("user")?.let { u ->
                             Prefs.rememberUploadTarget(activity, UploadTarget.of(serverUrl, token, u.optString("id").ifEmpty { null }, u.optString("name").ifEmpty { null }))

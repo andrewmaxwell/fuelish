@@ -226,7 +226,15 @@ const Account = (() => {
 
   async function showInvite(code) {
     app.innerHTML = `<p class="muted loading">Loading…</p>`;
-    const info = await fetch(`/api/v1/invites/${encodeURIComponent(code)}`).then((r) => r.json()).catch(() => ({ usable: false }));
+    // A failed connection isn't an expired invite: say so, and offer to try again.
+    const info = await fetch(`/api/v1/invites/${encodeURIComponent(code)}`)
+      .then((r) => (r.ok ? r.json() : r.status >= 500 ? null : { usable: false }))
+      .catch(() => null);
+    if (!info) {
+      app.innerHTML = `<div class="card login"><h1>Couldn't open the invite</h1><p class="muted">The server didn't answer. Check the connection and try again; the invite is still fine.</p><p><button class="primary" id="inv-retry">Try again</button></p></div>`;
+      document.getElementById("inv-retry").onclick = () => showInvite(code);
+      return;
+    }
     const signedIn = await load();
     if (signedIn?.user) {
       app.innerHTML = `<div class="card login"><h1>You're already in</h1><p class="muted">You're signed in as ${esc(signedIn.user.name)}. This invite is for someone new.</p><p><a href="#/">Go to your trips →</a></p></div>`;
@@ -250,10 +258,11 @@ const Account = (() => {
             <li>Open the download and tap Install. The first time, Android asks to allow installs from Chrome.</li>
             <li>Open Fuelish and sign in with Google as ${who}. That's all.</li>
           </ol>
+          <p class="muted">If Google asks which account to use, choose ${who}. The invite only works for that address.</p>
           <p class="muted">Only want to look at trips on the web? <a href="#" id="web-signup">Sign up here instead</a></p>
           <div class="web-signup" hidden><div class="g-slot"></div></div>`
         : forEmail ? `
-          <p>To record drives, open this link on your Android phone. To see trips here, sign up with ${who}:</p>
+          <p>To record drives, open this link on your Android phone. To see trips here, sign up with ${who} (the invite only works for that address):</p>
           <div class="g-slot"></div>`
         : `<div class="g-slot"></div>
           ${inApp() ? "" : onAndroid()
@@ -417,6 +426,9 @@ const Account = (() => {
     });
   }
 
-  return { load, forget, whoParam, whoFor, setWho, renderHeader, showLogin, showInvite, showAccount, nativeDone, signOut, inApp };
+  /** The signed-in person's id, or null. */
+  const meId = () => me?.user?.id ?? null;
+
+  return { load, forget, meId, whoParam, whoFor, setWho, renderHeader, showLogin, showInvite, showAccount, nativeDone, signOut, inApp };
 })();
 window.Account = Account;

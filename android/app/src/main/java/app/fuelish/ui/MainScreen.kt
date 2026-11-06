@@ -49,7 +49,15 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.fuelish.Prefs
 import app.fuelish.RecorderService
 import app.fuelish.RecorderState
+import app.fuelish.VehicleNaming
 import app.fuelish.auto.CarBluetooth
+import app.fuelish.obd.AdapterCheck
+import app.fuelish.obd.BluetoothSppTransport
+import android.bluetooth.BluetoothManager
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import app.fuelish.upload.UploadWorker
 import kotlinx.coroutines.delay
 import java.text.DateFormat
@@ -83,16 +91,19 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
         }
     }
     val cfg = remember(refresh) { Prefs.config(ctx) }
-    val missing = remember(refresh) { PERMISSIONS.filter { ctx.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED } }
-    val batteryOk = remember(refresh) { pm.isIgnoringBatteryOptimizations(ctx.packageName) }
-    val bgLocationOk = remember(refresh) { CarBluetooth.canStartInBackground(ctx) }
+    val ready = remember(refresh) { Readiness.of(ctx) }
+    val missing = ready.missingPermissions
+    val batteryOk = ready.battery
+    val bgLocationOk = ready.background
     var storage by remember { mutableLongStateOf(0L) }
     LaunchedEffect(refresh) { storage = Prefs.store(ctx).bytesUsed() }
 
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresh++ }
-    val bgLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { refresh++ }
+    var askedBg by remember { mutableStateOf(false) }
+    val bgLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { askedBg = true; refresh++ }
 
-    val locationOk = Manifest.permission.ACCESS_FINE_LOCATION !in missing
+    val locationOk = ready.location
+    // Has an upload key; [ready.signedIn] also needs the server to still accept it.
     val serverOk = cfg.serverUrl.isNotBlank() && cfg.deviceToken.isNotBlank()
     val auto = cfg.auto
     val autoOn = auto.optBoolean("enabled") && auto.optString("carAddress").isNotBlank()
@@ -128,8 +139,45 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
         var askedPerms by remember { mutableStateOf(false) }
         val carName = auto.optString("carName")
         fun save(change: org.json.JSONObject.() -> Unit) {
-            runCatching { Prefs.saveConfig(ctx, org.json.JSONObject(cfg.json.toString()).apply(change).toString()) }
+            runCatching { Prefs.saveConfig(ctx, org.json.JSONObject(Prefs.config(ctx).json.toString()).apply(change).toString()) }
             refresh++
+        }
+        val scope = rememberCoroutineScope()
+        var testing by remember { mutableStateOf(false) }
+        var test by remember { mutableStateOf<AdapterCheck.Result?>(null) }
+        val obdAddr = cfg.obd.optString("deviceAddress")
+        fun runTest() {
+            testing = true
+            test = null
+            scope.launch {
+                val r = withContext(Dispatchers.IO) {
+                    try {
+                        BluetoothSppTransport.connect(ctx, obdAddr).use { AdapterCheck.run(it) }
+                    } catch (e: Exception) {
+                        AdapterCheck.Result(
+                            false,
+                            problem = "Couldn't connect to ${cfg.obd.optString("deviceName").ifBlank { "the adapter" }}. " +
+                                "Check it's plugged in with the car on (press its button if it has one), and that it shows as paired in Bluetooth settings.",
+                        )
+                    }
+                }
+                test = r
+                testing = false
+                if (r.ok) Prefs.setAdapterChecked(ctx, obdAddr)
+                // Parked at home on Wi-Fi is a good time to name the car from its VIN.
+                if (r.vin.isNotEmpty()) withContext(Dispatchers.IO) { VehicleNaming.lookUp(ctx, r.vin) }
+                refresh++
+            }
+        }
+        var pickingCar by remember { mutableStateOf(false) }
+        val bonded = remember(refresh, missing) {
+            if (Manifest.permission.BLUETOOTH_CONNECT in missing) emptyList()
+            else @SuppressLint("MissingPermission") {
+                ctx.getSystemService(BluetoothManager::class.java)?.adapter?.bondedDevices
+                    ?.filter { !it.address.equals(obdAddr, ignoreCase = true) }
+                    ?.sortedWith(compareBy({ !CarBluetooth.looksLikeCar(it) }, { (it.name ?: "").lowercase() }))
+                    ?.map { (it.name ?: "Unnamed device") to it.address } ?: emptyList()
+            }
         }
 
         val steps = buildList {
@@ -137,8 +185,12 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
                 add(Step(false, "Upload server", "", "Where recordings are sent.", "Set up", openSettings))
             } else {
                 add(Step(
-                    serverOk, "Sign in", Prefs.uploadTarget(ctx).accountName ?: "Signed in",
-                    signInError.ifEmpty { "Use the Google account you were invited with. Your drives upload as yours and show up on the Trips page." },
+                    ready.signedIn, if (ready.signInNeeded) "Sign in again" else "Sign in", Prefs.uploadTarget(ctx).accountName ?: "Signed in",
+                    signInError.ifEmpty {
+                        if (ready.signInNeeded) "The server stopped accepting this phone's uploads (it was signed out or removed on the Account page). " +
+                            "Sign in again to resume. Recordings on this phone are kept and upload afterward."
+                        else "Use the Google account you were invited with. Your drives upload as yours and show up on the Trips page."
+                    },
                     if (signingIn) null else "Sign in with Google",
                     {
                         signingIn = true
@@ -164,16 +216,35 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
                     }
                 } else null,
             ))
-            add(Step(
-                obdChosen || skippedAdapter, "OBD adapter",
-                if (obdChosen) cfg.obd.optString("deviceName") else "None: phone sensors only",
-                pairProblem.ifEmpty {
-                    "Plug the adapter into the port under the steering wheel, turn the car on, and press the adapter's button. " +
-                        "It reads the engine, for real fuel numbers."
-                },
-                "Find adapter", { pairProblem = ""; pair() },
-                skip = "I don't have one" to { Prefs.setSkippedAdapter(ctx, true); refresh++ },
-            ))
+            if (!obdChosen) {
+                add(Step(
+                    skippedAdapter, "OBD adapter", "None: phone sensors only",
+                    pairProblem.ifEmpty {
+                        "Plug the adapter into the port under the steering wheel, turn the car on, and press the adapter's button. " +
+                            "It reads the engine, for real fuel numbers."
+                    },
+                    "Find adapter", { pairProblem = ""; pair() },
+                    skip = "I don't have one" to { Prefs.setSkippedAdapter(ctx, true); refresh++ },
+                ))
+            } else {
+                // Choosing it isn't proof it works: a parked test confirms the adapter and the car answer.
+                val name = cfg.obd.optString("deviceName").ifBlank { "the adapter" }
+                val tested = Prefs.adapterChecked(ctx).equals(obdAddr, ignoreCase = true)
+                add(Step(
+                    ready.adapterDone, "OBD adapter", if (tested) "$name · tested" else "$name · not tested yet",
+                    "With the car on (engine running is best), test $name: Fuelish checks that the adapter and the car answer and which fuel readings the car gives.",
+                    if (testing) null else if (test == null) "Test connection" else "Test again", ::runTest,
+                    skip = if (testing) null else "Test on my first drive" to { Prefs.setAdapterTestSkipped(ctx, obdAddr); refresh++ },
+                    extra = {
+                        if (testing) Muted("Testing… this takes up to 20 seconds.", Modifier.padding(top = 8.dp))
+                        test?.let { AdapterResult(it) }
+                        if (!testing && test?.ok != true) {
+                            TextButton(onClick = { pairProblem = ""; test = null; pair() }) { Text("Choose a different adapter") }
+                            if (pairProblem.isNotEmpty()) Muted(pairProblem)
+                        }
+                    },
+                ))
+            }
             add(Step(
                 batteryOk, "Battery", "Unrestricted",
                 "So Android doesn't stop a recording or an upload while the screen is off.",
@@ -199,11 +270,43 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
                     },
                 ))
             }
+            add(Step(
+                ready.modeChosen, "How recording starts",
+                if (autoOn) "By itself, when the phone connects to $carName" else "You tap Start and Stop",
+                if (!pickingCar) "Fuelish can start recording by itself when your phone connects to the car's Bluetooth (for music or calls), and stop after you park. " +
+                    "Or you can start and stop each drive yourself."
+                else "Which one is your car? Pick what your phone connects to in the car.",
+                if (pickingCar) null else "Automatically", { pickingCar = true },
+                skip = if (pickingCar) "Back" to { pickingCar = false } else "I'll start and stop it myself" to { Prefs.setRecordMode(ctx, "manual"); refresh++ },
+                extra = if (!pickingCar) null else {
+                    {
+                        bonded.forEach { (name, addr) ->
+                            RadioRow(false, name, null) {
+                                save { getJSONObject("auto").put("enabled", true).put("carAddress", addr).put("carName", name) }
+                                Prefs.setRecordMode(ctx, "auto")
+                                pickingCar = false
+                            }
+                        }
+                        Muted(if (bonded.isEmpty()) "Your phone isn't paired with anything yet. " else "Not listed? " +
+                            "Pair the phone with the car in Bluetooth settings (the car's screen walks you through it), then come back.")
+                        TextButton(onClick = { ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }) { Text("Bluetooth settings") }
+                    }
+                },
+            ))
             if (autoOn) {
                 add(Step(
                     bgLocationOk, "Location all the time", "Allowed",
                     "Choose \"Allow all the time\" so recording can start by itself when your phone connects to $carName.",
                     "Allow", { bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) },
+                    // Android stops showing the request after it's been turned down; settings always works.
+                    extra = if (askedBg && !bgLocationOk) {
+                        {
+                            Muted("In Fuelish's settings, tap Permissions › Location › Allow all the time.", Modifier.padding(top = 8.dp))
+                            TextButton(onClick = {
+                                ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName)))
+                            }) { Text("Open Fuelish's settings") }
+                        }
+                    } else null,
                 ))
             }
         }
@@ -237,6 +340,7 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
                     Button(onClick = {
                         save { getJSONObject("auto").put("enabled", true).put("carAddress", suggestion.second).put("carName", suggestion.first) }
                         Prefs.answerAutoSuggestion(ctx, true)
+                        Prefs.setRecordMode(ctx, "auto")
                         if (!bgLocationOk) bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                     }) { Text("Yes, record automatically") }
                     TextButton(onClick = { Prefs.answerAutoSuggestion(ctx, false); refresh++ }) { Text("No thanks") }
@@ -260,6 +364,7 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
                 when {
                     !waiting -> "Everything is on the server"
                     !uploadsOn -> "$what recorded on this phone; uploads are turned off"
+                    ready.signInNeeded -> "$what will upload after you sign in again"
                     !serverOk -> "$what will upload once the server is set up"
                     up.running -> "Uploading $what…"
                     onWifi || cfg.upload.optBoolean("allowCellular") -> "$what waiting to upload"
@@ -285,7 +390,7 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
                 Muted("Last upload: " + up.lastResult + " (" + DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(up.lastAtMs)) + ")")
             }
             Muted("On this phone: ${mb(storage)}." + if (cfg.upload.optBoolean("deleteAfterUpload", true)) " Deleted once the server confirms it has everything." else " Kept after upload (keep-local-copy is on).")
-            if (waiting && serverOk && uploadsOn) {
+            if (waiting && ready.signedIn && uploadsOn) {
                 Spacer(Modifier.height(4.dp))
                 OutlinedButton(onClick = { UploadWorker.enqueue(ctx, cellular = true) }) {
                     Text(if (onWifi) "Upload now" else "Upload now over mobile data")
@@ -359,8 +464,8 @@ private fun IdleCard(locationOk: Boolean, autoOn: Boolean, carName: String, stop
         Muted(
             when {
                 !locationOk -> "Grant permissions above to start recording."
-                autoOn -> "Starts automatically when your phone connects to $carName."
-                else -> "Tap Start, or let Fuelish start by itself whenever you get in the car."
+                autoOn -> "The next recording starts by itself when your phone connects to $carName, and stops shortly after you park."
+                else -> "Tap Start recording when you set off, and Stop recording when you get there. Or let Fuelish start by itself whenever you get in the car."
             },
         )
         if (locationOk && !autoOn) TextButton(onClick = openSettings) { Text("Set up auto-record") }
@@ -486,5 +591,37 @@ private fun CurrentStep(s: Step) {
                 s.skip?.let { (label, run) -> TextButton(onClick = run) { Text(label) } }
             }
         }
+    }
+}
+
+/** What the adapter test found, one line per check, in plain words. */
+@Composable
+private fun AdapterResult(r: AdapterCheck.Result) {
+    val bad = MaterialTheme.colorScheme.error
+    val good = MaterialTheme.colorScheme.primary
+    @Composable
+    fun check(ok: Boolean?, text: String) {
+        Text(
+            (if (ok == true) "✓  " else if (ok == false) "✗  " else "–  ") + text,
+            color = if (ok == false) bad else if (ok == true) good else Color.Unspecified,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+    Column(Modifier.padding(top = 8.dp)) {
+        check(r.adapterOk, if (r.adapterOk) "Adapter connected" + (if (r.adapterName.isNotBlank()) " (${r.adapterName})" else "") else "Adapter didn't connect")
+        if (r.adapterOk) check(r.carOk, if (r.carOk) "Car is answering" else "Car isn't answering")
+        if (r.carOk) {
+            check(r.vin.isNotEmpty().takeIf { it }, if (r.vin.isNotEmpty()) "Vehicle identified (VIN ${r.vin})" else "The car didn't give its VIN; type the vehicle in Settings")
+            check(
+                r.fuel != AdapterCheck.Fuel.NONE,
+                when (r.fuel) {
+                    AdapterCheck.Fuel.REPORTED -> "Fuel use: the car reports it"
+                    AdapterCheck.Fuel.AIRFLOW -> "Fuel use: worked out from the airflow sensor"
+                    else -> "This car doesn't give the readings fuel use is worked out from. Trips still get route, time and cost of time, but no gallons or mpg."
+                },
+            )
+        }
+        if (r.problem.isNotEmpty()) Text(r.problem, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
+        if (r.ok) Muted("All set.")
     }
 }

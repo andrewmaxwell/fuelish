@@ -75,8 +75,9 @@ const Repeats = (() => {
     for (const r of recs.filter(moved)) {
       const a = placeOf(pl, r.trip.path[0]), b = placeOf(pl, r.trip.path.at(-1));
       if (!a || !b) continue;
-      const k = `${a.id}>${b.id}`;
-      (by.get(k) || by.set(k, { from: a, to: b, trips: [] }).get(k)).trips.push(r);
+      // Towing trips are their own journey: pulling a trailer isn't a fair race against driving unloaded.
+      const k = `${a.id}>${b.id}${r.towing ? "|tow" : ""}`;
+      (by.get(k) || by.set(k, { from: a, to: b, towing: !!r.towing, trips: [] }).get(k)).trips.push(r);
     }
     const out = [];
     const finish = (j, routes) => {
@@ -103,7 +104,7 @@ const Repeats = (() => {
 
   const journeyOf = (js, id) => js.find((j) => j.key === id || j.trips.some((r) => r.id === id));
   const routeOf = (j, id) => j.routes.find((v) => v.trips.some((r) => r.id === id));
-  const title = (j) => (j.loop ? `Loop from ${j.from.name} (${j.routes[0].miles.toFixed(1)} mi)` : `${j.from.name} → ${j.to.name}`);
+  const title = (j) => (j.loop ? `Loop from ${j.from.name} (${j.routes[0].miles.toFixed(1)} mi)` : `${j.from.name} → ${j.to.name}`) + (j.towing ? " (towing)" : "");
 
   function median(xs) {
     const s = xs.filter((x) => x != null && Number.isFinite(x)).sort((a, b) => a - b);
@@ -142,7 +143,7 @@ const Repeats = (() => {
     const mpgGuess = median(rows.map((x) => x.mpg));
     const price = median(rows.map((x) => x.price));
     for (const x of rows) {
-      const c = Costs.trip({ minutes: x.minutes, miles: x.miles, gal: x.gal, price: x.price ?? price, mpgGuess, fuelSource: x.e?.fuelSource, extrapolated: x.e?.extrapolated });
+      const c = Costs.trip({ minutes: x.minutes, miles: x.miles, gal: x.gal, price: x.price ?? price, mpgGuess, fuelSource: x.e?.fuelSource, extrapolated: x.e?.extrapolated }, Costs.forTrip(x.r));
       x.total = c.fuelKnown ? c.total : null;
       x.cost = c;
       x.estimated = c.estimated;

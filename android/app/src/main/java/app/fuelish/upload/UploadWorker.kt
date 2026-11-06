@@ -14,6 +14,7 @@ import androidx.work.WorkerParameters
 import app.fuelish.Prefs
 import app.fuelish.RecorderService
 import app.fuelish.RecorderState
+import app.fuelish.VehicleNaming
 import java.util.concurrent.TimeUnit
 
 class UploadWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
@@ -41,8 +42,14 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params)
             is UploadResult.Done -> "ok ($total chunks)"
             is UploadResult.Incomplete -> "the server is missing parts of ${result.missing.size} recording${if (result.missing.size == 1) "" else "s"} this phone no longer has"
             is UploadResult.Retry -> "will retry: ${result.message}"
-            is UploadResult.Fatal -> "failed: ${result.message}"
+            is UploadResult.Fatal -> if (result.signInNeeded) "signed out: sign in again to resume uploads" else "failed: ${result.message}"
         }
+        // A rejected key means signing in again; anything that got through means the key works.
+        when {
+            result is UploadResult.Fatal && result.signInNeeded -> Prefs.setSignInNeeded(applicationContext, true)
+            result is UploadResult.Done || result is UploadResult.Incomplete -> Prefs.setSignInNeeded(applicationContext, false)
+        }
+        VehicleNaming.retry(applicationContext)
         up.value = UploadStatus(
             running = false, lastResult = text, lastAtMs = System.currentTimeMillis(), pending = store.pendingChunkCount(),
             unconfirmed = store.unconfirmed(RecorderService.activeId).size, attention = store.needsAttention(),

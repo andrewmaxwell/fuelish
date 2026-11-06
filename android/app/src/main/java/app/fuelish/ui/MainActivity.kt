@@ -73,9 +73,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         web = TripsWeb(this) { invite, legacy -> signIn(invite, legacy) }
-        // Until the server is set and location is granted, the recorder's setup is what matters.
-        recorderOpen = savedInstanceState?.getBoolean("recorderOpen")
-            ?: (Prefs.config(this).serverUrl.isBlank() || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
+        // Until setup is finished (every step, not just location), the recorder's setup is what matters.
+        recorderOpen = savedInstanceState?.getBoolean("recorderOpen") ?: (Readiness.of(this).gap != null)
         settingsOpen = savedInstanceState?.getBoolean("settingsOpen") ?: false
         handleIntent(intent)
         enableEdgeToEdge()
@@ -296,7 +295,17 @@ private fun RecorderStrip(refreshKey: Any, open: () -> Unit) {
         onPauseOrDispose { }
     }
     val cfg = remember(st.recording, st.stopping, refreshKey, resumed) { Prefs.config(ctx) }
-    val locationOk = ctx.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    // Permissions can change in system settings while the app is open: re-check every so often too.
+    var tick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(5000)
+            tick++
+        }
+    }
+    val ready = remember(st.recording, st.stopping, refreshKey, resumed, tick, up.lastAtMs) { Readiness.of(ctx) }
+    val locationOk = ready.location
+    val gap = ready.gap
     val auto = cfg.auto
     val autoOn = auto.optBoolean("enabled") && auto.optString("carAddress").isNotBlank()
     val err = MaterialTheme.colorScheme.error
@@ -305,14 +314,15 @@ private fun RecorderStrip(refreshKey: Any, open: () -> Unit) {
         st.recording && st.stopping -> null to "Saving recording…"
         st.recording -> err to "Recording " + elapsed((now - st.startedElapsedNs) / 1_000_000_000)
         st.stopping -> null to "Saving recording…"
-        !locationOk -> err to "Recorder needs setup"
+        gap != null -> err to "Recorder needs setup"
         else -> null to "Not recording"
     }
     val detail = when {
         st.recording -> st.problems.firstOrNull() ?: if (st.trigger != RecorderService.TRIGGER_MANUAL) "stops on its own after you park" else "tap to stop"
+        ready.signInNeeded -> "signed out: tap to sign in again"
         up.running -> "uploading…"
         up.pending > 0 -> "${up.pending} part${if (up.pending == 1) "" else "s"} to upload"
-        !locationOk -> "tap to finish"
+        gap != null -> "tap to $gap"
         autoOn -> "starts with ${auto.optString("carName")}"
         Prefs.autoSuggestion(ctx) != null -> "tap to record every drive by itself"
         else -> "tap to start"

@@ -675,3 +675,6 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 .drive-row:hover, .drive-row:focus-visible { background: var(--accent-soft); }
 /* A stop in the middle of a drive: inside its dotted line. */
 .place-row.along { margin: -6px 0 0 4px; padding: 6px 0 4px 16px; border-left: 2px dotted var(--axis); grid-template-columns: calc(9.5em - 22px) 1fr; }
+.ins-tow { margin: 0 0 16px; max-width: 360px; }
+.cost-form h3 { grid-column: 1 / -1; margin: 8px 0 -6px; font-size: 15px; }
+.towing-nav button.link { white-space: nowrap; }

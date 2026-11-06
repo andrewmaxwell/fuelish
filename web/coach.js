@@ -6,7 +6,7 @@
 // and fuelGs), the Engine.summary of those rows, and the vehicle name.
 
 const Coach = (() => {
-  const { J_PER_GAL, ENGINE_EFF, CRR, CDA, AIR, massKg } = Engine.physics;
+  const { J_PER_GAL, ENGINE_EFF, CRR, AIR, body } = Engine.physics;
   const G = 9.80665;
   const MPS_PER_MPH = 0.44704;
   const M_PER_MI = 1609.344;
@@ -18,8 +18,8 @@ const Coach = (() => {
   // would slow a coasting car. Each one's energy beyond coasting is turned into the gas it took to
   // build that speed (the same estimate as Engine.summary, on GPS so it can be placed on the map).
   // Returns { galEq, events: [{ i, peakI, fromMph, toMph, peakG, galEq }] } with events largest first.
-  function braking(pts, vehicle = "") {
-    const mass = massKg(vehicle);
+  function braking(pts, vehicle = "", towing = false) {
+    const { mass, cda } = body(vehicle, towing);
     const events = [];
     let cur = null, calm = 0;
     const close = () => { if (cur && cur.j > 0) events.push(cur); cur = null; };
@@ -27,7 +27,7 @@ const Coach = (() => {
       const p = pts[k - 1], q = pts[k], dt = (q.t - p.t) / 1000;
       if (q.trip !== p.trip || dt <= 0 || dt > 2.5 || p.v == null || q.v == null) { close(); continue; }
       const vm = (p.v + q.v) / 2, decel = (p.v - q.v) / dt;
-      const coast = G * CRR + (0.5 * AIR * CDA * vm * vm) / mass;
+      const coast = G * CRR + (0.5 * AIR * cda * vm * vm) / mass;
       if (decel > coast) {
         if (!cur) cur = { i: k - 1, peakI: k, fromV: p.v, toV: q.v, peak: 0, j: 0 };
         cur.j += mass * (decel - coast) * vm * dt;
@@ -55,7 +55,7 @@ const Coach = (() => {
   // slower speed saves. Too little steady driving, or a fit that says faster is free (hills and
   // wind can do that on one drive), falls back to the drag physics with a 33% efficient engine at
   // highway load. Returns { b, source: "drive" | "physics" }.
-  function speedCurve(rows) {
+  function speedCurve(rows, cda = Engine.physics.CDA) {
     const bins = new Map();
     for (let i = 2; i < rows.length - 2; i++) {
       const r = rows[i], a = rows[i - 2], c = rows[i + 2];
@@ -69,7 +69,7 @@ const Coach = (() => {
       b.secs++; b.mi += v / M_PER_MI; b.gal += galOf(r.fuelGs); b.v2 += v * v;
     }
     const pts = [...bins.values()].filter((b) => b.secs >= 30).map((b) => ({ x: b.v2 / b.secs, y: b.gal / b.mi, w: b.secs }));
-    const physics = { b: (0.5 * AIR * CDA * M_PER_MI) / (J_PER_GAL * 0.33), source: "physics" };
+    const physics = { b: (0.5 * AIR * cda * M_PER_MI) / (J_PER_GAL * 0.33), source: "physics" };
     if (pts.length < 3) return physics;
     const span = Math.sqrt(Math.max(...pts.map((p) => p.x))) - Math.sqrt(Math.min(...pts.map((p) => p.x)));
     if (span < 15 * MPS_PER_MPH) return physics;
@@ -113,11 +113,11 @@ const Coach = (() => {
   //   idle     standstills of a minute or more, past their first 10 s (about what a restart uses)
   const SOFT_G = 0.08, HARD_G = 0.2, LONG_IDLE_MS = 60000, RESTART_MS = 10000;
   const abruptness = (avgG) => Math.min(1, Math.max(0, (avgG - SOFT_G) / (HARD_G - SOFT_G)));
-  function breakdown({ pts, rows, e, vehicle = "", targetMph = 65 }) {
-    const br = braking(pts || [], vehicle);
+  function breakdown({ pts, rows, e, vehicle = "", towing = false, targetMph = 65 }) {
+    const br = braking(pts || [], vehicle, towing);
     const events = br.events.map((ev) => ({ ...ev, abruptGalEq: ev.galEq * abruptness(ev.avgG) }))
       .filter((ev) => ev.abruptGalEq > 0).sort((a, b) => b.abruptGalEq - a.abruptGalEq);
-    const curve = rows?.length ? speedCurve(rows) : null;
+    const curve = rows?.length ? speedCurve(rows, body(vehicle, towing).cda) : null;
     return {
       braking: { gal: events.reduce((s, ev) => s + ev.abruptGalEq, 0), total: br.galEq, events, count: events.length, all: br.events.length },
       speed: curve ? slowerCruise(rows, targetMph, curve) : null,
@@ -131,8 +131,8 @@ const Coach = (() => {
   // ---------- the card ----------
 
   // Lines worth showing, largest first. `price` ($/gal) may be null: amounts are then in gallons.
-  function items({ pts, rows, e, vehicle = "", price = null, targetMph = 65 }) {
-    const b = breakdown({ pts, rows, e, vehicle, targetMph });
+  function items({ pts, rows, e, vehicle = "", towing = false, price = null, targetMph = 65 }) {
+    const b = breakdown({ pts, rows, e, vehicle, towing, targetMph });
     const out = [];
     const worth = (gal) => (price != null ? gal * price >= 0.03 : gal >= 0.008);
     if (b.braking.count && worth(b.braking.gal)) {
@@ -155,10 +155,10 @@ const Coach = (() => {
   // Only what the driver controls counts, so a city errand and a highway run, or a truck and a
   // sedan, are scored on the same terms. Returns null without engine readings over most of the
   // drive (`minCoverage`).
-  function score({ pts, rows, e, vehicle = "", targetMph = 65, minCoverage = 0.9 }) {
+  function score({ pts, rows, e, vehicle = "", towing = false, targetMph = 65, minCoverage = 0.9 }) {
     const gal = e?.galTrip ?? e?.gal;
     if (!gal || gal <= 0 || !(e.coverage >= minCoverage)) return null;
-    const b = breakdown({ pts, rows, e, vehicle, targetMph });
+    const b = breakdown({ pts, rows, e, vehicle, towing, targetMph });
     const parts = { braking: b.braking.gal, speed: b.speed?.gal ?? 0, rich: b.rich, idle: b.idle.gal };
     const waste = Math.min(gal, parts.braking + parts.speed + parts.rich + parts.idle);
     return { score: Math.round(100 * (1 - waste / gal)), gal, waste, parts, targetMph };

@@ -209,6 +209,24 @@ describe("input checks", () => {
     expect(t.routeGaps).toBe(1);
   });
 
+  it("lists each trip's fuel profile, from its chunks' engine summaries", async () => {
+    await call("/recordings/r11", { method: "PUT", headers: DEVICE, body: JSON.stringify({ id: "r11", deviceId: "dev11", status: "recording", startedWallMs: 4 }) });
+    const send = async (seq: number, m: object) => {
+      const body = await gzip(`{"seq":${seq}}\n`);
+      return call(`/recordings/r11/chunks/${seq}`, { method: "PUT", headers: { ...DEVICE, "X-Fuelish-Sha256": await sha(body), "X-Fuelish-Meta": b64url(JSON.stringify(m)) }, body });
+    };
+    // Steady 55 km/h, 2 g/s, warm; then a cold second that doesn't count; then idling that doesn't either.
+    const rows = (t0: number, n: number, speed: number, coolant: number) =>
+      Array.from({ length: n }, (_, i) => [t0 + i * 1000, speed, 2, coolant]);
+    const engine = { engineFormat: 1, engineCols: ["speed", "fuel_est_gs", "coolant_temp"], fuelProfile: { fake: true } };
+    expect((await send(0, { ...engine, engine: rows(0, 11, 55, 90) })).status).toBe(201);
+    expect((await send(1, { ...engine, engine: [...rows(20000, 3, 55, 40), ...rows(60000, 3, 0, 90)] })).status).toBe(201);
+    const r: any = await (await call("/recordings", { headers: WEB })).json();
+    expect(r.recordings.find((x: any) => x.id === "r11").fuelProfile).toEqual({ v: 1, b: { "5|1": [10, 20] } });
+    // Trips with no engine data have none.
+    expect(r.recordings.find((x: any) => x.id === "r10").fuelProfile).toBeNull();
+  });
+
   it("keeps listing trips when one stored track is damaged", async () => {
     await call("/recordings/r9", { method: "PUT", headers: DEVICE, body: JSON.stringify({ id: "r9", deviceId: "dev9", status: "recording", startedWallMs: 2 }) });
     // As if stored before tracks were checked.
@@ -250,6 +268,14 @@ describe("prefs", () => {
     expect((await call("/prefs/costs", { method: "PUT", headers: WEB, body: JSON.stringify({ timePerHour: -1 }) })).status).toBe(400);
     expect((await call("/prefs/costs", { method: "PUT", headers: WEB, body: JSON.stringify({ timePerHour: 25 }) })).status).toBe(200);
     expect((await call("/prefs/whatever", { method: "PUT", headers: WEB, body: "{}" })).status).toBe(400);
+    const put = (k: string, v: unknown) => call(`/prefs/${k}`, { method: "PUT", headers: WEB, body: JSON.stringify(v) });
+    expect((await put("vehicles", { "2019 RAM 1500": { wearPerMile: 0.13, valuePerMile: 0.1 } })).status).toBe(200);
+    expect((await put("vehicles", { "2019 RAM 1500": { tires: 1 } })).status).toBe(400);
+    expect((await put("vehicles", { "": { wearPerMile: 1 } })).status).toBe(400);
+    expect((await put("people", { u1: { timePerHour: 30 } })).status).toBe(200);
+    expect((await put("people", { u1: { timePerHour: -3 } })).status).toBe(400);
+    expect((await put("towing", { rec1: true, rec2: false })).status).toBe(200);
+    expect((await put("towing", { rec1: "yes" })).status).toBe(400);
     const got: any = await (await call("/prefs", { headers: WEB })).json();
     expect(got.prefs.places).toEqual(places);
     expect(got.prefs.costs).toEqual({ timePerHour: 25 });

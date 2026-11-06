@@ -235,6 +235,11 @@ export async function signIn(
       if (inv.used_by || inv.revoked_at_ms != null || inv.expires_at_ms < now) {
         throw new AuthError(403, "That invite link has been used or has expired. Ask for a new one.");
       }
+      // An invite made for one Google address only lets that address in: picking the wrong account in
+      // Google's chooser mustn't use it up.
+      if (inv.email && String(inv.email).toLowerCase() !== google.email.toLowerCase()) {
+        throw new AuthError(403, `This invite is for ${inv.email}, but you picked ${google.email}. Sign in again and choose ${inv.email}.`);
+      }
       await env.DB.prepare("INSERT INTO users (id, google_sub, email, name, picture, is_admin, created_at_ms) VALUES (?, ?, ?, ?, ?, 0, ?)")
         .bind(id, google.sub, google.email, google.name, google.picture, now)
         .run();

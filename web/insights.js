@@ -340,7 +340,7 @@ const Insights = (() => {
     // mpg counts only miles that have fuel readings (fuelMiles); gas and cost are whole-drive.
     let miles = 0, fuelMiles = 0, gal = 0, galTrip = 0, cost = 0, idle = 0, idleCost = 0, priced = true;
     for (const t of trips) {
-      const e = Engine.summary(t.rows, { vehicle: t.r.meta.vehicle, ...t.scope });
+      const e = Engine.summary(t.rows, { vehicle: t.r.meta.vehicle, towing: !!t.r.towing, ...t.scope });
       miles += e.miles;
       if (e.gal != null) {
         gal += e.gal;
