@@ -337,11 +337,11 @@ async function showList() {
 
 // ---------- scores on the cards ----------
 
-// Each card's score is worked out from its engine data once the card scrolls into view (a few at a
-// time), then remembered in this browser, keyed by the recordings, their last update, the cruising
+// Each card's score and gas cost are worked out from its engine data once the card scrolls into view
+// (a few at a time), then remembered in this browser, keyed by the recordings, their last update, the cruising
 // speed and SCORE_VERSION (bump it when the score's method changes). Cards without enough engine
-// data show no ring.
-const SCORE_VERSION = 1;
+// data show no ring and no cost.
+const SCORE_VERSION = 2;
 const scoreJobs = new Map(); // slot key -> recordings
 function scoreSlot(recs) {
   recs = recs.filter((r) => r.trip || r.routeGaps > 0); // what its page draws and scores
@@ -354,7 +354,15 @@ const scoreKey = (key) => `fuelish.score.v${SCORE_VERSION}:${coachTarget()}:${ke
 function readScore(key) {
   try { const v = localStorage.getItem(scoreKey(key)); return v == null ? undefined : JSON.parse(v); } catch { return undefined; }
 }
-function showScore(el, n) {
+function showScore(el, f) {
+  // Version 1 kept the score alone.
+  const n = typeof f === "number" ? f : f?.score;
+  const cost = el.closest(".trip-card")?.querySelector(".card-cost");
+  if (cost && f?.cost != null) {
+    cost.hidden = false;
+    cost.title = `${f.approx ? "About " : ""}${gallons(f.gal)} gal of gas at ${money(f.price)}/gal, the regional average that week`;
+    cost.innerHTML = `<b>${f.approx ? "≈" : ""}${money(f.cost)}</b> gas`;
+  }
   if (n == null) return;
   el.hidden = false;
   el.className = `card-score ${scoreTone(n)}`;
@@ -368,7 +376,7 @@ function scoreCards(live) {
     while (running < 2 && queue.length) {
       const el = queue.shift(), key = el.dataset.score, recs = scoreJobs.get(key);
       running++;
-      driveScore(recs).then((n) => {
+      driveFigures(recs).then((n) => {
         // Still recording or uploading: show it, but work it out again next time.
         if (recs.every((r) => r.complete && r.status !== "recording")) { try { localStorage.setItem(scoreKey(key), JSON.stringify(n)); } catch {} }
         if (live()) showScore(el, n);
@@ -408,6 +416,7 @@ function tripCard(r) {
         ${moved(r) ? `<div class="trip-card-stats">
           <span><b>${miles(t.meters)}</b></span>
           <span><b>${fmtDur(t.movingMs)}</b> moving</span>
+          <span class="card-cost" hidden></span>
           <span>top <b>${Math.round(t.maxMps * Route.MPH)}</b> mph</span>
           ${r.routeGaps ? `<span class="muted" title="Part of this trip's route isn't summarized for the list; the trip page has all of it">partial</span>` : ""}
         </div>` : ""}
@@ -416,32 +425,26 @@ function tripCard(r) {
     </a>`;
 }
 
-// Several linked trips in one card: a combined outline, totals, then each leg and the stops between them.
+// Several linked trips in one card: a combined outline (stops between them dotted) and totals. Its
+// page lists each trip.
 function outingCard(o) {
   const t = totals(o), first = o[0], last = o.at(-1);
-  const href = `#/outing/${esc(first.id)}`;
-  const legs = o.map((r, i) => {
-    const gap = i ? `<li class="leg-stop">Stopped ${fmtDur(r.startedWallMs - endOf(o[i - 1]))}</li>` : "";
-    return `${gap}<li><a href="#/r/${esc(r.id)}">
-      <b>${esc(clock(r.startedWallMs))}</b>
-      <span>${moved(r) ? `${miles(r.trip.meters)} · ${fmtDur(r.trip.movingMs)}` : noRouteLabel(r).toLowerCase()}</span>
-      ${statusPill(r)}</a></li>`;
-  }).join("");
+  const pill = o.map(statusPill).find(Boolean) ?? "";
   return `
-    <div class="card trip-card outing-card">
-      <a class="thumb" href="${href}" aria-label="Map of this outing">${Charts.thumbnail(o.filter(moved).map((r) => r.trip.path)) || `<span class="muted">No GPS yet</span>`}${scoreSlot(o)}</a>
+    <a class="card trip-card outing-card" href="#/outing/${esc(first.id)}">
+      <div class="thumb">${Charts.thumbnail(o.filter(moved).map((r) => r.trip.path)) || `<span class="muted">No GPS yet</span>`}${scoreSlot(o)}</div>
       <div class="trip-card-body">
-        <a class="trip-card-title" href="${href}"><b>${esc(clock(first.startedWallMs))} – ${esc(clock(endOf(last)))}</b><span class="pill">${o.length} trips</span></a>
-        <div class="muted">${esc(outingName(first.startedWallMs))}</div>
+        <div class="trip-card-title"><b>${esc(clock(first.startedWallMs))} – ${esc(clock(endOf(last)))}</b>${pill}</div>
+        <div class="muted">${esc(outingName(first.startedWallMs))} · ${plural(legsOf(o).length - 1, "stop")}</div>
         ${t.trips ? `<div class="trip-card-stats">
           <span><b>${miles(t.meters)}</b></span>
           <span><b>${fmtDur(t.movingMs)}</b> moving</span>
+          <span class="card-cost" hidden></span>
           <span>top <b>${Math.round(t.maxMps * Route.MPH)}</b> mph</span>
           ${o.some((x) => x.routeGaps) ? `<span class="muted" title="Part of this outing's route isn't summarized for the list; each trip's page has all of it">partial</span>` : ""}
         </div>` : ""}
-        <ol class="legs">${legs}</ol>
       </div>
-    </div>`;
+    </a>`;
 }
 
 // ---------- points for a trip ----------
@@ -1241,14 +1244,22 @@ function coachTarget() {
   try { return Number(localStorage.getItem(COACH_KEY)) || 65; } catch { return 65; }
 }
 
-// The driving score of recordings taken as one drive, worked out the same way as on their page.
+// The driving score and gas cost of recordings taken as one drive, worked out the same way as on
+// their page: { score, gal, price, cost, approx } (approx: fuel readings don't cover all of it), or
 // null without enough engine data.
-async function driveScore(recs) {
+async function driveFigures(recs) {
   const d = await loadDrive(recs);
   if (!d.rows.length || d.pts.length < 2) return null;
   const vehicle = recs[0].meta.vehicle ?? "";
   const e = Engine.summary(d.rows, { vehicle, tripMiles: Route.summary(d.pts).miles, tripMs: d.drivingMs });
-  return Coach.score({ pts: d.pts, rows: d.rows, e, vehicle, targetMph: coachTarget() })?.score ?? null;
+  const score = Coach.score({ pts: d.pts, rows: d.rows, e, vehicle, targetMph: coachTarget() })?.score ?? null;
+  const gal = e.galTrip ?? e.gal, start = recs.find((r) => r.trip?.path?.length)?.trip.path[0];
+  const gas = gal != null ? await withTimeout(Gas.forTrip(start?.[0], start?.[1], recs[0].startedWallMs), 8000) : null;
+  return {
+    score, gal, price: gas?.price ?? null,
+    cost: gas ? gal * gas.price : null,
+    approx: e.coverage < 0.95 || !!e.extrapolated,
+  };
 }
 
 // The colored ring around a score: green from 90, amber from 75, red below.

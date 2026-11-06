@@ -76,7 +76,14 @@ const Charts = (() => {
     const fit = frame?.length ? frame : path;
     const [[x0, x1], [y0, y1]] = [extent(fit, (p) => p[1] * k), extent(fit, (p) => -p[0])];
     const pad = 18, span = Math.max(x1 - x0, y1 - y0, 1e-6);
-    const s = Math.min((w - 2 * pad) / Math.max(x1 - x0, span * 0.05), (h - 2 * pad) / Math.max(y1 - y0, span * 0.05));
+    // Degrees of latitude (and longitude × k) to miles.
+    const MI = 111320 / 1609.344;
+    // Size shows distance: a drive around the block is drawn small and a long one fills the frame,
+    // on a log scale from about a quarter of the frame at half a mile across to all of it at 25 miles.
+    // Thumbnails fitted to a shared `frame` are already on one scale.
+    const across = span * MI;
+    const size = frame ? 1 : Math.min(1, Math.max(0.28, 0.28 + (0.72 * Math.log(Math.max(across, 0.5) / 0.5)) / Math.log(50)));
+    const s = size * Math.min((w - 2 * pad) / Math.max(x1 - x0, span * 0.05), (h - 2 * pad) / Math.max(y1 - y0, span * 0.05));
     const ox = (w - (x1 - x0) * s) / 2, oy = (h - (y1 - y0) * s) / 2;
     const P = path.map((_, i) => [ox + (xs[i] - x0) * s, oy + (ys[i] - y0) * s]);
     let n = 0, d = "";
@@ -90,8 +97,13 @@ const Charts = (() => {
     const [sx, sy] = P[0], [ex, ey] = P[P.length - 1];
     // Where an outing stopped between trips: small dots.
     const mid = ends.slice(0, -1).map(([x, y]) => `<circle cx="${x}" cy="${y}" r="3.5" class="thumb-stop"/>`).join("");
+    // A scale bar in the corner: the roundest distance that draws between about 24 and 60 px.
+    const pxPerMi = s / MI;
+    const bar = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100].find((m) => m * pxPerMi >= 24) ?? 100;
+    const bw = bar * pxPerMi, bx = 12, by = h - 12;
+    const scale = `<g class="thumb-scale"><path d="M${bx},${by - 4}V${by}H${(bx + bw).toFixed(1)}V${by - 4}"/><text x="${(bx + bw + 5).toFixed(1)}" y="${by}">${bar} mi</text></g>`;
     return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
-      <path d="${d}" class="thumb-casing"/><path d="${d}" class="thumb-line"/>${mid}
+      ${scale}<path d="${d}" class="thumb-casing"/><path d="${d}" class="thumb-line"/>${mid}
       <circle cx="${sx}" cy="${sy}" r="5" class="thumb-start"/><circle cx="${ex}" cy="${ey}" r="5" class="thumb-end"/></svg>`;
   }
 
