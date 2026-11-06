@@ -25,6 +25,8 @@ const Ribbon = (() => {
   const PX_PER_GPM = 400; // ribbon width in px per gallon per mile (40 mpg is 10 px)
   const MAX_W = 60; // px; wider (a hard start from a light) is capped, and the legend says so
   const GAP = 3; // px between the route's center line and the ribbon
+  const SPREAD_PX = 14; // widths are spread along ±14 px of on-screen road (see _band)
+  const DIR_PX = 10; // the band's direction comes from ±10 px of road
 
   // Lanes from the route outward: what you can't help nearest, what you can furthest out.
   const CAUSES = [
@@ -227,8 +229,8 @@ const Ribbon = (() => {
           if (last >= 0 && (pts[i].trip !== pts[last].trip || pts[i].t - pts[last].t > 5000)) flush();
           last = i;
           const xy = map.latLngToContainerPoint([pts[i].lat, pts[i].lon]);
-          // Fixes closer than a few pixels add nothing but kinks at this zoom.
-          if (run.length && xy.distanceTo(run[run.length - 1].xy) < 3) continue;
+          // Every fix is kept (each carries its share of the band's ink); only ones on the same pixel are merged.
+          if (run.length && xy.distanceTo(run[run.length - 1].xy) < 0.5) continue;
           run.push({ xy, i });
         }
         flush();
@@ -249,16 +251,41 @@ const Ribbon = (() => {
         ctx.globalAlpha = 1;
       },
       // One unbroken stretch: lanes stacked to the right of the direction of travel.
+      //
+      // Drawing it tidily without changing what it says:
+      // - Widths are spread along the road over ±SPREAD_PX of screen distance (a normalized moving
+      //   average by distance, which moves ink along the road but neither adds nor removes any), so a
+      //   start from a stop shows as a swell, not a spike a few pixels long. In pixels, so zoomed out
+      //   it smooths more and zoomed in it shows the detail.
+      // - Direction comes from ±DIR_PX of road, so GPS wander at walking pace can't swing it around.
+      // - On a turn toward the band's side, the band can't be wider than the turn's radius or its
+      //   inner edge crosses itself and folds; there it's narrowed to fit (the one place ink is lost,
+      //   and only where a fold would have drawn it twice).
       _band(ctx, run) {
         const m = run.length;
+        const s = new Float64Array(m);
+        for (let k = 1; k < m; k++) s[k] = s[k - 1] + Math.hypot(run[k].xy.x - run[k - 1].xy.x, run[k].xy.y - run[k - 1].xy.y);
+        // Index ranges within ±r px of road around each point.
+        const span = (r) => {
+          const lo = new Int32Array(m), hi = new Int32Array(m);
+          for (let k = 0, a = 0, b = 0; k < m; k++) {
+            while (s[k] - s[a] > r) a++;
+            if (b < k) b = k;
+            while (b + 1 < m && s[b + 1] - s[k] <= r) b++;
+            lo[k] = a; hi[k] = b;
+          }
+          return [lo, hi];
+        };
+        // Direction of travel over ±DIR_PX, then the normal to its right (screen y points down).
+        const [dl, dh] = span(DIR_PX);
         let nx = new Float64Array(m), ny = new Float64Array(m);
+        const ang = new Float64Array(m);
         for (let k = 0; k < m; k++) {
-          const a = run[Math.max(0, k - 1)].xy, b = run[Math.min(m - 1, k + 1)].xy;
+          const a = run[dl[k] === k && k > 0 ? k - 1 : dl[k]].xy, b = run[dh[k] === k && k < m - 1 ? k + 1 : dh[k]].xy;
           const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
-          nx[k] = -dy / len; ny[k] = dx / len; // right of travel (screen y points down)
+          nx[k] = -dy / len; ny[k] = dx / len;
         }
-        // Smoothed so corners fan out instead of folding over.
-        for (let pass = 0; pass < 3; pass++) {
+        for (let pass = 0; pass < 2; pass++) {
           const sx = new Float64Array(m), sy = new Float64Array(m);
           for (let k = 0; k < m; k++) {
             const a = Math.max(0, k - 1), b = Math.min(m - 1, k + 1);
@@ -267,11 +294,37 @@ const Ribbon = (() => {
           }
           nx = sx; ny = sy;
         }
-        const widths = run.map(({ i }) => {
-          const w = d.lanes[i].map((x) => x * PX_PER_GPM);
-          const tot = w.reduce((a, x) => a + x, 0);
-          return tot > MAX_W ? w.map((x) => (x * MAX_W) / tot) : w;
+        for (let k = 0; k < m; k++) ang[k] = Math.atan2(-nx[k], ny[k]); // heading
+        // Widths spread along the road: triangle-weighted by distance and by each point's share of road.
+        const ds = (k) => ((k < m - 1 ? s[k + 1] - s[k] : 0) + (k > 0 ? s[k] - s[k - 1] : 0)) / 2 || 0.5;
+        const raw = run.map(({ i }) => d.lanes[i].map((x) => x * PX_PER_GPM));
+        const [wl, wh] = span(SPREAD_PX);
+        const widths = raw.map((_, k) => {
+          const out = new Array(CAUSES.length).fill(0);
+          let wsum = 0;
+          for (let j = wl[k]; j <= wh[k]; j++) {
+            const wt = ds(j) * (1 - Math.abs(s[j] - s[k]) / (SPREAD_PX + 1));
+            wsum += wt;
+            for (let x = 0; x < out.length; x++) out[x] += raw[j][x] * wt;
+          }
+          return out.map((x) => x / (wsum || 1));
         });
+        // Room on the inside of turns toward the band: the turn's radius, from how fast the heading
+        // turns over ±DIR_PX of road; the tightest nearby point sets it, so the band narrows smoothly.
+        const room = new Float64Array(m).fill(Infinity);
+        for (let k = 0; k < m; k++) {
+          const a = dl[k], b = dh[k];
+          if (s[b] - s[a] < 1) continue;
+          const turn = Math.atan2(Math.sin(ang[b] - ang[a]), Math.cos(ang[b] - ang[a])); // + is a right turn on screen
+          if (turn > 0.05) room[k] = (0.9 * (s[b] - s[a])) / turn;
+        }
+        for (let k = 0; k < m; k++) {
+          let r = room[k];
+          for (let j = dl[k]; j <= dh[k]; j++) r = Math.min(r, room[j]);
+          const tot = widths[k].reduce((a, x) => a + x, 0);
+          const cap = Math.min(MAX_W, Math.max(0, r - GAP));
+          if (tot > cap) widths[k] = widths[k].map((x) => (x * cap) / tot);
+        }
         const inner = new Float64Array(m).fill(GAP);
         CAUSES.forEach((cause, j) => {
           ctx.beginPath();
