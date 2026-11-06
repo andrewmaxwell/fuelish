@@ -10,6 +10,7 @@
   --axis: #c3c2b7;
   --accent: #2a78d6;
   --accent-soft: rgba(42, 120, 214, 0.12);
+  --thumb-alt: #8fbcef; /* every other mile of a route outline */
   --brand: #c47f06; /* logo amber: the "latest reading" dot, used sparingly */
   --brand-glow: rgba(196, 127, 6, 0.35);
   --good: #0ca30c;
@@ -33,6 +34,7 @@
     --axis: #383835;
     --accent: #3987e5;
     --accent-soft: rgba(57, 135, 229, 0.18);
+    --thumb-alt: #a9d0fa;
     --brand: #f0b429;
     --brand-glow: rgba(240, 180, 41, 0.75);
     --warn: #fab219;
@@ -188,7 +190,9 @@ main { max-width: 1160px; margin: 0 auto; padding: 24px 16px 48px; }
 .card-score.ok { border-color: var(--warn); }
 .card-score.low { border-color: var(--bad); }
 .thumb-casing { fill: none; stroke: var(--surface); stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; }
-.thumb-line { fill: none; stroke: var(--accent); stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; }
+.thumb-line { fill: none; stroke: var(--accent); stroke-width: 3.5; stroke-linecap: butt; stroke-linejoin: round; }
+/* Every other mile, so the length of a drive shows at a glance. */
+.thumb-line.alt { stroke: var(--thumb-alt); }
 .thumb-start { fill: var(--good); stroke: var(--surface); stroke-width: 2.5; }
 .thumb-end { fill: var(--text); stroke: var(--surface); stroke-width: 2.5; }
 .trip-card-body { padding: 12px 16px 14px; display: grid; gap: 2px; }
@@ -202,8 +206,6 @@ main { max-width: 1160px; margin: 0 auto; padding: 24px 16px 48px; }
 .day .day-head h2 { margin-bottom: 0; }
 .day-head .muted { font-size: 14px; }
 .day-head a { margin-left: auto; }
-.thumb-scale path { fill: none; stroke: var(--muted); stroke-width: 1.5; }
-.thumb-scale text { fill: var(--muted); font-size: 10px; dominant-baseline: text-after-edge; }
 .thumb-stop { fill: var(--surface); stroke: var(--text-2); stroke-width: 2; }
 
 /* An outing: linked trips in one card, and the list of trips in the multi-trip views. */
@@ -643,3 +645,10 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 .about-sec h3 { font-size: 13px; font-weight: 650; margin: 12px 0 2px; color: var(--text); }
 .about-sec [data-about]:first-child h3 { margin-top: 0; }
 .about-sec p { margin: 0; font-size: 13px; color: var(--text-2); line-height: 1.45; }
+
+/* A trip's places, each with a name to type. */
+.place-rows { display: grid; gap: 6px; margin-top: 8px; }
+.place-row { display: grid; grid-template-columns: 7.5em 1fr; align-items: center; gap: 10px; font-size: 14px; color: var(--text-2); }
+.place-row small { color: var(--muted); }
+.place-row input { min-width: 0; font: inherit; color: var(--text); background: var(--page); border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; }
+.places-sec .hint { margin: 8px 0 0; }

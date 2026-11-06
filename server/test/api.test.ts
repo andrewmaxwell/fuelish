@@ -311,6 +311,21 @@ describe("trip summary", () => {
     const tracks = JSON.stringify([[[0, 38.0, -90.0, 5, 3], [5000, 38.001, -90.0, 5, 3], [9000, 38.002, -90.0, 1, 3]]]);
     expect(tripSummary(tracks, 5000)!.path.length).toBe(2);
   });
+
+  it("lists where the drive stood still along the way, not at its start or end", async () => {
+    const { tripSummary } = await import("../src/index");
+    const at = (t: number, lat: number, v: number) => [t * 1000, lat, -90, v, 5];
+    const fixes = [
+      ...Array.from({ length: 40 }, (_, i) => at(i, 38, 0)), // waiting to leave
+      ...Array.from({ length: 20 }, (_, i) => at(40 + i, 38 + (i + 1) * 0.0002, 10)),
+      ...Array.from({ length: 10 }, (_, i) => at(60 + i, 38.004, 0)), // a red light: too short
+      ...Array.from({ length: 20 }, (_, i) => at(70 + i, 38.004 + (i + 1) * 0.0002, 10)),
+      ...Array.from({ length: 90 }, (_, i) => at(90 + i, 38.008, 0)), // dropping someone off
+      ...Array.from({ length: 20 }, (_, i) => at(180 + i, 38.008 + (i + 1) * 0.0002, 10)),
+      ...Array.from({ length: 60 }, (_, i) => at(200 + i, 38.012, 0)), // parked at the end
+    ];
+    expect(tripSummary(JSON.stringify([fixes]))!.stops).toEqual([[38.008, -90, 89000]]);
+  });
 });
 
 describe("drive end", () => {

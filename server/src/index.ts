@@ -488,7 +488,31 @@ export function tripSummary(tracksJson: string, endMs: number | null = null) {
   for (const p of fixes) if (p[3] != null) maxMps = Math.max(maxMps, p[3]);
   const step = Math.max(1, Math.ceil(fixes.length / 80));
   const path = fixes.filter((_, i) => i % step === 0 || i === fixes.length - 1).map((p) => [round5(p[1]), round5(p[2])]);
-  return { meters: Math.round(meters), maxMps, movingMs, path };
+  return { meters: Math.round(meters), maxMps, movingMs, path, stops: stopsOf(fixes) };
+}
+
+// Where a drive stood still along the way (not at its start or end) for at least STOP_MS: [lat, lon,
+// ms], at the stop's average position, so the list can name places visited in the middle of a trip
+// (dropping someone off). Only fixes with a speed count; a gap in the track ends a stop.
+const STOP_MS = 30_000;
+function stopsOf(fixes: number[][]): number[][] {
+  const out: number[][] = [];
+  let run: number[][] = [];
+  const close = (last: boolean) => {
+    if (run.length && !last && run[0] !== fixes[0] && run.at(-1)![0] - run[0][0] >= STOP_MS) {
+      const n = run.length;
+      out.push([round5(run.reduce((a, p) => a + p[1], 0) / n), round5(run.reduce((a, p) => a + p[2], 0) / n), run.at(-1)![0] - run[0][0]]);
+    }
+    run = [];
+  };
+  for (const p of fixes) {
+    const still = p[3] != null && p[3] < 0.5;
+    if (still && run.length && p[0] - run.at(-1)![0] > MAX_GAP_MS) close(false);
+    if (still) run.push(p);
+    else close(false);
+  }
+  close(true); // still standing at the end: that's where it ended, not a stop
+  return out;
 }
 
 const round5 = (x: number) => Math.round(x * 1e5) / 1e5;

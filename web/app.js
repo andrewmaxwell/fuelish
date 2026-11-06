@@ -154,6 +154,68 @@ const endOf = (r) => r.driveEndWallMs ?? r.endedWallMs ?? r.updatedAtMs;
 const timeRange = (r) => `${clock(r.startedWallMs)} – ${clock(endOf(r))}`;
 const moved = (r) => r.trip && r.trip.meters >= 100;
 
+// Named places (prefs "places": [{ lat, lon, name }], shared with Compare), and drives described by
+// them: "Home → Aldi → Home". A drive's start and end match a name within END_M; a stop along the way
+// (the list's trip summary has stops of 30 s or more) counts when it's within STOP_M of a name, and
+// isn't within PARK_M of the trip's own start or end (shuffling into a parking space).
+const Places = (() => {
+  const END_M = 250, STOP_M = 150, STOP_MS = 30000, SAME_M = 150, PARK_M = 100;
+  const away = (a, b) => (s) => Route.haversine(s.lat, s.lon, a[0], a[1]) > PARK_M && Route.haversine(s.lat, s.lon, b[0], b[1]) > PARK_M;
+  const list = () => Prefs.get("places") || [];
+  function nameAt(lat, lon, within = END_M) {
+    let best = null, bd = within;
+    for (const n of list()) { const d = Route.haversine(n.lat, n.lon, lat, lon); if (d <= bd) { bd = d; best = n.name; } }
+    return best;
+  }
+  // Where recordings taken as one drive went, in order: its start, stops along the way, each trip's end.
+  function visits(recs) {
+    const out = [];
+    recs.filter(moved).forEach((r, i) => {
+      const p = r.trip.path;
+      if (!i) out.push({ lat: p[0][0], lon: p[0][1], kind: "start" });
+      const far = away(p[0], p.at(-1));
+      for (const [lat, lon, ms] of r.trip.stops || []) if (ms >= STOP_MS && far({ lat, lon })) out.push({ lat, lon, ms, kind: "stop" });
+      out.push({ lat: p.at(-1)[0], lon: p.at(-1)[1], kind: "end" });
+    });
+    return named(out);
+  }
+  // The same from one trip's detailed points: its start, stops along the way (Route.summary's), its end.
+  function visitsOfPoints(pts, stops) {
+    const mean = (a, b, k) => pts.slice(a, b + 1).reduce((n, p) => n + p[k], 0) / (b - a + 1);
+    return named([
+      { lat: pts[0].lat, lon: pts[0].lon, kind: "start" },
+      ...stops.filter((x) => x.ms >= STOP_MS).map((x) => ({ lat: mean(x.i0, x.i1, "lat"), lon: mean(x.i0, x.i1, "lon"), ms: x.ms, kind: "stop" }))
+        .filter(away([pts[0].lat, pts[0].lon], [pts.at(-1).lat, pts.at(-1).lon])),
+      { lat: pts.at(-1).lat, lon: pts.at(-1).lon, kind: "end" },
+    ]);
+  }
+  function named(vs) {
+    for (const v of vs) v.name = nameAt(v.lat, v.lon, v.kind === "stop" ? STOP_M : END_M);
+    return vs;
+  }
+  /** "Home → Aldi → Home", "From Home", "To Aldi"; null when it went nowhere named. */
+  const label = (recs) => labelOf(visits(recs));
+  function labelOf(v) {
+    const parts = v.map((x) => x.name).filter(Boolean).filter((x, i, a) => x !== a[i - 1]);
+    if (!parts.length) return null;
+    const first = v[0]?.name, last = v.at(-1)?.name;
+    if (!first && !last) return `Via ${parts.join(", ")}`;
+    if (!first) return `To ${parts.join(" → ")}`;
+    if (!last) return `From ${parts.join(" → ")}`;
+    if (parts.length === 1) return `Around ${parts[0]}`;
+    return parts.join(" → ");
+  }
+  /** Names the place at lat, lon (an empty name removes it), replacing any name already within SAME_M. */
+  function rename(lat, lon, name) {
+    return Prefs.update("places", (places) => {
+      const keep = (places || []).filter((p) => Route.haversine(p.lat, p.lon, lat, lon) >= SAME_M);
+      if (name) keep.push({ lat: Math.round(lat * 1e5) / 1e5, lon: Math.round(lon * 1e5) / 1e5, name: name.slice(0, 80) });
+      return keep;
+    });
+  }
+  return { nameAt, visits, visitsOfPoints, label, labelOf, rename };
+})();
+
 function haversine([la1, lo1], [la2, lo2]) {
   const k = Math.PI / 180, dLa = (la2 - la1) * k, dLo = (lo2 - lo1) * k;
   const a = Math.sin(dLa / 2) ** 2 + Math.cos(la1 * k) * Math.cos(la2 * k) * Math.sin(dLo / 2) ** 2;
@@ -302,9 +364,12 @@ async function showList() {
   const groups = [];
   for (const o of outings(recordings).reverse()) {
     const label = dayLabel(o[0].startedWallMs);
-    if (groups.at(-1)?.label !== label) groups.push({ label, key: ymd(dayStart(o[0].startedWallMs)), items: [] });
+    if (groups.at(-1)?.label !== label) groups.push({ label, key: ymd(dayStart(o[0].startedWallMs)), thisWeek: o[0].startedWallMs >= +thisWeek, items: [], keys: [] });
     groups.at(-1).items.push(o);
   }
+  // Cards first, so each day knows its cards' score keys for its total.
+  for (const g of groups) g.cards = g.items.map((o) => { const l = legsOf(o); return l.length > 1 ? outingCard(o) : tripCard(l[0] ?? o[0]); }).join("");
+  for (const g of groups) g.keys = [...g.cards.matchAll(/data-score="([^"]*)"/g)].map((m) => m[1].replace(/&amp;/g, "&"));
 
   app.innerHTML = `
     <div class="list-head">
@@ -318,18 +383,19 @@ async function showList() {
         <div><b>${wk.trips}</b><span>trips this week</span></div>
         <div><b>${miles(wk.meters)}</b><span>driven</span></div>
         <div><b>${fmtDur(wk.movingMs)}</b><span>behind the wheel</span></div>
+        <div data-total-of="${esc(groups.filter((g) => g.thisWeek).flatMap((g) => g.keys).join("|"))}" hidden><b></b><span>on gas</span></div>
       </div>
     </div>
     ${groups.map((g) => {
       const t = totals(g.items.flat());
       return `
-      <section class="day">
+      <section class="day"${g.thisWeek ? " data-this-week" : ""}>
         <div class="day-head">
           <h2>${esc(g.label)}</h2>
-          ${t.trips ? `<span class="muted">${plural(t.trips, "trip")} · ${miles(t.meters)}</span>
+          ${t.trips ? `<span class="muted">${plural(t.trips, "trip")} · ${miles(t.meters)}<span data-total-of="${esc(g.keys.join("|"))}" hidden> · <b></b> gas</span></span>
           <a href="#/day/${g.key}">Map of the day →</a>` : ""}
         </div>
-        <div class="cards">${g.items.map((o) => { const l = legsOf(o); return l.length > 1 ? outingCard(o) : tripCard(l[0] ?? o[0]); }).join("")}</div>
+        <div class="cards">${g.cards}</div>
       </section>`;
     }).join("")}`;
   scoreCards(live);
@@ -341,7 +407,7 @@ async function showList() {
 // (a few at a time), then remembered in this browser, keyed by the recordings, their last update, the cruising
 // speed and SCORE_VERSION (bump it when the score's method changes). Cards without enough engine
 // data show no ring and no cost.
-const SCORE_VERSION = 2;
+const SCORE_VERSION = 3;
 const scoreJobs = new Map(); // slot key -> recordings
 function scoreSlot(recs) {
   recs = recs.filter((r) => r.trip || r.routeGaps > 0); // what its page draws and scores
@@ -350,19 +416,42 @@ function scoreSlot(recs) {
   scoreJobs.set(key, recs);
   return `<span class="card-score" data-score="${esc(key)}" hidden></span>`;
 }
+// Figures for each card shown so far (null: no engine data), summed into the day and week totals.
+const figuresFor = new Map();
+// A day's or the week's gas, once every card in it has its figures: elements with data-total-of
+// (the cards' score keys, joined by "|") get "$4.20 on gas".
+function showTotals() {
+  document.querySelectorAll("[data-total-of]").forEach((el) => {
+    const keys = el.dataset.totalOf ? el.dataset.totalOf.split("|") : [];
+    if (!keys.length || !keys.every((k) => figuresFor.has(k))) return;
+    const f = keys.map((k) => figuresFor.get(k));
+    const known = f.filter((x) => x?.cost != null);
+    if (!known.length) return;
+    const missing = f.length - known.length;
+    el.hidden = false;
+    el.querySelector("b").textContent = `${missing || known.some((x) => x.approx) ? "≈" : ""}${money(known.reduce((a, x) => a + x.cost, 0))}`;
+    el.title = missing ? `${plural(missing, "trip")} without engine data ${missing === 1 ? "isn't" : "aren't"} counted` : "";
+  });
+}
 const scoreKey = (key) => `fuelish.score.v${SCORE_VERSION}:${coachTarget()}:${key}`;
 function readScore(key) {
   try { const v = localStorage.getItem(scoreKey(key)); return v == null ? undefined : JSON.parse(v); } catch { return undefined; }
 }
 function showScore(el, f) {
-  // Version 1 kept the score alone.
-  const n = typeof f === "number" ? f : f?.score;
-  const cost = el.closest(".trip-card")?.querySelector(".card-cost");
+  const n = f?.score;
+  const card = el.closest(".trip-card");
+  const cost = card?.querySelector(".card-cost"), mpg = card?.querySelector(".card-mpg");
   if (cost && f?.cost != null) {
     cost.hidden = false;
     cost.title = `${f.approx ? "About " : ""}${gallons(f.gal)} gal of gas at ${money(f.price)}/gal, the regional average that week`;
     cost.innerHTML = `<b>${f.approx ? "≈" : ""}${money(f.cost)}</b> gas`;
   }
+  if (mpg && f?.mpg != null) {
+    mpg.hidden = false;
+    mpg.innerHTML = `<b>${f.approx ? "≈" : ""}${f.mpg.toFixed(0)}</b> mpg`;
+  }
+  figuresFor.set(el.dataset.score, f ?? null);
+  showTotals();
   if (n == null) return;
   el.hidden = false;
   el.className = `card-score ${scoreTone(n)}`;
@@ -389,11 +478,14 @@ function scoreCards(live) {
     for (const en of entries) if (en.isIntersecting) { io.unobserve(en.target); queue.push(en.target.querySelector(".card-score")); }
     pump();
   }, { rootMargin: "300px" });
+  // This week's cards are worked out straight away, for the week's total; older ones as they scroll in.
   document.querySelectorAll(".card-score[data-score]").forEach((el) => {
     const known = readScore(el.dataset.score);
     if (known !== undefined) showScore(el, known);
+    else if (el.closest("[data-this-week]")) queue.push(el);
     else io.observe(el.parentElement);
   });
+  pump();
   onLeave(() => io.disconnect());
 }
 
@@ -409,15 +501,15 @@ function tripCard(r) {
   const auto = r.meta.trigger?.startsWith("car_bluetooth");
   return `
     <a class="card trip-card" href="#/r/${esc(r.id)}">
-      <div class="thumb">${moved(r) ? Charts.thumbnail(t.path) : `<span class="muted">${noRouteLabel(r)}</span>`}${scoreSlot([r])}</div>
+      <div class="thumb">${moved(r) ? Charts.thumbnail(t.path, undefined, undefined, null, t.meters) : `<span class="muted">${noRouteLabel(r)}</span>`}${scoreSlot([r])}</div>
       <div class="trip-card-body">
         <div class="trip-card-title"><b>${esc(timeRange(r))}</b>${statusPill(r)}</div>
-        <div class="muted">${esc(tripName(r.startedWallMs))}${auto ? " · auto-started" : ""}</div>
+        <div class="muted">${esc(Places.label([r]) ?? tripName(r.startedWallMs))}${auto ? " · auto-started" : ""}</div>
         ${moved(r) ? `<div class="trip-card-stats">
           <span><b>${miles(t.meters)}</b></span>
           <span><b>${fmtDur(t.movingMs)}</b> moving</span>
+          <span class="card-mpg" hidden></span>
           <span class="card-cost" hidden></span>
-          <span>top <b>${Math.round(t.maxMps * Route.MPH)}</b> mph</span>
           ${r.routeGaps ? `<span class="muted" title="Part of this trip's route isn't summarized for the list; the trip page has all of it">partial</span>` : ""}
         </div>` : ""}
         ${r.meta.note ? `<div class="note">${esc(r.meta.note)}</div>` : ""}
@@ -432,15 +524,15 @@ function outingCard(o) {
   const pill = o.map(statusPill).find(Boolean) ?? "";
   return `
     <a class="card trip-card outing-card" href="#/outing/${esc(first.id)}">
-      <div class="thumb">${Charts.thumbnail(o.filter(moved).map((r) => r.trip.path)) || `<span class="muted">No GPS yet</span>`}${scoreSlot(o)}</div>
+      <div class="thumb">${Charts.thumbnail(o.filter(moved).map((r) => r.trip.path), undefined, undefined, null, o.filter(moved).map((r) => r.trip.meters)) || `<span class="muted">No GPS yet</span>`}${scoreSlot(o)}</div>
       <div class="trip-card-body">
         <div class="trip-card-title"><b>${esc(clock(first.startedWallMs))} – ${esc(clock(endOf(last)))}</b>${pill}</div>
-        <div class="muted">${esc(outingName(first.startedWallMs))} · ${plural(legsOf(o).length - 1, "stop")}</div>
+        <div class="muted">${esc(Places.label(o) ?? `${outingName(first.startedWallMs)} · ${plural(legsOf(o).length - 1, "stop")}`)}</div>
         ${t.trips ? `<div class="trip-card-stats">
           <span><b>${miles(t.meters)}</b></span>
           <span><b>${fmtDur(t.movingMs)}</b> moving</span>
+          <span class="card-mpg" hidden></span>
           <span class="card-cost" hidden></span>
-          <span>top <b>${Math.round(t.maxMps * Route.MPH)}</b> mph</span>
           ${o.some((x) => x.routeGaps) ? `<span class="muted" title="Part of this outing's route isn't summarized for the list; each trip's page has all of it">partial</span>` : ""}
         </div>` : ""}
       </div>
@@ -883,7 +975,7 @@ async function showTrip(id, share = null, focusT = null) {
         <div class="readout" id="readout" hidden></div>
         <div class="map-status" id="rt-status">Loading route…</div>
       </section>
-      <aside class="trip-side">${sidePanel()}</aside>
+      <aside class="trip-side">${sidePanel(share ? "" : `<section class="side-sec places-sec" id="places-sec" hidden></section>`)}</aside>
     </div>`;
 
   if (!share) shareControls(id);
@@ -899,6 +991,7 @@ async function showTrip(id, share = null, focusT = null) {
   const sm = Route.summary(pts);
   sm.durMs = endOf(r) - r.startedWallMs;
   sideRoute(sm, { engine: pts.engine.length > 0 || pts.engineRaw.length > 0 });
+  if (!share) placesSection(pts, sm, live);
   const view = drawRoute(pts, sm);
   if (focusT != null) {
     // Opened at a moment (from Insights): zoom there and hold the cursor on it.
@@ -938,6 +1031,39 @@ async function showTrip(id, share = null, focusT = null) {
       if (e.message !== "unauthorized" && live()) st.innerHTML = `<span class="bad">Couldn't read the engine data: ${esc(e.message)}</span>`;
     }
   }
+}
+
+// Where a trip started, stopped along the way and ended, each with a name to type. The names are
+// shared with Compare and describe trips in the list ("Home → Aldi"); the page title follows them.
+function placesSection(pts, sm, live) {
+  const host = document.getElementById("places-sec");
+  if (!host) return;
+  const draw = () => {
+    const vs = Places.visitsOfPoints(pts, sm.stops);
+    const h1 = document.querySelector(".trip-head h1");
+    if (h1) h1.textContent = Places.labelOf(vs) ?? tripName(pts[0].t);
+    const what = { start: "Started at", stop: "Stopped at", end: "Ended at" };
+    host.hidden = false;
+    host.innerHTML = `<h2>Places</h2>
+      <div class="place-rows">${vs.map((v, i) => `
+        <label class="place-row"><span>${what[v.kind]}${v.ms ? ` <small>${fmtDur(v.ms)}</small>` : ""}</span>
+          <input value="${esc(v.name ?? "")}" placeholder="Name this place" data-i="${i}" maxlength="80"></label>`).join("")}</div>
+      <p class="hint" id="places-note">Names are shared with Compare and every browser.</p>`;
+    host.querySelectorAll("input").forEach((inp) => inp.addEventListener("change", async () => {
+      const v = vs[+inp.dataset.i];
+      inp.disabled = true;
+      try {
+        await Places.rename(v.lat, v.lon, inp.value.trim());
+      } catch (e) {
+        if (e.message === "unauthorized" || !live()) return;
+        inp.disabled = false;
+        document.getElementById("places-note").innerHTML = `<span class="bad">Couldn't save: ${esc(e.message)}</span>`;
+        return;
+      }
+      if (live()) draw();
+    }));
+  };
+  draw();
 }
 
 // A recording without a usable GPS track (parked warm-up, garage start, location off) can still
@@ -1245,7 +1371,7 @@ function coachTarget() {
 }
 
 // The driving score and gas cost of recordings taken as one drive, worked out the same way as on
-// their page: { score, gal, price, cost, approx } (approx: fuel readings don't cover all of it), or
+// their page: { score, gal, mpg, price, cost, approx } (approx: fuel readings don't cover all of it), or
 // null without enough engine data.
 async function driveFigures(recs) {
   const d = await loadDrive(recs);
@@ -1256,7 +1382,7 @@ async function driveFigures(recs) {
   const gal = e.galTrip ?? e.gal, start = recs.find((r) => r.trip?.path?.length)?.trip.path[0];
   const gas = gal != null ? await withTimeout(Gas.forTrip(start?.[0], start?.[1], recs[0].startedWallMs), 8000) : null;
   return {
-    score, gal, price: gas?.price ?? null,
+    score, gal, mpg: e.mpg ?? null, price: gas?.price ?? null,
     cost: gas ? gal * gas.price : null,
     approx: e.coverage < 0.95 || !!e.extrapolated,
   };
@@ -1279,7 +1405,7 @@ async function showMany(kind, key) {
     // One trip is an outing of one: its own page is the whole of it.
     if (legsOf(recs).length <= 1) { location.replace(`#/r/${(legsOf(recs)[0] ?? recs[0]).id}`); return; }
     const day = new Date(recs[0].startedWallMs).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
-    title = outingName(recs[0].startedWallMs);
+    title = Places.label(recs) ?? outingName(recs[0].startedWallMs);
     sub = `${day} · ${clock(recs[0].startedWallMs)} – ${clock(endOf(recs.at(-1)))}`;
   } else {
     const from = kind === "day" ? parseYmd(key) : weekStart(+parseYmd(key));
