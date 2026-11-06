@@ -32,6 +32,7 @@ const Coach = (() => {
         if (!cur) cur = { i: k - 1, peakI: k, fromV: p.v, toV: q.v, peak: 0, j: 0 };
         cur.j += mass * (decel - coast) * vm * dt;
         cur.toV = q.v;
+        cur.endI = k;
         const a = q.a != null ? -q.a : decel;
         if (a > cur.peak) { cur.peak = a; cur.peakI = k; }
         calm = 0;
@@ -40,7 +41,7 @@ const Coach = (() => {
     close();
     const toGal = (j) => j / J_PER_GAL / ENGINE_EFF;
     const out = events
-      .map((e) => ({ i: e.i, peakI: e.peakI, fromMph: e.fromV / MPS_PER_MPH, toMph: e.toV / MPS_PER_MPH, peakG: e.peak / G, galEq: toGal(e.j) }))
+      .map((e) => ({ i: e.i, peakI: e.peakI, endI: e.endI, avgG: (e.fromV - e.toV) / Math.max(1, (pts[e.endI].t - pts[e.i].t) / 1000) / G, fromMph: e.fromV / MPS_PER_MPH, toMph: e.toV / MPS_PER_MPH, peakG: e.peak / G, galEq: toGal(e.j) }))
       .filter((e) => e.fromMph - e.toMph >= 5)
       .sort((a, b) => b.galEq - a.galEq);
     return { galEq: out.reduce((s, e) => s + e.galEq, 0), events: out };
@@ -99,32 +100,84 @@ const Coach = (() => {
     return { targetMph, gal, minutes: secs / 60, aboveMin: above / 60, topMph: top / MPS_PER_MPH, source: curve.source };
   }
 
-  // ---------- the card ----------
+  // ---------- what the driver controls ----------
 
-  // Items worth showing, largest saving first. `price` ($/gal) may be null: amounts are then in gallons.
-  function items({ pts, rows, e, vehicle = "", price = null, targetMph = 65 }) {
-    const out = [];
-    const worth = (gal) => (price != null ? gal * price >= 0.03 : gal >= 0.008);
-    const br = braking(pts, vehicle);
-    if (br.events.length && worth(br.galEq)) {
-      out.push({ key: "braking", gal: br.galEq, events: br.events.slice(0, 3), count: br.events.length });
-    }
-    if (rows?.length) {
-      // Whether it's worth a line is judged at the slowest choice (60), so picking a faster one
-      // shows a smaller saving instead of hiding the item and its speed choices with it.
-      const curve = speedCurve(rows);
-      const floor = slowerCruise(rows, 60, curve);
-      if (floor && floor.aboveMin >= 1 && worth(floor.gal)) {
-        const sp = (targetMph < floor.topMph && slowerCruise(rows, targetMph, curve)) || floor;
-        out.push({ key: "speed", gal: sp.gal, ...sp, curve });
-      }
-    }
-    if (e?.fuelUse) {
-      if (worth(e.fuelUse.rich)) out.push({ key: "rich", gal: e.fuelUse.rich });
-      if (worth(e.fuelUse.idle) && e.idleMs >= 60000) out.push({ key: "idle", gal: e.fuelUse.idle, idleMs: e.idleMs });
-    }
-    return out.sort((a, b) => b.gal - a.gal);
+  // The gas each controllable habit cost on this drive. The score and the card's lines both come from
+  // here, so they always agree:
+  //   braking  each slow-down's energy, weighted by how abrupt it was: averaging 0.08 g or less
+  //            (seen coming, coasted into) counts nothing, 0.2 g or more counts in full. Average
+  //            rather than peak g, since a phone on a flexing mount reads jolts as peaks. `total` is
+  //            every slow-down's energy, gentle ones included.
+  //   speed    gas saved holding `targetMph` instead of anything faster
+  //   rich     fuel beyond what the air needed, from pressing hard
+  //   idle     standstills of a minute or more, past their first 10 s (about what a restart uses)
+  const SOFT_G = 0.08, HARD_G = 0.2, LONG_IDLE_MS = 60000, RESTART_MS = 10000;
+  const abruptness = (avgG) => Math.min(1, Math.max(0, (avgG - SOFT_G) / (HARD_G - SOFT_G)));
+  function breakdown({ pts, rows, e, vehicle = "", targetMph = 65 }) {
+    const br = braking(pts || [], vehicle);
+    const events = br.events.map((ev) => ({ ...ev, abruptGalEq: ev.galEq * abruptness(ev.avgG) }))
+      .filter((ev) => ev.abruptGalEq > 0).sort((a, b) => b.abruptGalEq - a.abruptGalEq);
+    const curve = rows?.length ? speedCurve(rows) : null;
+    return {
+      braking: { gal: events.reduce((s, ev) => s + ev.abruptGalEq, 0), total: br.galEq, events, count: events.length, all: br.events.length },
+      speed: curve ? slowerCruise(rows, targetMph, curve) : null,
+      floor: curve ? slowerCruise(rows, 60, curve) : null,
+      curve,
+      rich: e?.fuelUse?.rich ?? 0,
+      idle: longIdle(rows || []),
+    };
   }
 
-  return { braking, speedCurve, slowerCruise, items };
+  // ---------- the card ----------
+
+  // Lines worth showing, largest first. `price` ($/gal) may be null: amounts are then in gallons.
+  function items({ pts, rows, e, vehicle = "", price = null, targetMph = 65 }) {
+    const b = breakdown({ pts, rows, e, vehicle, targetMph });
+    const out = [];
+    const worth = (gal) => (price != null ? gal * price >= 0.03 : gal >= 0.008);
+    if (b.braking.count && worth(b.braking.gal)) {
+      out.push({ key: "braking", gal: b.braking.gal, total: b.braking.total, events: b.braking.events.slice(0, 3), count: b.braking.count, all: b.braking.all });
+    }
+    // Whether speed is worth a line is judged at the slowest choice (60), so picking a faster one shows
+    // a smaller saving (down to none) instead of hiding the line and its speed choices with it.
+    if (b.floor && b.floor.aboveMin >= 1 && worth(b.floor.gal)) {
+      const sp = b.speed || { targetMph, gal: 0, minutes: 0, aboveMin: 0, topMph: b.floor.topMph, source: b.floor.source };
+      out.push({ key: "speed", ...sp, gal: sp.gal, curve: b.curve });
+    }
+    if (worth(b.rich)) out.push({ key: "rich", gal: b.rich });
+    if (worth(b.idle.gal)) out.push({ key: "idle", gal: b.idle.gal, idleMs: b.idle.ms, stops: b.idle.count });
+    return out.sort((a, c) => c.gal - a.gal);
+  }
+
+  // ---------- the score ----------
+
+  // How much of this drive's gas went to getting there, 0-100: 100 × (1 − controllable waste ÷ gas).
+  // Only what the driver controls counts, so a city errand and a highway run, or a truck and a
+  // sedan, are scored on the same terms. Returns null without engine readings over most of the
+  // drive (`minCoverage`).
+  function score({ pts, rows, e, vehicle = "", targetMph = 65, minCoverage = 0.9 }) {
+    const gal = e?.galTrip ?? e?.gal;
+    if (!gal || gal <= 0 || !(e.coverage >= minCoverage)) return null;
+    const b = breakdown({ pts, rows, e, vehicle, targetMph });
+    const parts = { braking: b.braking.gal, speed: b.speed?.gal ?? 0, rich: b.rich, idle: b.idle.gal };
+    const waste = Math.min(gal, parts.braking + parts.speed + parts.rich + parts.idle);
+    return { score: Math.round(100 * (1 - waste / gal)), gal, waste, parts, targetMph };
+  }
+
+  // Long standstills (speed 0, engine running, a minute or more): the gas past each one's first
+  // RESTART_MS, the time idled in them, and how many.
+  function longIdle(rows) {
+    let gal = 0, ms = 0, count = 0, runMs = 0, lateG = 0;
+    const end = () => { if (runMs >= LONG_IDLE_MS) { gal += galOf(lateG); ms += runMs; count++; } runMs = lateG = 0; };
+    for (let i = 1; i < rows.length; i++) {
+      const a = rows[i - 1], r = rows[i], dt = (r.t - a.t) / 1000;
+      if (dt <= 0 || dt > 2.5 || r.speed !== 0 || !(r.rpm > 300)) { end(); continue; }
+      runMs += dt * 1000;
+      if (runMs > RESTART_MS) lateG += (r.fuelGs ?? a.fuelGs ?? 0) * dt;
+    }
+    end();
+    return { gal, ms, count };
+  }
+
+  return { braking, speedCurve, slowerCruise, breakdown, items, score, longIdle };
 })();

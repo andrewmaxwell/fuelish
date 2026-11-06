@@ -93,16 +93,18 @@ const Costs = (() => {
   }
 
   /** The trip page's cost section. */
-  function tripPanel(host, { trip: r, sm, e, gas }) {
-    if (!host) return;
+  // One trip's cost, for a folded section: the one-line summary, the breakdown, and the fine print.
+  function tripParts({ trip: r, sm, e, gas }) {
     const end = r.driveEndWallMs ?? r.endedWallMs ?? r.updatedAtMs;
     const minutes = Math.max(0, (end - r.startedWallMs) / 60000);
     const c = trip({ minutes, miles: sm.miles, gal: e.galTrip ?? e.gal, price: gas?.price ?? null, fuelSource: e.fuelSource, extrapolated: e.extrapolated });
-    host.hidden = false;
-    host.innerHTML = `<h2>What it cost <span>${money(c.total)} all in · ${money(c.car)} car costs${c.perMile ? ` · ${money(c.perMile)}/mi` : ""}</span></h2>
-      ${breakdownHtml(c)}
-      ${!c.fuelKnown ? `<p class="hint">Gas isn't counted yet: ${gas ? "no fuel readings" : "the gas price hasn't loaded"}.</p>` : ""}
-      <p class="hint">Time is door to door. <a href="#/costs">Change what time, wear and carbon are worth →</a></p>`;
+    return {
+      summary: `${money(c.total)} all in`,
+      body: `<p class="sec-meta">${money(c.car)} car costs, ${money(c.total)} with your time and carbon${c.perMile ? ` · ${money(c.perMile)}/mi` : ""}</p>
+        ${breakdownHtml(c)}
+        ${!c.fuelKnown ? `<p class="hint">Gas isn't counted yet: ${gas ? "no fuel readings" : "the gas price hasn't loaded"}.</p>` : ""}`,
+      about: `<p>Time is door to door. <a href="#/costs">Change what time, wear and carbon are worth →</a></p>`,
+    };
   }
 
   // ---------- the Costs page: totals, the cheapest steady speed, idling, cold starts ----------
@@ -351,5 +353,5 @@ const Costs = (() => {
 
   const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
-  return { DEFAULTS, FIELDS, get, use, trip, perMileAt, breakdownHtml, tripPanel, page, money, cents, steadyBins, galPerMileCurve, coldStarts };
+  return { DEFAULTS, FIELDS, get, use, trip, perMileAt, breakdownHtml, tripParts, page, money, cents, steadyBins, galPerMileCurve, coldStarts };
 })();

@@ -271,6 +271,46 @@ test("coach: a hard stop from speed is the biggest braking event, and slower cru
   assert.equal(Coach.slowerCruise(rows, 80), null);
 });
 
+test("driving score: gentle stops cost nothing, abrupt ones and long idles count, thin data gets no score", () => {
+  const { Coach, Engine } = load("route.js", "engine.js", "coach.js");
+  const civic = "2016 Honda Civic LX 2.0L";
+  // 120 s at 20 m/s (45 mph), a stop slowing `decel` m/s², then `idleS` seconds stopped engine running.
+  const drive = (decel, idleS) => {
+    const pts = [], rows = [];
+    let v = 20, t = 0;
+    const add = () => { t += 1000; pts.push({ t, v }); rows.push({ t, speed: v * 3.6, rpm: 750, fuelGs: v > 0 ? 1.5 : 0.25 }); };
+    for (let i = 0; i < 120; i++) add();
+    while (v > 0) { v = Math.max(0, v - decel); add(); }
+    for (let i = 0; i < idleS; i++) add();
+    return { pts, rows, e: Engine.summary(rows, { vehicle: civic }) };
+  };
+  const gentle = Coach.score({ ...drive(0.6, 20), vehicle: civic }); // ~0.06 g
+  const abrupt = Coach.score({ ...drive(3.5, 20), vehicle: civic }); // ~0.36 g
+  assert.equal(gentle.parts.braking, 0);
+  assert.ok(abrupt.parts.braking > 0.005, String(abrupt.parts.braking));
+  assert.ok(abrupt.score < gentle.score, `${abrupt.score} vs ${gentle.score}`);
+  assert.equal(gentle.parts.idle, 0); // a 20 s light isn't a long idle
+  const idler = Coach.score({ ...drive(0.6, 180), vehicle: civic });
+  // 170 s past the first 10 at 0.25 g/s.
+  assert.ok(Math.abs(idler.parts.idle - Engine.galOf(0.25 * 170)) < 0.001, String(idler.parts.idle));
+  assert.ok(idler.score < gentle.score && idler.score >= 0 && idler.score <= 100);
+  const d = drive(0.6, 20);
+  assert.equal(Coach.score({ ...d, e: { ...d.e, coverage: 0.5 } }), null);
+  // The card's lines are the score's parts: what the card shows adds up to what the score counts.
+  const both = drive(3.5, 180);
+  const sc = Coach.score({ ...both, vehicle: civic });
+  const lines = Coach.items({ ...both, vehicle: civic });
+  for (const it of lines) assert.ok(Math.abs(it.gal - sc.parts[it.key]) < 1e-9, it.key);
+  assert.equal(lines.map((it) => it.key).sort().join(), "braking,idle");
+});
+
+test("minute marks count on through several trips in order", () => {
+  // Two trips of 90 s each, an hour apart: marks at 1, 2 and 3 minutes of driving, not 1 and 1.
+  const leg = (trip, t0) => Array.from({ length: 91 }, (_, i) => ({ t: t0 + i * 1000, lat: 38 + (t0 + i) * 1e-6, lon: -90, v: 10, trip }));
+  const marks = Route.minuteMarks([...leg(0, 0), ...leg(1, 3600000)]);
+  assert.equal(marks.map((m) => m.n).join(), "1,2,3");
+});
+
 test("cost view: a thirsty stretch reads above usual for its speed, coasting below", () => {
   const { Engine } = load("route.js", "engine.js");
   // 120 s at 96 km/h on 1.5 g/s, then 30 s at 3 g/s (a climb), then 30 s coasting with the fuel cut.

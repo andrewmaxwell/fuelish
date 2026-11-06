@@ -1,5 +1,5 @@
-// Fuelish web: the list of trips, one trip's route map and friction circle,
-// and map views of several trips at once (a day, a week, or one outing of linked trips).
+// Fuelish web: the list of trips, one drive's page (a whole outing of linked trips, or one trip in
+// it, switched by a row across the top) and map views of a day or a week.
 // Plain JS, no build step. Signing in is with Google (account.js) and a session cookie; the original
 // shared read token still works and lives in localStorage on this browser only.
 
@@ -187,6 +187,9 @@ function continues(a, b) {
   return a.status === "interrupted" && a.deviceId === b.deviceId && b.startedWallMs - endOf(a) <= 60000;
 }
 const outingOf = (all, id) => outings(all).find((o) => o.some((r) => r.id === id));
+// An outing's trips worth a button of their own: not recordings that never moved (the phone
+// starting and stopping in the driveway). Those still count toward the whole outing.
+const legsOf = (o) => o.filter((r) => !(r.trip && !moved(r)));
 
 function statusPill(r) {
   if (r.status === "recording") return `<span class="pill live"><i></i>Recording</span>`;
@@ -326,9 +329,64 @@ async function showList() {
           ${t.trips ? `<span class="muted">${plural(t.trips, "trip")} · ${miles(t.meters)}</span>
           <a href="#/day/${g.key}">Map of the day →</a>` : ""}
         </div>
-        <div class="cards">${g.items.map((o) => (o.length > 1 ? outingCard(o) : tripCard(o[0]))).join("")}</div>
+        <div class="cards">${g.items.map((o) => { const l = legsOf(o); return l.length > 1 ? outingCard(o) : tripCard(l[0] ?? o[0]); }).join("")}</div>
       </section>`;
     }).join("")}`;
+  scoreCards(live);
+}
+
+// ---------- scores on the cards ----------
+
+// Each card's score is worked out from its engine data once the card scrolls into view (a few at a
+// time), then remembered in this browser, keyed by the recordings, their last update, the cruising
+// speed and SCORE_VERSION (bump it when the score's method changes). Cards without enough engine
+// data show no ring.
+const SCORE_VERSION = 1;
+const scoreJobs = new Map(); // slot key -> recordings
+function scoreSlot(recs) {
+  recs = recs.filter((r) => r.trip || r.routeGaps > 0); // what its page draws and scores
+  if (!recs.some(moved)) return "";
+  const key = recs.map((r) => `${r.id}@${r.updatedAtMs}`).join(",");
+  scoreJobs.set(key, recs);
+  return `<span class="card-score" data-score="${esc(key)}" hidden></span>`;
+}
+const scoreKey = (key) => `fuelish.score.v${SCORE_VERSION}:${coachTarget()}:${key}`;
+function readScore(key) {
+  try { const v = localStorage.getItem(scoreKey(key)); return v == null ? undefined : JSON.parse(v); } catch { return undefined; }
+}
+function showScore(el, n) {
+  if (n == null) return;
+  el.hidden = false;
+  el.className = `card-score ${scoreTone(n)}`;
+  el.title = `Driving score ${n}`;
+  el.innerHTML = `<b>${n}</b><small>score</small>`;
+}
+function scoreCards(live) {
+  const queue = [];
+  let running = 0;
+  const pump = () => {
+    while (running < 2 && queue.length) {
+      const el = queue.shift(), key = el.dataset.score, recs = scoreJobs.get(key);
+      running++;
+      driveScore(recs).then((n) => {
+        // Still recording or uploading: show it, but work it out again next time.
+        if (recs.every((r) => r.complete && r.status !== "recording")) { try { localStorage.setItem(scoreKey(key), JSON.stringify(n)); } catch {} }
+        if (live()) showScore(el, n);
+      }).catch(() => {}).finally(() => { running--; if (live()) pump(); });
+    }
+  };
+  // Watched through its thumbnail: the ring itself is hidden until there's a score, and a hidden
+  // element never comes into view.
+  const io = new IntersectionObserver((entries) => {
+    for (const en of entries) if (en.isIntersecting) { io.unobserve(en.target); queue.push(en.target.querySelector(".card-score")); }
+    pump();
+  }, { rootMargin: "300px" });
+  document.querySelectorAll(".card-score[data-score]").forEach((el) => {
+    const known = readScore(el.dataset.score);
+    if (known !== undefined) showScore(el, known);
+    else io.observe(el.parentElement);
+  });
+  onLeave(() => io.disconnect());
 }
 
 // Why a trip has no outline: it didn't move, its route is only on the trip page (left out of the
@@ -343,7 +401,7 @@ function tripCard(r) {
   const auto = r.meta.trigger?.startsWith("car_bluetooth");
   return `
     <a class="card trip-card" href="#/r/${esc(r.id)}">
-      <div class="thumb">${moved(r) ? Charts.thumbnail(t.path) : `<span class="muted">${noRouteLabel(r)}</span>`}</div>
+      <div class="thumb">${moved(r) ? Charts.thumbnail(t.path) : `<span class="muted">${noRouteLabel(r)}</span>`}${scoreSlot([r])}</div>
       <div class="trip-card-body">
         <div class="trip-card-title"><b>${esc(timeRange(r))}</b>${statusPill(r)}</div>
         <div class="muted">${esc(tripName(r.startedWallMs))}${auto ? " · auto-started" : ""}</div>
@@ -371,7 +429,7 @@ function outingCard(o) {
   }).join("");
   return `
     <div class="card trip-card outing-card">
-      <a class="thumb" href="${href}" aria-label="Map of this outing">${Charts.thumbnail(o.filter(moved).map((r) => r.trip.path)) || `<span class="muted">No GPS yet</span>`}</a>
+      <a class="thumb" href="${href}" aria-label="Map of this outing">${Charts.thumbnail(o.filter(moved).map((r) => r.trip.path)) || `<span class="muted">No GPS yet</span>`}${scoreSlot(o)}</a>
       <div class="trip-card-body">
         <a class="trip-card-title" href="${href}"><b>${esc(clock(first.startedWallMs))} – ${esc(clock(endOf(last)))}</b><span class="pill">${o.length} trips</span></a>
         <div class="muted">${esc(outingName(first.startedWallMs))}</div>
@@ -439,20 +497,25 @@ async function tripContext(r, live) {
   const sw = shown ? "" : ` data-who="${esc(who)}"`;
   let html = "";
   const o = outingOf(recordings, id);
-  if (o && o.length > 1) {
-    const i = o.findIndex((x) => x.id === id);
-    html += `<nav class="outing-nav">
-      <span>Trip ${i + 1} of ${o.length} in this outing</span>
-      ${i > 0 ? `<a href="#/r/${esc(o[i - 1].id)}">← Previous</a>` : ""}
-      ${i < o.length - 1 ? `<a href="#/r/${esc(o[i + 1].id)}">Next →</a>` : ""}
-      <a href="#/outing/${esc(o[0].id)}"${sw}>Whole outing</a>
-    </nav>`;
-  }
+  if (o && legsOf(o).length > 1) html += stretchNav(o, id, sw);
   // Driven before? Link to its leaderboard.
   const j = Repeats.journeyOf(Repeats.journeys(recordings, Prefs.get("places")).journeys, id);
   if (j) html += `<nav class="outing-nav"><span>One of ${j.trips.length} trips ${esc(j.loop ? `looping from ${j.from.name}` : `from ${j.from.name} to ${j.to.name}`)}</span><a href="#/routes/${esc(j.key)}"${sw}>Compare them →</a></nav>`;
   box.innerHTML = html;
   box.querySelectorAll("[data-who]").forEach((a) => (a.onclick = () => Account.setWho(a.dataset.who)));
+}
+
+// An outing's page and its trips' pages are one page: this row across the top switches between the
+// whole outing and each trip in it. `at` is the trip shown, or null for the whole outing; `sw` switches
+// the person picker so the outing found has this trip in it.
+function stretchNav(o, at, sw = "") {
+  const t = totals(o), legs = legsOf(o);
+  const item = (href, label, small, on, extra = "") =>
+    `<a href="${href}"${on ? ` aria-current="page"` : ""}${extra}><b>${label}</b><small>${small}</small></a>`;
+  return `<nav class="stretches" aria-label="This outing">
+    ${item(`#/outing/${esc(o[0].id)}`, "Whole outing", `${plural(legs.length, "trip")}${t.trips ? ` · ${miles(t.meters)}` : ""}`, at == null, sw)}
+    ${legs.map((r) => item(`#/r/${esc(r.id)}`, esc(clock(r.startedWallMs)), moved(r) ? miles(r.trip.meters) : esc(noRouteLabel(r).toLowerCase()), at === r.id, ` data-id="${esc(r.id)}"`)).join("")}
+  </nav>`;
 }
 
 // A trip still recording or uploading: checks for new parts every 30 s while the page is visible
@@ -522,7 +585,8 @@ const mapControls = () => `
   </div>
   <div class="map-legend" id="rt-legend"></div>`;
 
-// The side panel: headline numbers, then engine sections once its data is in, then the friction circle.
+// The side panel: headline numbers, the score and what to change, then the details folded to one
+// line each (filled in once engine data is in), then the fine print.
 const sidePanel = (middle = "") => `
   <section class="side-sec">
     <div class="figs trip-figs" id="figs"></div>
@@ -531,16 +595,26 @@ const sidePanel = (middle = "") => `
     <p class="hint" id="engine-status" hidden></p>
   </section>
   <section class="side-sec coach" id="coach" hidden></section>
-  <section class="side-sec" id="split" hidden></section>
-  <section class="side-sec" id="waste" hidden></section>
-  <section class="side-sec" id="trip-cost" hidden></section>
   ${middle}
-  <section class="side-sec" id="health" hidden></section>
-  <section class="side-sec">
-    <h2>Friction circle</h2>
-    <p class="hint">Each dot is one second: how hard you were speeding up or braking (up and down), and turning (sideways). Smooth driving stays near the middle.</p>
-    <div id="friction" class="chart-host"></div>
-    <div id="peaks" class="peaks"></div>
+  <section class="side-sec folds">
+    <details class="fold" id="health" hidden></details>
+    <details class="fold" id="split" hidden></details>
+    <details class="fold" id="waste" hidden></details>
+    <details class="fold" id="trip-cost" hidden></details>
+    <details class="fold" id="friction-sec">
+      <summary><h2>Friction circle</h2><span id="peaks-sum"></span></summary>
+      <div class="fold-body">
+        <p class="hint">Each dot is one second: how hard you were speeding up or braking (up and down), and turning (sideways). Smooth driving stays near the middle.</p>
+        <div id="friction" class="chart-host"></div>
+        <div id="peaks" class="peaks"></div>
+      </div>
+    </details>
+  </section>
+  <section class="side-sec about-sec" id="about" hidden>
+    <details class="fold">
+      <summary><h2>About these numbers</h2></summary>
+      <div class="fold-body">${["fuel", "score", "coach", "waste", "cost"].map((k) => `<div data-about="${k}"></div>`).join("")}</div>
+    </details>
   </section>`;
 
 // Door-to-door time when it's known (one trip), with the moving part under it.
@@ -553,58 +627,60 @@ function sideRoute(sm, { engine = false, trips = 0 } = {}) {
   const avg = sm.avgMph != null ? sm.avgMph.toFixed(0) : "–", top = sm.maxMph != null ? sm.maxMph.toFixed(0) : "–";
   document.getElementById("figs").innerHTML = fig(mi, "miles") + timeFig(sm) +
     (engine ? fig("–", "mpg") + fig("–", "gas") : fig(avg, "mph average") + fig(top, "mph top"));
-  const bits = [
-    trips > 1 ? plural(trips, "trip") : "",
-    engine ? `${avg} mph average · ${top} top` : "",
-    plural(sm.stops.length, "stop"),
-    `${Math.abs(sm.peak.brake).toFixed(2)} g hardest brake`,
-  ].filter(Boolean);
-  document.getElementById("sub-line").textContent = bits.join(" · ");
+  document.getElementById("sub-line").textContent = ""; // the map labels top speed and the hardest brake
 }
 
-// Where this drive could have been cheaper: what the driver controls, largest first, each with
-// what it would have cost in minutes. Braking stops are buttons that show the stop on the map.
-const COACH_KEY = "fuelish.coachTarget";
+// The score and what to change, as one list: the score ring, then one line per habit that cost gas
+// (name, amount, a bar on one scale), largest first. A line opens to say what happened and how to
+// change it; braking stops are buttons that show the stop on the map. The lines add up to the score.
 function coachCard(el, { pts, rows, e, vehicle, price, focus }) {
   if (!el) return;
-  let target = 65;
-  try { target = Number(localStorage.getItem(COACH_KEY)) || 65; } catch {}
+  let target = coachTarget();
   const amount = (gal) => (price != null ? money(gal * price) : `${gallons(gal)} gal`);
   const mins = (m) => (m < 1 ? `${Math.max(1, Math.round(m * 60))} s` : `${m.toFixed(m < 10 ? 1 : 0)} min`);
+  const opened = new Set();
   const render = () => {
+    el.querySelectorAll("details[data-k]").forEach((d) => (d.open ? opened.add(d.dataset.k) : opened.delete(d.dataset.k)));
     const list = Coach.items({ pts, rows, e, vehicle, price, targetMph: target });
+    const sc = Coach.score({ pts, rows, e, vehicle, targetMph: target });
     el.hidden = false;
-    if (!list.length) {
-      el.innerHTML = `<h2>Where you could save</h2><p class="hint">Nothing stood out on this drive: no hard stops, long idles or fast cruising worth changing.</p>`;
-      return;
-    }
-    const item = (it) => {
-      const head = (title) => `<div class="coach-head"><b>${title}</b><span>${amount(it.gal)}</span></div>`;
+    const max = Math.max(...list.map((it) => it.gal), 1e-9);
+    const body = (it) => {
       if (it.key === "braking") {
-        return `<li>${head("Brake less, coast more")}
-          <p>Slowing down threw away speed that took about ${amount(it.gal)} of gas to build${it.count > 1 ? `, over ${plural(it.count, "slow-down")}` : ""}. Some stops can't be helped, but lifting off sooner lets the car coast with the fuel cut off instead. The biggest:</p>
-          <div class="coach-stops">${it.events.map((s) => `<button type="button" data-i="${s.peakI}">${Math.round(s.fromMph)}→${Math.round(s.toMph)} mph<small>${s.peakG.toFixed(2)} g · ${amount(s.galEq)}</small></button>`).join("")}</div></li>`;
+        return `<p>${plural(it.count, "stop")} sharper than a gentle coast-down threw away about ${amount(it.gal)} of gas. Lifting off sooner lets the car coast with the fuel cut off instead.${it.total - it.gal >= 0.0005 ? ` (Slowing down cost ${amount(it.total)} in all; gentle slow-downs aren't counted, since some are unavoidable.)` : ""} The sharpest:</p>
+          <div class="coach-stops">${it.events.map((s) => `<button type="button" data-i="${s.peakI}">${Math.round(s.fromMph)}→${Math.round(s.toMph)} mph<small>${s.avgG.toFixed(2)} g · ${amount(s.abruptGalEq)}</small></button>`).join("")}</div>`;
       }
       if (it.key === "speed") {
         const perHour = price != null && it.minutes > 0.05 ? (it.gal * price) / (it.minutes / 60) : null;
         const options = [60, 65, 70].filter((v) => v < it.topMph);
         const saved = price != null ? it.gal * price >= 0.005 : it.gal >= 0.001;
-        return `<li>${head(`Cruise at ${it.targetMph}`)}
-          <p>You drove ${mins(it.aboveMin)} above ${it.targetMph} mph (top ${Math.round(it.topMph)}). Holding ${it.targetMph} there would have ${saved ? `used ${amount(it.gal)} less gas and taken ${mins(it.minutes)} longer${perHour != null ? `: like being paid ${money(perHour)} an hour for the extra time` : ""}` : `saved almost nothing and taken ${mins(it.minutes)} longer`}.</p>
-          ${options.length > 1 ? `<div class="seg coach-target" role="group" aria-label="Cruising speed">${options.map((v) => `<button type="button" data-v="${v}" aria-pressed="${v === it.targetMph}">${v} mph</button>`).join("")}</div>` : ""}
-          <p class="hint">${it.source === "drive" ? "From your own fuel use at steady speeds on this drive." : "From air drag (this drive had too little steady cruising to measure it)."} Speed limits and traffic come first.</p></li>`;
+        return `<p>${!it.aboveMin ? `You never went above ${it.targetMph} mph (top ${Math.round(it.topMph)}).`
+          : `You drove ${mins(it.aboveMin)} above ${it.targetMph} mph (top ${Math.round(it.topMph)}). Holding ${it.targetMph} would have ${saved ? `used ${amount(it.gal)} less gas and taken ${mins(it.minutes)} longer${perHour != null ? `: like being paid ${money(perHour)} an hour for the extra time` : ""}` : `saved almost nothing and taken ${mins(it.minutes)} longer`}.`} Speed limits and traffic come first.</p>
+          ${options.length > 1 ? `<div class="seg coach-target" role="group" aria-label="Cruising speed">${options.map((v) => `<button type="button" data-v="${v}" aria-pressed="${v === it.targetMph}">${v} mph</button>`).join("")}</div>` : ""}`;
       }
-      if (it.key === "rich") {
-        return `<li>${head("Ease into the gas")}
-          <p>Pressing hard makes the engine run rich, spending fuel beyond what the air needs. A firm but not floored pedal keeps it lean.</p></li>`;
-      }
-      return `<li>${head("Switch off for long waits")}
-        <p>The engine idled ${fmtDur(it.idleMs)} at a standstill. For waits over a minute (not traffic lights), switching off saves more than the restart uses.</p></li>`;
+      if (it.key === "rich") return `<p>Pressing hard makes the engine run rich, spending fuel beyond what the air needs. A firm but not floored pedal keeps it lean.</p>`;
+      return `<p>The engine idled ${fmtDur(it.idleMs)} in ${plural(it.stops, "standstill")} of a minute or more. For waits like that (not traffic lights), switching off saves more than the restart uses.</p>`;
     };
-    el.innerHTML = `<h2>Where you could save</h2><ul class="coach-list">${list.map(item).join("")}</ul>
-      <details class="how"><summary>How these are estimated</summary>
-        <p>Braking is the energy lost beyond what air and tires would have taken anyway (${Math.round(Engine.physics.massKg(vehicle))} kg, 25% engine efficiency), from GPS speed. It isn't measured fuel: it assumes a level road (going downhill reads as braking), and it can't tell the brakes from engine braking. Speed compares each second above the cruising speed with the same miles at that speed, using how fuel per mile grows with speed. Flooring it and idling are measured from the engine.</p>
-      </details>`;
+    const title = (it) => ({ braking: "Abrupt stops", speed: `Above ${it.targetMph} mph`, rich: "Pressing hard", idle: "Long idles" })[it.key];
+    const line = (it) => `<li><details data-k="${it.key}"${opened.has(it.key) ? " open" : ""}>
+        <summary><span class="coach-name">${title(it)}</span><i class="coach-bar"><i style="width:${Math.max(2, (it.gal / max) * 100)}%"></i></i><b>${amount(it.gal)}</b></summary>
+        <div class="coach-body">${body(it)}</div></details></li>`;
+    const pct = sc ? Math.round((100 * sc.waste) / sc.gal) : 0;
+    const head = sc
+      ? `<div class="drive-score ${scoreTone(sc.score)}">
+          <div class="drive-score-num"><b>${sc.score}</b><small>driving score</small></div>
+          <p>${pct < 1 ? "Almost all of the gas went to getting there." : `${pct}% of the gas (${amount(sc.waste)}) went to things you could change${list.length ? ":" : "."}`}</p>
+        </div>`
+      : `<h2>Where you could save</h2>`;
+    // What the score counted but was too small for a line of its own, so the lines add up to it.
+    const rest = sc ? sc.waste - list.reduce((n, it) => n + it.gal, 0) : 0;
+    const restLine = (price != null ? rest * price >= 0.005 : rest >= 0.0005)
+      ? `<li class="coach-rest"><span>Smaller things</span><b>${amount(rest)}</b></li>` : "";
+    el.innerHTML = head + (list.length || restLine ? `<ul class="coach-list">${list.map(line).join("")}${restLine}</ul>`
+      : `<p class="hint">Nothing stood out on this drive: no abrupt stops, long idles or fast cruising worth changing.</p>`);
+    const sp = list.find((it) => it.key === "speed");
+    if (sc) about("score", "The driving score", `<p>100 means every drop went to covering the distance; each point below is 1% of this drive's gas spent on something you could have changed. Where you drove doesn't count against you: only stops sharper than a gentle coast-down (counted in full from about 0.2 g average), cruising above ${target} mph, pressing hard, and standstills over a minute.</p>`);
+    about("coach", "What you could change", `<p>Braking is the energy lost beyond what air and tires would have taken anyway (${Math.round(Engine.physics.massKg(vehicle))} kg, 25% engine efficiency), from GPS speed. It isn't measured fuel: it assumes a level road (going downhill reads as braking), and it can't tell the brakes from engine braking. Speed compares each second above the cruising speed with the same miles at that speed, using how fuel per mile grows with speed${sp ? (sp.source === "drive" ? ", measured from your own steady driving on this drive" : ", from air drag (this drive had too little steady cruising to measure it)") : ""}. Pressing hard and idling are measured from the engine.</p>`);
   };
   render();
   el.onclick = (ev) => {
@@ -617,6 +693,26 @@ function coachCard(el, { pts, rows, e, vehicle, price, focus }) {
       render();
     }
   };
+}
+
+// The side panel's detail sections are folded to one line each: the title and its key number.
+// Re-filling one (when the gas price arrives) keeps it open or closed as the person left it.
+function setFold(id, title, summary, body, openAtFirst = false) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const open = el.dataset.filled ? el.open : openAtFirst;
+  el.dataset.filled = "1";
+  el.hidden = false;
+  el.innerHTML = `<summary><h2>${title}</h2><span>${summary}</span></summary><div class="fold-body">${body}</div>`;
+  el.open = open;
+}
+
+// The fine print, gathered at the bottom of the side panel: one paragraph per topic, in a fixed order.
+function about(key, title, html) {
+  const slot = document.querySelector(`#about [data-about="${key}"]`);
+  if (!slot) return;
+  slot.innerHTML = `<h3>${esc(title)}</h3>${html}`;
+  document.getElementById("about").hidden = false;
 }
 
 // Highway vs town, where the fuel went, trip cost, car health: everything that needs the engine.
@@ -636,37 +732,33 @@ function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle =
     fig(galShown != null && gas ? (thin ? "≈" : "") + cost(galShown) : "–", galShown != null ? `for ${gallons(galShown)} gal` : "gas");
   // Where the numbers come from, folded away behind one short line; warnings about missing data stay out.
   const note = document.getElementById("gas-note");
-  const about = [e.fromCar ? "Fuel as reported by the car." : "Fuel is estimated from airflow, the air-fuel target and the engine's fuel trims (this car doesn't report fuel use), not a pump reading."];
-  if (epa) about.push(`EPA rates this car ${epa.city} city, ${epa.hwy} highway and ${epa.comb} combined.`);
-  if (gas) about.push(`Gas at ${money(gas.price)}/gal, the ${gas.regionName} regional average for the week of ${new Date(gas.weekMs).toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" })} (U.S. EIA).`);
+  const aboutFuel = [e.fromCar ? "Fuel as reported by the car." : "Fuel is estimated from airflow, the air-fuel target and the engine's fuel trims (this car doesn't report fuel use), not a pump reading."];
+  if (epa) aboutFuel.push(`EPA rates this car ${epa.city} city, ${epa.hwy} highway and ${epa.comb} combined.`);
+  if (gas) aboutFuel.push(`Gas at ${money(gas.price)}/gal, the ${gas.regionName} regional average for the week of ${new Date(gas.weekMs).toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" })} (U.S. EIA).`);
   const warn = [];
   if (thin && e.gal != null) warn.push(e.coverage < 0.5
     ? `Engine readings cover only ${Math.round(e.coverage * 100)}% of this drive's miles, so its mpg and gas are rough.`
     : `Engine readings cover ${Math.round(e.coverage * 100)}% of this drive's miles; mpg is for that part, and gas for the rest is filled in at the same mpg.`);
   if (partial) warn.push("Some of these trips have no engine data and aren't counted.");
-  const short = [e.fromCar ? "Car-reported fuel" : "Estimated fuel", gas ? `gas ${money(gas.price)}/gal` : ""].filter(Boolean).join(" · ");
-  note.hidden = false;
-  note.innerHTML = `${warn.length ? `<p class="hint">${esc(warn.join(" "))}</p>` : ""}
-    <details class="about"><summary>${esc(short)}</summary><p>${esc(about.join(" "))}</p></details>`;
+  note.hidden = !warn.length;
+  note.innerHTML = warn.length ? `<p class="hint">${esc(warn.join(" "))}</p>` : "";
+  about("fuel", "Fuel and gas price", `<p>${esc(aboutFuel.join(" "))}</p>`);
 
   // Highway vs town: economy bars on one scale.
-  const split = document.getElementById("split");
   const parts = [["Highway", `${Engine.HIGHWAY_MPH}+ mph`, e.highway, epa?.hwy], ["Town", `under ${Engine.HIGHWAY_MPH} mph`, e.town, epa?.city]].filter(([, , g]) => g.gal > 0.001);
   if (parts.length) {
     const max = Math.max(1, ...parts.map(([, , g]) => g.mpg ?? 0));
-    split.hidden = false;
-    split.innerHTML = `<h2>Highway vs town</h2>
+    setFold("split", "Highway vs town", (parts.length === 1 ? parts[0][0].toLowerCase() + " " : "") + parts.map(([, , g]) => (g.mpg != null ? g.mpg.toFixed(0) : "–")).join(" / ") + " mpg", `
       <div class="split">${parts.map(([name, note, g, rated]) => `
         <div class="split-row">
           <div class="split-name"><b>${name}</b><span>${note}</span>${rated ? `<span>EPA ${rated}</span>` : ""}</div>
           <div class="split-bar"><i style="width:${((g.mpg ?? 0) / max) * 100}%"></i></div>
           <div class="split-val"><b>${g.mpg != null ? g.mpg.toFixed(0) : "–"}<small>mpg</small></b><span>${g.miles.toFixed(g.miles < 10 ? 1 : 0)} mi · ${gallons(g.gal)} gal</span></div>
-        </div>`).join("")}</div>`;
+        </div>`).join("")}</div>`);
   }
 
   // Where the fuel went: one bar of the measured fuel, idling and enrichment marked. Braking is
   // energy, not fuel, and only an estimate, so it's listed under the bar, not inside it.
-  const waste = document.getElementById("waste");
   if (e.fuelUse && e.gal) {
     const u = e.fuelUse;
     const kinds = [
@@ -675,24 +767,26 @@ function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle =
       ["idle", "Idling", u.idle, `engine running at 0 mph for ${fmtDur(e.idleMs)} (counted where readings exist)`],
     ];
     const pct = (g) => Math.min(100, Math.max(0, (g / e.gal) * 100));
-    waste.hidden = false;
-    waste.innerHTML = `<h2>Where the fuel went</h2>
+    const top2 = kinds.filter(([, , g]) => pct(g) >= 1).sort((x, y) => y[2] - x[2]).slice(0, 2);
+    setFold("waste", "Where the fuel went", top2.map(([, label, g]) => `${Math.round(pct(g))}% ${label.toLowerCase()}`).join(" · "), `
       <p class="sec-meta">${gallons(e.gal)} gal · ${esc(Engine.fuelLabel(e))}</p>
       <div class="waste-bar" role="img" aria-label="${esc(kinds.map(([, label, g]) => `${label} ${Math.round(pct(g))}%`).join(", "))}">${kinds.map(([k, , g]) => `<i class="w-${k}" style="flex-grow:${g}"></i>`).join("")}</div>
       <dl class="waste-list">${kinds.map(([k, label, g, why]) => `
         <div><dt><i class="sw w-${k}"></i>${label}<small>${why}</small></dt><dd>${gallons(g)} gal${cost(g) ? ` · ${cost(g)}` : ""} · ${Math.round(pct(g))}%</dd></div>`).join("")}
-        ${e.cutMs >= 30000 ? `<div><dt><i class="sw w-cut"></i>Coasting, fuel off<small>the engine cut fuel entirely while you coasted</small></dt><dd>${fmtDur(e.cutMs)} · 0 gal</dd></div>` : ""}</dl>
-      <details class="how"><summary>How these are estimated</summary>
+        ${e.cutMs >= 30000 ? `<div><dt><i class="sw w-cut"></i>Coasting, fuel off<small>the engine cut fuel entirely while you coasted</small></dt><dd>${fmtDur(e.cutMs)} · 0 gal</dd></div>` : ""}</dl>`);
+    about("waste", "Where the fuel went", `
         <p>${e.fromCar ? "Fuel use is as reported by the car." : `This car doesn't report fuel use, so it's estimated from the air flowing into the engine and the air-fuel ratio the engine asks for${e.perSample ? ", reading by reading" : ""}, corrected by the engine's fuel trims (how much fuel it adds or removes beyond what the airflow sensor implies).`}
-        ${e.speedFactor !== 1 ? `Miles use the car's speed, which read ${Math.abs((1 - 1 / e.speedFactor) * 100).toFixed(1)}% ${e.speedFactor > 1 ? "low" : "high"} against GPS on this drive, corrected.` : "Miles use the car's own speed."}</p>
-      </details>`;
+        ${e.speedFactor !== 1 ? `Miles use the car's speed, which read ${Math.abs((1 - 1 / e.speedFactor) * 100).toFixed(1)}% ${e.speedFactor > 1 ? "low" : "high"} against GPS on this drive, corrected.` : "Miles use the car's own speed."}</p>`);
   }
 
   // What this trip cost, counting more than gas.
-  if (trip && typeof Costs !== "undefined") Costs.tripPanel(document.getElementById("trip-cost"), { trip, sm, e, gas });
+  if (trip && typeof Costs !== "undefined") {
+    const c = Costs.tripParts({ trip, sm, e, gas });
+    setFold("trip-cost", "What it cost", c.summary, c.body);
+    about("cost", "What it cost", c.about);
+  }
 
   // Car health in one line; anything wrong comes first and stands out.
-  const health = document.getElementById("health");
   const bad = [], ok = [];
   if (e.mil != null) (e.mil || e.dtcs ? bad : ok).push(e.mil ? `Check engine light on${e.dtcs ? `, ${plural(e.dtcs, "code")}` : ""}` : e.dtcs ? `${plural(e.dtcs, "stored code")}` : "Check engine light off");
   if (Number.isFinite(e.volts[0]) && Number.isFinite(e.volts[1])) {
@@ -704,9 +798,9 @@ function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle =
   if (e.fuelLevel != null) ok.push(`tank ${e.fuelLevel.toFixed(0)}%`);
   if (e.maxRpm) ok.push(`top ${Math.round(e.maxRpm).toLocaleString()} rpm`);
   if (bad.length || ok.length) {
-    health.hidden = false;
     const cap = (x) => x.charAt(0).toUpperCase() + x.slice(1);
-    health.innerHTML = `<h2>Car health</h2><p class="health">${[...bad.map((x) => `<b class="bad">${esc(cap(x))}</b>`), ...ok.map((x, i) => esc(!bad.length && !i ? cap(x) : x))].join(" · ")}</p>`;
+    setFold("health", "Car health", bad.length ? `<b class="bad">${esc(cap(bad[0]))}</b>` : "All good",
+      `<p class="health">${[...bad.map((x) => `<b class="bad">${esc(cap(x))}</b>`), ...ok.map((x, i) => esc(!bad.length && !i ? cap(x) : x))].join(" · ")}</p>`, bad.length > 0);
   }
 }
 
@@ -870,7 +964,7 @@ async function engineOnly(r, pts, status, live) {
   if (!live()) return;
   sideEngine(sm, e, { gas, trip: r });
   document.getElementById("sub-line").textContent = `${fmtDur(endOf(r) - r.startedWallMs)} recorded · miles from the car's speedometer${sm.maxMph != null ? ` · top ${sm.maxMph.toFixed(0)} mph` : ""}`;
-  document.getElementById("friction")?.closest("section")?.setAttribute("hidden", "");
+  document.getElementById("friction-sec")?.setAttribute("hidden", "");
 }
 
 const withTimeout = (p, ms) => Promise.race([p, new Promise((res) => setTimeout(() => res(null), ms))]).catch(() => null);
@@ -1100,6 +1194,66 @@ async function engineTrips(recordings, live, onStatus = () => {}, { gas = true }
 const mainEcuOf = (r) => r?.meta?.summary?.obd?.discovery?.mainEcu || null;
 const failedNote = (trips) => (trips.failed?.length ? ` ${plural(trips.failed.length, "trip")} couldn't be loaded and ${trips.failed.length === 1 ? "isn't" : "aren't"} counted; reload to try again.` : "");
 
+// ---------- several recordings as one drive ----------
+
+// Points and engine rows for recordings shown together (an outing, a day, a week), oldest first. Each
+// recording's points are tagged with its index so the map and the braking estimate keep them apart;
+// a recording an app update cut short and the one that carried the drive on share the first one's
+// index (one line, ticks counting on). Engine data comes from the summaries and, for older drives,
+// the raw recording, as on one trip's page. A recording that can't load is listed in `failed` and
+// left out. `drivingMs` is door-to-door time summed over the recordings, without the stops between.
+async function loadDrive(recs, { onProgress = () => {}, live = () => true } = {}) {
+  const drive = [];
+  recs.forEach((r, i) => { drive[i] = i && continues(recs[i - 1], r) ? drive[i - 1] : i; });
+  const lists = new Array(recs.length).fill([]), engines = new Array(recs.length).fill([]), failed = [];
+  let next = 0, done = 0;
+  await Promise.all(Array.from({ length: Math.min(4, recs.length) }, async () => {
+    while (next < recs.length && live()) {
+      const i = next++;
+      try {
+        const tp = await tripPoints(recs[i].id);
+        let rows = tp.engine;
+        if (tp.engineRaw.length) {
+          try {
+            rows = Engine.merge(rows, await rawEngine(recs[i].id, tp));
+            Engine.calibrate(rows, tp);
+          } catch (e) { if (e.message === "unauthorized") throw e; }
+        }
+        engines[i] = rows;
+        lists[i] = tp.map((p) => ({ ...p, trip: drive[i] }));
+      } catch (e) {
+        if (e.message === "unauthorized") throw e;
+        failed.push(recs[i]);
+      }
+      onProgress(++done, recs.length);
+    }
+  }));
+  return {
+    drive, lists, engines, failed,
+    pts: lists.flat(), rows: engines.flat(),
+    drivingMs: recs.reduce((n, r) => n + (endOf(r) - r.startedWallMs), 0),
+  };
+}
+
+// The cruising speed the score and the savings lines use (chosen on the savings card).
+const COACH_KEY = "fuelish.coachTarget";
+function coachTarget() {
+  try { return Number(localStorage.getItem(COACH_KEY)) || 65; } catch { return 65; }
+}
+
+// The driving score of recordings taken as one drive, worked out the same way as on their page.
+// null without enough engine data.
+async function driveScore(recs) {
+  const d = await loadDrive(recs);
+  if (!d.rows.length || d.pts.length < 2) return null;
+  const vehicle = recs[0].meta.vehicle ?? "";
+  const e = Engine.summary(d.rows, { vehicle, tripMiles: Route.summary(d.pts).miles, tripMs: d.drivingMs });
+  return Coach.score({ pts: d.pts, rows: d.rows, e, vehicle, targetMph: coachTarget() })?.score ?? null;
+}
+
+// The colored ring around a score: green from 90, amber from 75, red below.
+const scoreTone = (n) => (n >= 90 ? "good" : n >= 75 ? "ok" : "low");
+
 // ---------- several trips: a day, a week, or an outing ----------
 
 async function showMany(kind, key) {
@@ -1107,9 +1261,12 @@ async function showMany(kind, key) {
   const { recordings } = await allRecordings();
   if (!live()) return;
   let recs, title, sub, prev = null, next = null;
-  if (kind === "outing") {
+  const outing = kind === "outing";
+  if (outing) {
     recs = outingOf(recordings, key);
     if (!recs) throw new Error("That outing isn't in the trip list.");
+    // One trip is an outing of one: its own page is the whole of it.
+    if (legsOf(recs).length <= 1) { location.replace(`#/r/${(legsOf(recs)[0] ?? recs[0]).id}`); return; }
     const day = new Date(recs[0].startedWallMs).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
     title = outingName(recs[0].startedWallMs);
     sub = `${day} · ${clock(recs[0].startedWallMs)} – ${clock(endOf(recs.at(-1)))}`;
@@ -1135,8 +1292,11 @@ async function showMany(kind, key) {
   // The trips, grouped into outings, with day headings in a week.
   // Trips whose route the list can't see (routeGaps) still go on the map: it loads full routes.
   const shown = recs.filter((r) => r.trip || r.routeGaps > 0);
-  let rows = "", lastDay = "";
-  outings(shown).forEach((o) => {
+  // Recordings that never moved aren't listed (as on an outing's row of trips); they're still on the map.
+  let rows = "", lastDay = "", listed = 0;
+  outings(shown).forEach((all) => {
+    const o = legsOf(all);
+    listed += o.length;
     o.forEach((r, i) => {
       const d = dayLabel(r.startedWallMs);
       if (kind === "week" && d !== lastDay) rows += `<li class="row-day">${esc(d)}</li>`;
@@ -1155,7 +1315,8 @@ async function showMany(kind, key) {
         <a href="#/" class="back">← Trips</a>
         <h1>${esc(title)}</h1>
         ${sub ? `<p class="muted">${esc(sub)}</p>` : ""}
-        ${nav}
+        ${outing && recs[0].meta.vehicle ? `<div class="pills"><span class="pill">${esc(recs[0].meta.vehicle)}</span></div>` : ""}
+        ${outing ? stretchNav(recs, null) : nav}
       </header>
       <section class="trip-map">
         <div id="map"></div>
@@ -1164,62 +1325,39 @@ async function showMany(kind, key) {
         <div class="map-status" id="rt-status">${shown.length ? "Loading trips…" : `No trips ${kind === "day" ? "this day" : "this week"}.`}</div>
       </section>
       <aside class="trip-side">
-        ${shown.length ? sidePanel(`<section class="side-sec"><h2>${plural(shown.length, "trip")}</h2><ol class="legs trip-rows">${rows}</ol></section>`) : ""}
+        ${shown.length ? sidePanel(outing ? "" : `<section class="side-sec"><h2>${plural(listed, "trip")}</h2><ol class="legs trip-rows">${rows}</ol></section>`) : ""}
       </aside>
     </div>`;
   if (!shown.length) return;
 
   const status = document.getElementById("rt-status");
-  let done = 0;
-  const progress = () => { if (status) status.innerHTML = `Loading trips… <progress max="${shown.length}" value="${done}"></progress>`; };
-  progress();
-  // A few at a time; each trip's points are tagged with its index so the map keeps them apart.
-  // One trip that can't load (e.g. a raw chunk missing) leaves just that trip off the map.
-  // A recording an app update cut short and the one that carried the drive on are one drive on the
-  // map (one line, ticks counting on): points of both get the first one's index.
-  const drive = [];
-  shown.forEach((r, i) => { drive[i] = i && continues(shown[i - 1], r) ? drive[i - 1] : i; });
-  const lists = new Array(shown.length);
-  const engines = new Array(shown.length).fill([]);
-  const failed = [];
-  let nextI = 0;
-  await Promise.all(Array.from({ length: Math.min(4, shown.length) }, async () => {
-    while (nextI < shown.length) {
-      const i = nextI++;
-      try {
-        const tp = await tripPoints(shown[i].id);
-        engines[i] = tp.engine; // summaries only: raw rebuilds of older drives are too slow for a week
-        lists[i] = tp.map((p) => ({ ...p, trip: drive[i] }));
-      } catch (e) {
-        if (e.message === "unauthorized") throw e;
-        lists[i] = [];
-        failed.push(shown[i]);
-      }
-      done++;
-      progress();
-    }
-  }));
+  const progress = (done) => { if (status) status.innerHTML = `Loading trips… <progress max="${shown.length}" value="${done}"></progress>`; };
+  progress(0);
+  const d = await loadDrive(shown, { onProgress: progress, live });
   if (!live()) return;
-  for (const r of failed) document.querySelector(`.trip-row[data-id="${CSS.escape(r.id)}"] span`)?.insertAdjacentText("beforeend", " · couldn't load the route");
-  const pts = lists.flat();
+  const { drive, lists, engines, pts } = d;
+  for (const r of d.failed) document.querySelector(`.trip-row[data-id="${CSS.escape(r.id)}"] span, .stretches [data-id="${CSS.escape(r.id)}"] small`)?.insertAdjacentText("beforeend", " · couldn't load the route");
   if (pts.length < 2) {
     status.textContent = "Not enough GPS fixes to draw a route.";
     return;
   }
   status.remove();
   const sm = Route.summary(pts);
+  // Time is driving time, door to door for each trip; the stops between them aren't driving.
+  sm.durMs = d.drivingMs;
   sideRoute(sm, { engine: engines.some((e) => e.length), trips: new Set(drive).size });
   const view = drawRoute(pts, sm, { withDay: kind === "week" });
-  const engineRows = engines.flat();
-  if (engineRows.length) {
+  if (d.rows.length) {
     const gas = await withTimeout(Gas.forTrip(pts[0].lat, pts[0].lon, shown[0].startedWallMs), 8000);
     if (!live()) return;
-    view.setEngine(engineRows, { partial: engines.some((e, i) => !e.length && lists[i].length), gas, vehicle: shown[0].meta.vehicle });
+    // Scored and costed as one drive: the trips back to back, without the stops.
+    const whole = { ...shown[0], startedWallMs: 0, driveEndWallMs: d.drivingMs };
+    view.setEngine(d.rows, { partial: engines.some((e, i) => !e.length && lists[i].length), gas, vehicle: shown[0].meta.vehicle, trip: whole });
   }
 
-  // Hovering a trip in the list brings it forward on the map.
+  // Hovering a trip in the list (or an outing's trip in the row up top) brings it forward on the map.
   const index = new Map(shown.map((r, i) => [r.id, drive[i]]));
-  document.querySelectorAll(".trip-row").forEach((a) => {
+  document.querySelectorAll(".trip-row, .stretches [data-id]").forEach((a) => {
     const k = index.get(a.dataset.id);
     a.addEventListener("mouseenter", () => view.focus(k));
     a.addEventListener("focus", () => view.focus(k));
@@ -1242,7 +1380,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
     const saved = JSON.parse(localStorage.getItem(VIEW_KEY) || "{}");
     state = { view: Route.VIEWS[saved.view] ? saved.view : null, labels: saved.labels ?? true, marks: ["min", "gas", "off"].includes(saved.marks) ? saved.marks : "min" };
   } catch {}
-  // Marks are for one drive: on a day or a week map they'd pile up into noise.
+  // One drive's readout says how far into it a moment is; marks count on through every trip shown.
   const oneTrip = Route.tripRanges(pts).length === 1;
   let price = null;
 
@@ -1252,7 +1390,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
   const effective = () => {
     const want = state.view ?? (hasEngine ? "cost" : "speed");
     const view = Route.VIEWS[want].engine && !hasEngine ? "speed" : want;
-    const marks = !oneTrip ? "off" : state.marks === "gas" && !hasEngine ? "min" : state.marks;
+    const marks = state.marks === "gas" && !hasEngine ? "min" : state.marks;
     return Object.assign(shownState, { view, color: Route.VIEWS[view].color, width: "none", labels: state.labels, marks });
   };
   effective();
@@ -1285,6 +1423,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
   views = [{ highlight: (i) => view.mark(i) }, friction];
 
   const pk = sm.peak;
+  document.getElementById("peaks-sum").textContent = friction.count ? `${Math.max(Math.abs(pk.brake), pk.accel, pk.corner).toFixed(2)} g peak` : "";
   document.getElementById("peaks").innerHTML = friction.count
     ? `<div><span>Braking</span><b>${Math.abs(pk.brake).toFixed(2)} g</b></div><div><span>Speeding up</span><b>${pk.accel.toFixed(2)} g</b></div><div><span>Turning</span><b>${pk.corner.toFixed(2)} g</b></div>`
     : `<p class="muted">Not enough moving GPS fixes here.</p>`;
@@ -1306,7 +1445,6 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
   };
   const stepName = (g) => (g.unit === "$" ? (g.step < 1 ? `${Math.round(g.step * 100)}¢` : "$1") : `${g.step} gal`);
   const marksSwitch = () => {
-    if (!oneTrip) return "";
     const every = shownState.marks === "min" ? "Every minute" : gasStep ? `Every ${stepName(gasStep)} of gas` : "";
     const opts = [["min", "Minutes"], ...(hasEngine ? [["gas", "Gas"]] : []), ["off", "Off"]];
     return `<div class="marks-switch">${every ? `<span class="marks-key"><i></i>${esc(every)}</span>` : ""}<div class="seg marks" role="group" aria-label="Marks along the route">${opts.map(([k, l]) =>
@@ -1358,7 +1496,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
     view.moments(momentsFor(pts, sm));
     // Coverage is against the whole drive: its GPS miles, and for one trip its door-to-door time.
     const scope = { tripMiles: sm.miles, tripMs: trip ? endOf(trip) - trip.startedWallMs : null };
-    // Coaching is for one drive at a time: a day or a week mixes too much to say what to change.
+    // Coaching and the score need `trip`: one recording, or several taken as one drive.
     const coach = trip ? { pts, rows, focus: (i) => { view.map.setView([pts[i].lat, pts[i].lon], Math.max(view.map.getZoom(), 16)); pick(i); } } : null;
     sideEngine(sm, Engine.summary(rows, { vehicle, ...scope }), { gas, partial, trip, vehicle, coach });
   }

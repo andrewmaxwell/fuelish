@@ -283,9 +283,11 @@ const Route = (() => {
   // q adds (ms for time; dollars or gallons for gas). Positions are interpolated between the fixes.
   // Across a GPS gap the total still counts, but no mark is placed: there's no route to put it on.
   function marksAlong(pts, step, amount) {
+    // The count carries on from one trip to the next, so marks number the trips in order.
     const out = [];
+    let total = 0;
     for (const [a, b] of tripRanges(pts)) {
-      let total = 0, brg = null;
+      let brg = null;
       for (let i = a + 1; i <= b; i++) {
         const p = pts[i - 1], q = pts[i];
         const add = amount(p, q);

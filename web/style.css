@@ -178,6 +178,15 @@ main { max-width: 1160px; margin: 0 auto; padding: 24px 16px 48px; }
   border-bottom: 1px solid var(--border);
 }
 .thumb svg { width: 100%; height: 100%; display: block; }
+/* A card's driving score: the same colored ring as on its page, over the map's corner. */
+.thumb { position: relative; }
+.card-score { position: absolute; top: 10px; right: 10px; display: flex; flex-direction: column; align-items: center; justify-content: center; width: 46px; height: 46px; border-radius: 50%; border: 2.5px solid var(--muted); background: var(--surface); box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+.card-score[hidden] { display: none; }
+.card-score b { font-size: 17px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; color: var(--text); }
+.card-score small { font-size: 8.5px; color: var(--muted); line-height: 1.1; }
+.card-score.good { border-color: var(--good); }
+.card-score.ok { border-color: var(--warn); }
+.card-score.low { border-color: var(--bad); }
 .thumb-casing { fill: none; stroke: var(--surface); stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; }
 .thumb-line { fill: none; stroke: var(--accent); stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; }
 .thumb-start { fill: var(--good); stroke: var(--surface); stroke-width: 2.5; }
@@ -215,6 +224,14 @@ main { max-width: 1160px; margin: 0 auto; padding: 24px 16px 48px; }
 .row-day:first-child { margin-top: 0; }
 .outing-nav, .period-nav { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 12px; font-size: 14px; }
 .outing-nav span { color: var(--text-2); }
+/* The whole outing, then each trip in it: one page, switched here. Scrolls sideways when long. */
+.stretches { display: flex; gap: 6px; margin-top: 12px; overflow-x: auto; scrollbar-width: none; }
+.stretches::-webkit-scrollbar { display: none; }
+.stretches a { flex: none; display: flex; flex-direction: column; gap: 1px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--raised); color: var(--text); text-decoration: none; font-size: 13px; }
+.stretches a b { font-weight: 650; font-variant-numeric: tabular-nums; }
+.stretches a small { font-size: 11.5px; color: var(--muted); }
+.stretches a:hover { border-color: var(--accent); }
+.stretches a[aria-current] { border-color: var(--accent); background: var(--accent-soft); }
 .outing-nav a, .period-nav a { font-weight: 600; text-decoration: none; }
 
 /* ---------- one trip: map first, no app header (the page has its own way back) ---------- */
@@ -255,7 +272,9 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 .back { font-size: 14px; font-weight: 600; text-decoration: none; }
 .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .pills:empty { display: none; }
-.trip-side { grid-area: side; overflow-y: auto; padding: 4px 20px 24px; display: grid; align-content: start; }
+/* One column no wider than the panel: without minmax(0, …) a long unbroken line (a folded
+   section's summary, the headline numbers) widens the column past the panel and gets cut off. */
+.trip-side { grid-area: side; overflow-y: auto; padding: 4px 20px 24px; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; }
 .trip-map { grid-area: map; position: relative; min-height: 0; border-left: 1px solid var(--border); }
 #map { position: absolute; inset: 0; }
 
@@ -280,7 +299,7 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 .engine-list { display: grid; margin: 10px 0 0; font-size: 14px; }
 .engine-list div { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-top: 1px solid var(--border); }
 .engine-list dt { color: var(--text-2); }
-.engine-list dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.engine-list dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .row-label { fill: var(--text-2); font-size: 11px; font-weight: 600; }
 .row-line { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; }
 .row-area { fill: var(--accent-soft); }
@@ -316,8 +335,10 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 .side-sec h2 { margin-bottom: 10px; }
 .side-sec h2 span { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--text); margin-left: 6px; }
 .side-sec > .hint:first-of-type { margin-top: 0; }
-.figs.trip-figs { margin: 0; padding: 0; border: 0; display: grid; grid-template-columns: repeat(4, auto); justify-content: space-between; gap: 14px; }
-.trip-figs .fig b { font-size: 26px; }
+.figs.trip-figs { margin: 0; padding: 0; border: 0; display: grid; grid-template-columns: repeat(4, auto); justify-content: space-between; gap: 10px; }
+.trip-figs .fig b { font-size: 26px; white-space: nowrap; }
+/* The smallest phones: the four numbers two by two rather than squeezed onto one row. */
+@media (max-width: 360px) { .figs.trip-figs { grid-template-columns: repeat(2, auto); } }
 .trip-figs .fig span { white-space: nowrap; }
 .trip-figs .fig small { font-size: 14px; }
 .sub-line { margin: 10px 0 0; font-size: 14px; color: var(--text-2); }
@@ -558,12 +579,30 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 }
 
 /* Where you could save (trip page) */
-.coach-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 16px; }
+.drive-score { display: flex; align-items: center; gap: 14px; margin-bottom: 4px; }
+.drive-score p { margin: 0; font-size: 14px; color: var(--text-2); line-height: 1.45; }
+.drive-score-num { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: none; width: 64px; height: 64px; border-radius: 50%; border: 3px solid var(--muted); }
+.drive-score-num b { font-size: 24px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.drive-score-num small { font-size: 9px; color: var(--muted); text-align: center; line-height: 1.1; max-width: 48px; }
+.drive-score.good .drive-score-num { border-color: var(--good, #2e9e5b); }
+.drive-score.ok .drive-score-num { border-color: var(--warn, #d9a21b); }
+.drive-score.low .drive-score-num { border-color: var(--bad, #d0453a); }
+/* score lines: name, a bar on one scale, the amount; each opens to say more */
+.coach-list details > summary { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; cursor: pointer; list-style: none; padding: 4px 0; }
+.coach-list details > summary::-webkit-details-marker { display: none; }
+.coach-name { font-size: 15px; font-weight: 600; white-space: nowrap; }
+.coach-name::before { content: "▸"; display: inline-block; width: 1em; color: var(--muted); transition: transform 0.15s; }
+.coach-list details[open] .coach-name::before { transform: rotate(90deg); }
+.coach-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.coach-bar > i { display: block; height: 100%; border-radius: 3px; background: var(--warn); }
+.coach-list summary b { font-weight: 650; font-variant-numeric: tabular-nums; }
+.coach-body { padding: 2px 0 6px 1em; }
+.coach .drive-score { margin-bottom: 10px; }
+.coach-rest { display: flex; justify-content: space-between; padding: 4px 0 0 1em; font-size: 14px; color: var(--muted); }
+.coach-rest b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.coach-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .coach-list li p { margin: 4px 0 0; font-size: 14px; color: var(--text-2); line-height: 1.45; }
 .coach-list li p.hint { font-size: 12.5px; color: var(--muted); }
-.coach-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.coach-head b { font-size: 15px; font-weight: 650; }
-.coach-head span { font-weight: 650; font-variant-numeric: tabular-nums; color: var(--text); }
 .coach-stops { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .coach-stops button { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--raised); color: var(--text); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; cursor: pointer; }
 .coach-stops button:hover { border-color: var(--accent); }
@@ -583,3 +622,24 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 .seg.marks { background: transparent; border: 0; padding: 0; flex-wrap: nowrap; }
 .seg.marks button { min-width: 0; flex: none; padding: 3px 8px; font-size: 12px; }
 .act-error { display: block; margin-top: 4px; font-size: 13px; }
+
+/* folded detail sections: one line each (title, key number), opening to the full section */
+.folds { padding: 6px 0; }
+.fold { border-top: 1px solid var(--border); }
+.folds .fold:first-child { border-top: 0; }
+.fold[hidden] { display: none; }
+.fold > summary { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 13px 0; cursor: pointer; list-style: none; }
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary h2 { margin: 0; white-space: nowrap; }
+.fold > summary h2::before { content: "▸"; display: inline-block; width: 1.1em; color: var(--muted); transition: transform 0.15s; }
+.fold[open] > summary h2::before { transform: rotate(90deg); }
+.fold > summary span { font-size: 14px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.fold-body { padding: 0 0 16px; }
+.fold-body > :first-child { margin-top: 0; }
+.sub-line:empty { display: none; }
+.about-sec { padding: 6px 0; }
+.about-sec .fold { border-top: 0; }
+.about-sec [data-about]:empty { display: none; }
+.about-sec h3 { font-size: 13px; font-weight: 650; margin: 12px 0 2px; color: var(--text); }
+.about-sec [data-about]:first-child h3 { margin-top: 0; }
+.about-sec p { margin: 0; font-size: 13px; color: var(--text-2); line-height: 1.45; }
