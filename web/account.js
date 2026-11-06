@@ -428,7 +428,9 @@ const Account = (() => {
 
   /** The signed-in person's id, or null. */
   const meId = () => me?.user?.id ?? null;
+  /** Sharing a trip is up to the person whose trip it is, or the owner (the server checks too). */
+  const canShare = (r) => !!me?.admin || (r.userId != null && r.userId === meId());
 
-  return { load, forget, meId, whoParam, whoFor, setWho, renderHeader, showLogin, showInvite, showAccount, nativeDone, signOut, inApp };
+  return { load, forget, meId, canShare, whoParam, whoFor, setWho, renderHeader, showLogin, showInvite, showAccount, nativeDone, signOut, inApp };
 })();
 window.Account = Account;

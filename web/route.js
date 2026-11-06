@@ -121,10 +121,14 @@ const Route = (() => {
     return out;
   }
 
-  // Stops in the middle of a drive: at least 5 s below 1 mph, not counting each trip's start and end.
+  // Standing still: GPS speed under this (about 1 mph). The same line as the server's trip list, for
+  // distance, moving time and stops alike, so the list and the trip page agree.
+  const STILL_MPS = 0.5;
+
+  // Stops in the middle of a drive: at least 5 s standing still, not counting each trip's start and end.
   function stops(pts) {
     const out = [];
-    const slow = (p) => p.v != null && p.v < 0.45;
+    const slow = (p) => p.v != null && p.v < STILL_MPS;
     for (const [a, b] of tripRanges(pts)) {
       const mine = [];
       let i0 = null;
@@ -148,7 +152,7 @@ const Route = (() => {
   function segmentMeters(dtMs, d, v0, v1, acc0, acc1) {
     if (dtMs <= 0 || dtMs > MAX_GAP_MS) return 0;
     if (d / (dtMs / 1000) > 90) return 0;
-    if (v0 != null && v1 != null) return v0 > 0.5 || v1 > 0.5 ? d : 0;
+    if (v0 != null && v1 != null) return v0 > STILL_MPS || v1 > STILL_MPS ? d : 0;
     return d > Math.max(acc0 ?? 0, acc1 ?? 0, 10) ? d : 0;
   }
   function haversine(la1, lo1, la2, lo2) {
@@ -163,7 +167,7 @@ const Route = (() => {
       const p = pts[i - 1], q = pts[i];
       if (q.trip !== p.trip) continue;
       dist += segmentMeters(q.t - p.t, haversine(p.lat, p.lon, q.lat, q.lon), p.v, q.v, p.acc, q.acc);
-      if (q.t - p.t <= MAX_GAP_MS && ((p.v ?? 0) > 0.45 || (q.v ?? 0) > 0.45)) moving += q.t - p.t;
+      if (q.t - p.t <= MAX_GAP_MS && ((p.v ?? 0) > STILL_MPS || (q.v ?? 0) > STILL_MPS)) moving += q.t - p.t;
     }
     for (const p of pts) {
       if (p.a != null) { peak.brake = Math.min(peak.brake, p.a / G); peak.accel = Math.max(peak.accel, p.a / G); }
@@ -514,7 +518,7 @@ const Route = (() => {
       const p = pts[s.i0];
       if (!shown(p)) continue;
       L.circleMarker([p.lat, p.lon], { radius: 5, color: "#fff", weight: 2, fillColor: "#52514e", fillOpacity: 1 })
-        .bindTooltip(`Stopped ${Math.round(s.ms / 1000)} s`, { direction: "top" }).addTo(marks);
+        .bindTooltip(`Stopped ${stopLength(s.ms)}`, { direction: "top" }).addTo(marks);
     }
     const ranges = tripRanges(pts);
     const at = (t) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -527,6 +531,14 @@ const Route = (() => {
       L.marker([last.lat, last.lon], { icon: dotIcon("end-dot", many ? 14 : 18), keyboard: false })
         .bindTooltip(many ? `End ${at(last.t)}` : "End").addTo(marks);
     }
+  }
+
+  // "45 s", "2 min 5 s", "12 min".
+  function stopLength(ms) {
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s} s`;
+    const m = Math.floor(s / 60), r = s % 60;
+    return m >= 10 || !r ? `${m} min` : `${m} min ${r} s`;
   }
 
   function dotIcon(className, size) {
@@ -550,5 +562,5 @@ const Route = (() => {
       (m.note ? `<p class="hint">${m.note}</p>` : "");
   }
 
-  return { fromChunks, rawChunks, merge, segmentMeters, haversine, fromRaw, render, tripRanges, legendHtml, summary, segmentColors, minuteMarks, gasMarks, METRICS, WIDTHS, VIEWS, G, MPH };
+  return { fromChunks, rawChunks, merge, segmentMeters, haversine, fromRaw, render, tripRanges, legendHtml, summary, segmentColors, minuteMarks, gasMarks, STILL_MPS, METRICS, WIDTHS, VIEWS, G, MPH };
 })();

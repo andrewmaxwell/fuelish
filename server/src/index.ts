@@ -175,7 +175,7 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   }
   if (p.length === 3 && p[2] === "verify" && m === "POST") {
     need("upload");
-    return verifyRecording(id, env);
+    return verifyRecording(id, who, env);
   }
   if (p.length === 4 && p[2] === "chunks" && m === "PUT") {
     need("upload");
@@ -183,6 +183,7 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   }
   if (p[2] === "shares") {
     need("read");
+    await needTripOwner(id, who, env);
     if (p.length === 3 && m === "GET") return listShares(id, env);
     if (p.length === 3 && m === "POST") return createShare(id, env);
     if (p.length === 4 && m === "DELETE") return revokeShare(id, p[3], env);
@@ -309,8 +310,9 @@ async function putRecording(req: Request, id: string, who: Principal, env: Env):
 }
 
 // The phone asks this before deleting its copy: does the server hold every chunk 0..chunkCount-1?
-async function verifyRecording(id: string, env: Env): Promise<Response> {
+async function verifyRecording(id: string, who: Principal, env: Env): Promise<Response> {
   const d = await recordingDetail(id, env);
+  if (!canWrite(who, d.recording.userId)) throw new HttpError(403, "recording belongs to someone else");
   return json({ complete: d.recording.complete, chunkCount: d.recording.chunkCount, missing: d.missing });
 }
 
@@ -431,45 +433,97 @@ async function listRecordings(url: URL, who: Principal, env: Env): Promise<Respo
   let user = url.searchParams.get("user");
   if (user === "me") user = who.userId ?? "";
   if (user != null && !/^[A-Za-z0-9_-]{0,64}$/.test(user)) throw new HttpError(400, "bad user");
+  // Counting a recording's chunks uses the (recording_id, seq) key, so this stays small however long
+  // the drives are. Each trip's route summary comes from list_json (see listParts).
   const { results } = await env.DB.prepare(
     `SELECT r.id, r.device_id, r.user_id, r.status, r.started_at_ms, r.ended_at_ms, r.chunk_count, r.meta_json, r.updated_at_ms,
-            COUNT(c.seq) AS chunks_received, COUNT(CASE WHEN c.seq < r.chunk_count THEN 1 END) AS chunks_in_range,
-            COALESCE(SUM(c.bytes), 0) AS bytes,
-            json_group_array(COALESCE(json_extract(c.meta_json, '$.track'), json_extract(c.meta_json, '$.routeOutline'))) AS tracks,
-            json_group_array(json_extract(c.meta_json, '$.fuelProfile')) AS profiles,
-            COUNT(CASE WHEN json_extract(c.meta_json, '$.track') IS NULL AND json_extract(c.meta_json, '$.routeOutline') IS NULL
-                         AND json_extract(c.meta_json, '$.streams."loc:gps"') IS NOT NULL THEN 1 END) AS untracked
-     FROM (SELECT * FROM recordings WHERE (started_at_ms < ?1 OR (started_at_ms = ?1 AND id < ?2))
-             AND (?4 IS NULL OR COALESCE(user_id, '') = ?4)
-           ORDER BY started_at_ms DESC, id DESC LIMIT ?3) r
-     LEFT JOIN (SELECT * FROM chunks ORDER BY seq) c ON c.recording_id = r.id
-     GROUP BY r.id ORDER BY r.started_at_ms DESC, r.id DESC`,
+            r.list_json, r.list_key,
+            (SELECT COUNT(*) FROM chunks c WHERE c.recording_id = r.id) AS chunks_received,
+            (SELECT COUNT(*) FROM chunks c WHERE c.recording_id = r.id AND c.seq < r.chunk_count) AS chunks_in_range,
+            (SELECT COALESCE(SUM(c.bytes), 0) FROM chunks c WHERE c.recording_id = r.id) AS bytes
+     FROM recordings r WHERE (r.started_at_ms < ?1 OR (r.started_at_ms = ?1 AND r.id < ?2))
+       AND (?4 IS NULL OR COALESCE(r.user_id, '') = ?4)
+     ORDER BY r.started_at_ms DESC, r.id DESC LIMIT ?3`,
   )
     .bind(ms, id, PAGE_SIZE, user)
     .all<any>();
+  const rows = results.map((r) => ({ r, row: recordingRow(r) }));
+  const parts = await listParts(rows.map(({ r, row }) => ({ id: r.id, chunks: r.chunks_received, endMs: row.driveEndWallMs, key: r.list_key, json: r.list_json })), env);
   const last = results.at(-1);
   return json({
-    recordings: results.map((r) => {
-      const row = recordingRow(r);
+    recordings: rows.map(({ r, row }) => ({ ...row, ...parts.get(r.id) })),
+    next: results.length === PAGE_SIZE ? `${last.started_at_ms}:${last.id}` : null,
+  });
+}
+
+// Raise when tripSummary, stopsOf or sumProfiles change what they return, so stored ones are redone.
+const LIST_VERSION = 1;
+const listKey = (chunks: number, endMs: number | null) => `v${LIST_VERSION}:${chunks}:${endMs ?? ""}`;
+// How many recordings' tracks are read in one go when their summaries need working out.
+const LIST_BATCH = 20;
+
+type ListParts = { trip: ReturnType<typeof tripSummary>; routeGaps: number; fuelProfile: ReturnType<typeof sumProfiles> | null };
+
+// What the list shows for each recording beyond its row: the route summary, chunks whose route it
+// couldn't see (routeGaps), and the fuel profile. Kept in list_json and worked out again only when
+// list_key no longer matches: chunks are never changed once stored, so their count says whether
+// anything new arrived. A chunk landing mid-way leaves a key that won't match next time.
+async function listParts(
+  recs: { id: string; chunks: number; endMs: number | null; key: string | null; json: string | null }[],
+  env: Env,
+): Promise<Map<string, ListParts>> {
+  const out = new Map<string, ListParts>();
+  const stale: typeof recs = [];
+  for (const rec of recs) {
+    if (rec.key === listKey(rec.chunks, rec.endMs) && rec.json) {
+      try {
+        out.set(rec.id, JSON.parse(rec.json));
+        continue;
+      } catch {
+        // fall through: work it out again
+      }
+    }
+    stale.push(rec);
+  }
+  for (let i = 0; i < stale.length; i += LIST_BATCH) {
+    const group = stale.slice(i, i + LIST_BATCH);
+    const read = await env.DB.batch(
+      group.map((rec) =>
+        env.DB.prepare(
+          `SELECT json_group_array(COALESCE(json_extract(meta_json, '$.track'), json_extract(meta_json, '$.routeOutline'))) AS tracks,
+                  json_group_array(json_extract(meta_json, '$.fuelProfile')) AS profiles,
+                  COUNT(CASE WHEN json_extract(meta_json, '$.track') IS NULL AND json_extract(meta_json, '$.routeOutline') IS NULL
+                               AND json_extract(meta_json, '$.streams."loc:gps"') IS NOT NULL THEN 1 END) AS untracked
+           FROM (SELECT meta_json FROM chunks WHERE recording_id = ? ORDER BY seq)`,
+        ).bind(rec.id),
+      ),
+    );
+    const writes: D1PreparedStatement[] = [];
+    group.forEach((rec, k) => {
+      const c: any = read[k].results[0] ?? {};
       // One damaged summary (stored before tracks were checked) costs that trip its outline, not the list.
       let trip = null;
       try {
-        trip = tripSummary(r.tracks, row.driveEndWallMs);
+        trip = tripSummary(c.tracks, rec.endMs);
       } catch (e) {
-        console.error(`trip summary for ${r.id}:`, e);
+        console.error(`trip summary for ${rec.id}:`, e);
       }
       // routeGaps: chunks with GPS whose route the list couldn't see (summary left out before
       // phones sent an outline). Their trip may say less than was driven; the trip page has it all.
       let fuelProfile = null;
       try {
-        fuelProfile = sumProfiles(JSON.parse(r.profiles ?? "[]"));
+        fuelProfile = sumProfiles(JSON.parse(c.profiles ?? "[]"));
       } catch (e) {
-        console.error(`fuel profile for ${r.id}:`, e);
+        console.error(`fuel profile for ${rec.id}:`, e);
       }
-      return { ...row, trip, routeGaps: r.untracked ?? 0, fuelProfile };
-    }),
-    next: results.length === PAGE_SIZE ? `${last.started_at_ms}:${last.id}` : null,
-  });
+      const parts: ListParts = { trip, routeGaps: c.untracked ?? 0, fuelProfile };
+      out.set(rec.id, parts);
+      writes.push(env.DB.prepare("UPDATE recordings SET list_json = ?, list_key = ? WHERE id = ?").bind(JSON.stringify(parts), listKey(rec.chunks, rec.endMs), rec.id));
+    });
+    // Saving is only a shortcut for next time: a failure here mustn't fail the list.
+    if (writes.length) await env.DB.batch(writes).catch((e) => console.error("saving list summaries:", e));
+  }
+  return out;
 }
 
 // When the drive itself ended. An automatic stop waits a while after the car goes away
@@ -516,7 +570,7 @@ export function tripSummary(tracksJson: string, endMs: number | null = null) {
   for (let i = 1; i < fixes.length; i++) {
     const [t0, la0, lo0, v0, a0] = fixes[i - 1], [t1, la1, lo1, v1, a1] = fixes[i];
     meters += segmentMeters(t1 - t0, haversine(la0, lo0, la1, lo1), v0, v1, a0, a1);
-    if (t1 - t0 <= MAX_GAP_MS && ((v0 ?? 0) > 1 || (v1 ?? 0) > 1)) movingMs += t1 - t0;
+    if (t1 - t0 <= MAX_GAP_MS && ((v0 ?? 0) > 0.5 || (v1 ?? 0) > 0.5)) movingMs += t1 - t0;
   }
   for (const p of fixes) if (p[3] != null) maxMps = Math.max(maxMps, p[3]);
   const step = Math.max(1, Math.ceil(fixes.length / 80));
@@ -623,9 +677,45 @@ async function recordingDetail(id: string, env: Env) {
 
 // ---------- prefs ----------
 
+// `versions`: each setting's version (its last change, ms). A save sends back the version it started
+// from (X-Fuelish-Base), so one made from an out-of-date copy is refused instead of undoing someone
+// else's change.
 async function getPrefs(env: Env): Promise<Response> {
-  const { results } = await env.DB.prepare("SELECT key, value_json FROM prefs").all<{ key: string; value_json: string }>();
-  return json({ prefs: Object.fromEntries(results.map((r) => [r.key, JSON.parse(r.value_json)])) });
+  const { results } = await env.DB.prepare("SELECT key, value_json, updated_at_ms FROM prefs").all<{ key: string; value_json: string; updated_at_ms: number }>();
+  return json({
+    prefs: Object.fromEntries(results.map((r) => [r.key, JSON.parse(r.value_json)])),
+    versions: Object.fromEntries(results.map((r) => [r.key, r.updated_at_ms])),
+  });
+}
+
+// Entries of two objects that differ (added, changed or removed).
+function changedKeys(a: Record<string, unknown>, b: Record<string, unknown>): string[] {
+  return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]));
+}
+
+/**
+ * What someone other than the owner may change. Place names are shared by everyone. The cost
+ * settings everyone starts from are the owner's. Vehicle costs: only vehicles on your own trips.
+ * Towing corrections: only your own trips. (Your own time is handled in putPref.)
+ */
+async function checkPrefChange(key: string, stored: any, value: any, who: Principal, env: Env): Promise<void> {
+  if (who.admin || key === "places" || key === "people") return;
+  if (key === "costs") throw new HttpError(403, "only the owner can change the shared cost settings");
+  if (!who.userId) throw new HttpError(403, "sign in to change this");
+  const changed = changedKeys(stored ?? {}, value ?? {});
+  if (!changed.length) return;
+  if (key === "towing") {
+    const own = await env.DB.batch(changed.map((id) => env.DB.prepare("SELECT 1 FROM recordings WHERE id = ? AND user_id = ?").bind(id, who.userId)));
+    if (own.some((r) => !r.results.length)) throw new HttpError(403, "you can only correct towing on your own trips");
+    return;
+  }
+  if (key === "vehicles") {
+    const own = await env.DB.batch(
+      changed.map((name) => env.DB.prepare("SELECT 1 FROM recordings WHERE user_id = ? AND json_extract(meta_json, '$.vehicle') = ? LIMIT 1").bind(who.userId, name)),
+    );
+    const bad = changed.filter((_, i) => !own[i].results.length);
+    if (bad.length) throw new HttpError(403, `only the people who drive it can change the costs for ${bad.join(", ")}`);
+  }
 }
 
 // What each setting may hold, so a malformed value can't break the pages that read it.
@@ -700,23 +790,35 @@ async function putPref(req: Request, key: string, who: Principal, env: Env): Pro
   }
   const bad = validPref(key, value);
   if (bad) throw new HttpError(400, bad);
+  const baseHeader = req.headers.get("X-Fuelish-Base");
+  const base = baseHeader == null || baseHeader === "" ? null : Number(baseHeader);
+  if (base != null && !(Number.isInteger(base) && base >= 0)) throw new HttpError(400, "bad X-Fuelish-Base");
+  const row = await env.DB.prepare("SELECT value_json, updated_at_ms FROM prefs WHERE key = ?").bind(key).first<{ value_json: string; updated_at_ms: number }>();
+  const stored = row ? JSON.parse(row.value_json) : null;
+  const conflict = () => json({ error: "changed since you loaded it", value: stored, version: row?.updated_at_ms ?? 0 }, 409);
+  // Saved from an out-of-date copy: the page applies its edit to the newer value and tries again.
+  if (base != null && base !== (row?.updated_at_ms ?? 0)) return conflict();
+  await checkPrefChange(key, stored, value, who, env);
   // Everyone sets their own time's worth; only the owner can change someone else's.
   if (key === "people" && !who.admin) {
     if (!who.userId) throw new HttpError(403, "sign in to set your own time");
-    const row = await env.DB.prepare("SELECT value_json FROM prefs WHERE key = 'people'").first<{ value_json: string }>();
-    const stored = row ? JSON.parse(row.value_json) : {};
+    const next = { ...(stored ?? {}) };
     const mine = (value as any)[who.userId];
-    if (mine) stored[who.userId] = mine;
-    else delete stored[who.userId];
-    text = JSON.stringify(stored);
+    if (mine) next[who.userId] = mine;
+    else delete next[who.userId];
+    text = JSON.stringify(next);
   }
-  await env.DB.prepare(
-    `INSERT INTO prefs (key, value_json, updated_at_ms) VALUES (?1, ?2, ?3)
-     ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,
-  )
-    .bind(key, text, Date.now())
-    .run();
-  return json({ ok: true });
+  // Only over the version just read, so a save landing in between isn't lost. Versions always rise.
+  const now = Math.max(Date.now(), (row?.updated_at_ms ?? 0) + 1);
+  const res = row
+    ? await env.DB.prepare("UPDATE prefs SET value_json = ?, updated_at_ms = ? WHERE key = ? AND updated_at_ms = ?").bind(text, now, key, row.updated_at_ms).run()
+    : await env.DB.prepare("INSERT INTO prefs (key, value_json, updated_at_ms) VALUES (?, ?, ?) ON CONFLICT (key) DO NOTHING").bind(key, text, now).run();
+  if (!res.meta.changes) {
+    if (base == null) throw new HttpError(409, "changed while saving; try again");
+    const fresh = await env.DB.prepare("SELECT value_json, updated_at_ms FROM prefs WHERE key = ?").bind(key).first<{ value_json: string; updated_at_ms: number }>();
+    return json({ error: "changed since you loaded it", value: fresh ? JSON.parse(fresh.value_json) : null, version: fresh?.updated_at_ms ?? 0 }, 409);
+  }
+  return json({ ok: true, version: now, value: JSON.parse(text) });
 }
 
 // ---------- share links ----------
@@ -724,6 +826,13 @@ async function putPref(req: Request, key: string, who: Principal, env: Env): Pro
 function shareToken(): string {
   const b = crypto.getRandomValues(new Uint8Array(16));
   return btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// Sharing a trip, and seeing or stopping its links, is up to the person whose trip it is (or the owner).
+async function needTripOwner(id: string, who: Principal, env: Env): Promise<void> {
+  const r = await env.DB.prepare("SELECT user_id FROM recordings WHERE id = ?").bind(id).first<{ user_id: string | null }>();
+  if (!r) throw new HttpError(404, "recording not found");
+  if (!who.admin && (r.user_id == null || r.user_id !== who.userId)) throw new HttpError(403, "only the person whose trip it is can share it");
 }
 
 async function listShares(id: string, env: Env): Promise<Response> {

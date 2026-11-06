@@ -237,6 +237,29 @@ describe("input checks", () => {
     const r: any = await res.json();
     expect(r.recordings.find((x: any) => x.id === "r9").trip).toBeNull();
   });
+
+  it("keeps each trip's list summary, and works it out again when a chunk arrives", async () => {
+    await call("/recordings/r12", { method: "PUT", headers: DEVICE, body: JSON.stringify({ id: "r12", deviceId: "dev12", status: "recording", startedWallMs: 6 }) });
+    const send = async (seq: number, track: number[][]) => {
+      const body = await gzip(`{"seq":${seq}}\n`);
+      const m = { trackFormat: 2, track };
+      return call(`/recordings/r12/chunks/${seq}`, { method: "PUT", headers: { ...DEVICE, "X-Fuelish-Sha256": await sha(body), "X-Fuelish-Meta": b64url(JSON.stringify(m)) }, body });
+    };
+    const list = async () => ((await (await call("/recordings", { headers: WEB })).json()) as any).recordings.find((x: any) => x.id === "r12");
+    expect((await send(0, [[0, 38.0, -90.0, 20, 3], [5000, 38.001, -90.0, 20, 3]])).status).toBe(201);
+    const first = await list();
+    const stored = await env.DB.prepare("SELECT list_json, list_key FROM recordings WHERE id = 'r12'").first<any>();
+    expect(JSON.parse(stored.list_json).trip.meters).toBe(first.trip.meters);
+    expect(stored.list_key).toMatch(/:1:/);
+    // Served from what was kept: tamper with it and the list shows the tampered copy.
+    await env.DB.prepare("UPDATE recordings SET list_json = ? WHERE id = 'r12'").bind(JSON.stringify({ ...JSON.parse(stored.list_json), routeGaps: 7 })).run();
+    expect((await list()).routeGaps).toBe(7);
+    // A new chunk: worked out again, with the new stretch.
+    expect((await send(1, [[10000, 38.002, -90.0, 20, 3], [15000, 38.003, -90.0, 20, 3]])).status).toBe(201);
+    const second = await list();
+    expect(second.routeGaps).toBe(0);
+    expect(second.trip.meters).toBeGreaterThan(first.trip.meters);
+  });
 });
 
 describe("paging", () => {
@@ -279,6 +302,25 @@ describe("prefs", () => {
     const got: any = await (await call("/prefs", { headers: WEB })).json();
     expect(got.prefs.places).toEqual(places);
     expect(got.prefs.costs).toEqual({ timePerHour: 25 });
+  });
+
+  it("refuses a save made from an out-of-date copy, and says what's there now", async () => {
+    const got: any = await (await call("/prefs", { headers: WEB })).json();
+    const v = got.versions.places;
+    expect(v).toBeGreaterThan(0);
+    const put = (base: number, val: unknown) =>
+      call("/prefs/places", { method: "PUT", headers: { ...WEB, "X-Fuelish-Base": String(base) }, body: JSON.stringify(val) });
+    const mine = [{ lat: 1, lon: 2, name: "A" }];
+    const ok: any = await (await put(v, mine)).json();
+    expect(ok.version).toBeGreaterThan(v);
+    // Another browser still holding the old version.
+    const stale = await put(v, [{ lat: 3, lon: 4, name: "B" }]);
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ value: mine, version: ok.version });
+    expect((await put(ok.version, [])).status).toBe(200);
+    // A setting nobody has saved yet is version 0.
+    const fresh = (base: string) => call("/prefs/towing", { method: "PUT", headers: { ...WEB, "X-Fuelish-Base": base }, body: "{}" });
+    expect((await fresh("nope")).status).toBe(400);
   });
 });
 

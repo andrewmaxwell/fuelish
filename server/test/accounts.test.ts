@@ -151,6 +151,32 @@ describe("accounts", () => {
     expect(got.prefs.people).toEqual({ someone: { timePerHour: 40 }, [dadId]: { timePerHour: 15 } });
   });
 
+  it("keeps sharing and settings to each person's own trips and vehicles", async () => {
+    const dad = sessionOf(await signIn(DAD));
+    const as = (h: Record<string, string>) => ({ ...h, ...POST });
+    // Andrew's trip: Dad can't share it or see its links. His own he can, and the owner can share anyone's.
+    expect((await call("/recordings/old1/shares", { method: "POST", headers: as(dad) })).status).toBe(403);
+    expect((await call("/recordings/old1/shares", { headers: dad })).status).toBe(403);
+    expect((await call("/recordings/dad1/shares", { method: "POST", headers: as(dad) })).status).toBe(201);
+    expect((await call("/recordings/dad1/shares", { method: "POST", headers: as(andrew) })).status).toBe(201);
+
+    const truck = JSON.stringify({ id: "dad3", deviceId: "dad-phone", status: "stopped", startedWallMs: 6000, chunkCount: 0, vehicle: "Truck" });
+    expect((await call("/recordings/dad3", { method: "PUT", headers: dadPhone, body: truck })).status).toBe(200);
+    const put = (h: Record<string, string>, k: string, v: unknown) => call(`/prefs/${k}`, { method: "PUT", headers: as(h), body: JSON.stringify(v) });
+    expect((await put(andrew, "vehicles", { Civic: { wearPerMile: 0.1 } })).status).toBe(200);
+    // The shared starting costs are the owner's.
+    expect((await put(dad, "costs", { timePerHour: 1 })).status).toBe(403);
+    // Vehicles: only ones on his own trips, leaving the rest as they are.
+    expect((await put(dad, "vehicles", { Civic: { wearPerMile: 0.1 }, Truck: { wearPerMile: 0.2 } })).status).toBe(200);
+    expect((await put(dad, "vehicles", { Civic: { wearPerMile: 0.5 }, Truck: { wearPerMile: 0.2 } })).status).toBe(403);
+    expect((await put(dad, "vehicles", { Truck: { wearPerMile: 0.2 } })).status).toBe(403); // removing the Civic's
+    // Towing corrections: only his own trips.
+    expect((await put(dad, "towing", { old1: true })).status).toBe(403);
+    expect((await put(dad, "towing", { dad1: true })).status).toBe(200);
+    // Place names are everyone's.
+    expect((await put(dad, "places", [{ lat: 1, lon: 1, name: "Dad's" }])).status).toBe(200);
+  });
+
   it("only lets the owner invite or manage people", async () => {
     const dad = sessionOf(await signIn(DAD));
     expect((await call("/invites", { method: "POST", headers: { ...dad, "X-Fuelish": "1" } })).status).toBe(403);
@@ -163,7 +189,7 @@ describe("accounts", () => {
     const r = await call("/admin/phones/andrew-phone", { method: "PUT", headers: { ...andrew, ...POST }, body: JSON.stringify({ userId: dadId }) });
     expect(await r.json()).toEqual({ ok: true, trips: 1 });
     const dads: any = await (await call(`/recordings?user=${dadId}`, { headers: andrew })).json();
-    expect(dads.recordings.map((x: any) => x.id).sort()).toEqual(["dad1", "old1"]);
+    expect(dads.recordings.map((x: any) => x.id).sort()).toEqual(["dad1", "dad3", "old1"]);
   });
 
   it("refuses cookie changes without the X-Fuelish header", async () => {

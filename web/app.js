@@ -80,7 +80,7 @@ async function api(path, opts = {}) {
     throw new Error("unauthorized");
   }
   const body = await res.json();
-  if (!res.ok) throw new Error(body.error || res.statusText);
+  if (!res.ok) throw Object.assign(new Error(body.error || res.statusText), { status: res.status, body });
   return body;
 }
 
@@ -89,27 +89,44 @@ async function api(path, opts = {}) {
 // only and is retried on the next. Saving: writes go one at a time, and the stored value changes
 // only once the server has it (a failed save throws, for the caller to show).
 const Prefs = (() => {
-  let data = null, loading = null, failed = false, queue = Promise.resolve();
+  let data = null, versions = {}, loading = null, failed = false, queue = Promise.resolve();
   async function load() {
     if (data) return data;
-    loading ||= api("/prefs").then((b) => { data = b.prefs || {}; failed = false; Costs.use(data.costs, data.vehicles, data.people); return data; })
+    loading ||= api("/prefs").then((b) => { data = b.prefs || {}; versions = b.versions || {}; failed = false; Costs.use(data.costs, data.vehicles, data.people); return data; })
       .catch((e) => { if (e.message === "unauthorized") throw e; failed = true; Costs.use(null); return {}; })
       .finally(() => { loading = null; });
     return loading;
   }
   // `change(current)` runs when this save's turn comes, against the value the saves before it left,
-  // so two quick edits to one setting (naming two places) both stick.
+  // so two quick edits to one setting (naming two places) both stick. Each save says which version
+  // it changed; if someone else saved in between, the server sends theirs and the change is made
+  // again on top of it, so neither edit is lost.
   function update(key, change) {
     const run = queue.then(async () => {
-      const value = change(data?.[key]);
-      await api(`/prefs/${key}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) });
-      (data ||= {})[key] = value;
+      for (let attempt = 0; ; attempt++) {
+        const value = change(data?.[key]);
+        try {
+          const r = await api(`/prefs/${key}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json", "X-Fuelish-Base": String(versions[key] ?? 0) },
+            body: JSON.stringify(value),
+          });
+          (data ||= {})[key] = r.value ?? value;
+          if (r.version != null) versions[key] = r.version;
+          return;
+        } catch (e) {
+          if (e.status !== 409 || !e.body || !("version" in e.body) || attempt >= 3) throw e;
+          (data ||= {})[key] = e.body.value ?? undefined;
+          versions[key] = e.body.version;
+          if (key === "costs" || key === "vehicles" || key === "people") Costs.use(data.costs, data.vehicles, data.people);
+        }
+      }
     });
     queue = run.catch(() => {});
     return run;
   }
   const set = (key, value) => update(key, () => value);
-  const clear = () => { data = null; loading = null; failed = false; };
+  const clear = () => { data = null; versions = {}; loading = null; failed = false; };
   return { load, set, update, clear, get: (k) => data?.[k], failed: () => failed };
 })();
 
@@ -199,7 +216,7 @@ const Places = (() => {
       // Not before it first moved (a short hop may never leave the circle).
       let m = a;
       while (m < b && !(pts[m].v > 1)) m++;
-      for (let k = Math.max(j, m); k < b; k++) if (pts[k].v != null && pts[k].v < 0.45) return k;
+      for (let k = Math.max(j, m); k < b; k++) if (pts[k].v != null && pts[k].v < Route.STILL_MPS) return k;
       return b;
     };
     Route.tripRanges(pts).forEach(([a, b]) => {
@@ -308,6 +325,7 @@ function showLogin(msg = "") {
   routeCache.clear();
   engineCache.clear();
   tripRowsCache.clear();
+  RowStore.clear();
   Prefs.clear();
   Account.showLogin(msg);
 }
@@ -1039,7 +1057,7 @@ async function showTrip(id, share = null, focusT = null) {
         ${share ? "" : `<a href="#/" class="back">← Trips</a>`}
         <h1>${esc(tripName(r.startedWallMs))}</h1>
         <p class="muted">${esc(day)} · ${esc(timeRange(r))}</p>
-        <div class="pills">${pills}${share ? "" : `<div class="share" id="share"></div>`}</div>
+        <div class="pills">${pills}${!share && Account.canShare(r) ? `<div class="share" id="share"></div>` : ""}</div>
         <div id="trip-context"></div>
         ${r.status === "recording" ? `<p class="hint" id="upd">Still recording; the route fills in as parts upload. <span id="upd-state"></span></p>`
           : !r.complete ? `<p class="hint" id="upd">${r.chunksReceived} of ${r.chunkCount ?? "?"} parts uploaded so far; the phone sends the rest on Wi-Fi. <span id="upd-state"></span></p>` : ""}
@@ -1054,7 +1072,7 @@ async function showTrip(id, share = null, focusT = null) {
       <aside class="trip-side">${sidePanel(share ? "" : `<section class="side-sec places-sec" id="places-sec" hidden></section>`)}</aside>
     </div>`;
 
-  if (!share) shareControls(id);
+  if (!share && Account.canShare(r)) shareControls(id);
   // Not awaited: the route doesn't wait for it. It also says whether the trip was towing, which the
   // engine figures then take into account.
   const context = share ? Promise.resolve(null) : tripContext(r, live);
@@ -1411,7 +1429,50 @@ async function showCvt() {
 // from the summaries, merged with a raw rebuild of chunks that only have raw engine data. Loaded a
 // few at a time and kept for this session, so Insights, Costs, Transmission and Repeated trips share
 // them. Gas prices are fetched once, waited for once, and only when `gas` is asked for.
-const tripRowsCache = new Map(); // `${id}@${updatedAtMs}` -> rows (null: no engine data)
+const tripRowsCache = new Map(); // `${id}@${updatedAtMs}@${chunksReceived}` -> rows (null: no engine data)
+
+// The same rows kept in this browser between visits (IndexedDB), so each trip is read from the
+// server once rather than on every visit. A stored copy counts only if it was worked out by the
+// engine.js and route.js running now (a digest of their text), so changing either redoes them all.
+// Anything going wrong here just means reading from the server as before. Cleared on sign-out.
+const RowStore = (() => {
+  const STORE = "engineRows";
+  let dbP = null, verP = null;
+  const open = () => dbP ||= new Promise((res) => {
+    try {
+      const req = indexedDB.open("fuelish", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+      req.onsuccess = () => res(req.result);
+      req.onerror = req.onblocked = () => res(null);
+    } catch { res(null); }
+  });
+  const version = () => verP ||= Promise.all(["engine.js", "route.js"].map((f) => fetch(f).then((r) => (r.ok ? r.text() : Promise.reject(new Error(f))))))
+    .then(async (texts) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(texts.join("\0"))))].slice(0, 12).map((b) => b.toString(16).padStart(2, "0")).join(""))
+    .catch(() => null);
+  const req = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  // Rows are an array with a few properties of its own (calibrated, shiftMs) that storing would drop.
+  const extras = (rows) => Object.fromEntries(Object.keys(rows).filter((k) => !/^\d+$/.test(k)).map((k) => [k, rows[k]]));
+  async function get(key) {
+    try {
+      const [db, v] = await Promise.all([open(), version()]);
+      if (!db || !v) return undefined;
+      const hit = await req(db.transaction(STORE).objectStore(STORE).get(key));
+      if (!hit || hit.v !== v) return undefined;
+      return hit.rows ? Object.assign(hit.rows, hit.extras) : null;
+    } catch { return undefined; }
+  }
+  async function put(key, rows) {
+    try {
+      const [db, v] = await Promise.all([open(), version()]);
+      if (db && v) await req(db.transaction(STORE, "readwrite").objectStore(STORE).put({ v, rows, extras: rows ? extras(rows) : null }, key));
+    } catch {}
+  }
+  async function clear() {
+    try { const db = await open(); if (db) await req(db.transaction(STORE, "readwrite").objectStore(STORE).clear()); } catch {}
+  }
+  return { get, put, clear };
+})();
+
 async function engineTrips(recordings, live, onStatus = () => {}, { gas = true } = {}) {
   const asc = [...recordings].sort((a, b) => a.startedWallMs - b.startedWallMs);
   const found = new Array(asc.length).fill(null), failed = [];
@@ -1420,9 +1481,13 @@ async function engineTrips(recordings, live, onStatus = () => {}, { gas = true }
   status();
   await Promise.all(Array.from({ length: Math.min(4, asc.length) }, async () => {
     while (next < asc.length && live()) {
-      const i = next++, r = asc[i], key = `${r.id}@${r.updatedAtMs}`;
+      const i = next++, r = asc[i], key = `${r.id}@${r.updatedAtMs}@${r.chunksReceived}`;
       try {
         let rows = tripRowsCache.get(key);
+        if (rows === undefined) {
+          rows = await RowStore.get(key);
+          if (rows !== undefined) tripRowsCache.set(key, rows);
+        }
         if (rows === undefined) {
           // Only engine data is needed here, not the route.
           const { recording, chunks } = await api(`/recordings/${r.id}`);
@@ -1439,6 +1504,8 @@ async function engineTrips(recordings, live, onStatus = () => {}, { gas = true }
             else rows = null;
           }
           tripRowsCache.set(key, rows);
+          // A trip still uploading changes again soon: keep it for this visit only.
+          if (r.complete && r.status !== "recording") RowStore.put(key, rows);
         }
         if (rows) found[i] = { r, rows, gas: null, scope: { tripMiles: r.trip ? r.trip.meters / 1609.344 : null, tripMs: endOf(r) - r.startedWallMs } };
       } catch (e) {
@@ -1677,7 +1744,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
       <div class="readout-time">${new Date(p.t).toLocaleString([], { weekday: withDay ? "short" : undefined, hour: "numeric", minute: "2-digit", second: "2-digit" })}${oneTrip ? ` · ${Math.floor((p.t - pts[0].t) / 60000)} min in` : ""}</div>
       <div class="readout-speed">${fmt(p.v != null ? p.v * Route.MPH : null, 0, "")}<small> mph</small></div>
       <dl>
-        <dt>${p.a != null && p.a < 0 ? "Braking" : "Speeding up"}</dt><dd>${fmt(p.a != null ? Math.abs(p.a) / Route.G : null, 2, " g")}</dd>
+        <dt>${p.a == null ? "Accel" : p.a < 0 ? "Braking" : "Speeding up"}</dt><dd>${fmt(p.a != null ? Math.abs(p.a) / Route.G : null, 2, " g")}</dd>
         <dt>Turning</dt><dd>${fmt(p.side != null ? Math.abs(p.side) / Route.G : null, 2, " g")}${p.side != null && Math.abs(p.side) / Route.G >= 0.03 ? (p.side > 0 ? " right" : " left") : ""}</dd>
         ${p.eng ? `<dt>Gas pedal</dt><dd>${fmt(p.eng.pedal, 0, "%")}</dd>
         <dt>Economy</dt><dd>${p.eng.mpg == null ? "–" : p.eng.mpg >= 99 ? "coasting" : fmt(p.eng.mpg, 0, " mpg")}</dd>

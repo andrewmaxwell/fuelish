@@ -141,6 +141,8 @@ authorized JavaScript origins are `https://fuelish.andrewmaxwell.dev`, the worke
   as that person's. Keys are listed (and removable) on the Account page. A phone that uploaded with the shared
   `DEVICE_TOKEN` counts as the owner's; Account → Phones that have uploaded moves its trips to someone else.
 - **Seeing trips**: everyone signed in can see everyone's trips; the header's "whose trips" picker starts on your own.
+- **Changing things**: only you (or the owner) can share your trips or correct their towing, and only the people who
+  drive a vehicle can change its costs. Place names are everyone's; the shared starting cost settings are the owner's.
 - `WEB_TOKEN` and `DEVICE_TOKEN` keep working (as the owner). Sessions are an HttpOnly cookie for a year; requests
   that change something must carry `X-Fuelish: 1`, which another site can't add.
 
