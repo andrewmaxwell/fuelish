@@ -240,11 +240,22 @@ cd server && npm test
 cd android && JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" ./gradlew testDebugUnitTest
 ```
 
-Local server with local D1/R2 (`server/.dev.vars` sets `dev-device-token` / `dev-web-token`):
+Local server with local D1/R2 on `http://localhost:8787`. It installs dependencies, creates `server/.dev.vars`
+(`dev-device-token` / `dev-web-token`) if missing and applies migrations. Sign in with Google or the web token.
 
 ```bash
-cd server && cp .dev.vars.example .dev.vars && npx wrangler d1 migrations apply fuelish --local && npx wrangler dev --ip 0.0.0.0
+tools/dev.sh
 ```
+
+To try changes on your real trips, copy production's database and recordings down first (read-only against
+production; replaces the local database; recordings are mirrored, so re-runs only fetch what's new; needs
+`npx wrangler login`). Stop the local server before pulling.
+
+```bash
+tools/dev.sh --pull
+```
+
+`tools/pull-prod.sh` does just the copy (`--db-only` skips recordings, `--apks` adds the published APKs).
 
 The emulator reaches it at `http://10.0.2.2:8787`. To try a real phone on the same Wi-Fi, use the Mac's LAN IP.
 That only works with a debug build after adding the IP to `android/app/src/debug/res/xml/network_security_config.xml`.
