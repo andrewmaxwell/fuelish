@@ -122,7 +122,9 @@ npx wrangler secret put WEB_TOKEN
 npx wrangler deploy
 ```
 
-The deploy prints the URL (e.g. `https://fuelish.<account>.workers.dev`). Open it and sign in with `WEB_TOKEN`.
+The app is served at `https://fuelish.andrewmaxwell.dev` (the `routes` entry in `wrangler.jsonc`; the
+`andrewmaxwell.dev` zone is on the same Cloudflare account). The old `https://fuelish.emailandrewmaxwell.workers.dev`
+still works. Open it and sign in with `WEB_TOKEN`.
 The token is kept in that browser's localStorage. Downloads use signed links that expire after 15 minutes.
 
 ### Accounts (Sign in with Google)
@@ -130,7 +132,7 @@ The token is kept in that browser's localStorage. Downloads use signed links tha
 People sign in with Google; there are no passwords. The Google Cloud project **Fuelish** has one web OAuth client
 (its ID is `GOOGLE_CLIENT_ID` in `wrangler.jsonc`, `web/account.js` and the Android `GoogleSignIn.kt`; it isn't
 secret) and two Android clients for package `app.fuelish`, one per signing key (release and debug SHA-1). Its
-authorized JavaScript origins are the workers.dev URL and `http://localhost:8787`.
+authorized JavaScript origins are `https://fuelish.andrewmaxwell.dev`, the workers.dev URL and `http://localhost:8787`.
 
 - **The owner** claims the server once: sign in with `WEB_TOKEN` as before, then **Continue with Google** in the
   banner. That account becomes the owner and gets every trip uploaded so far.

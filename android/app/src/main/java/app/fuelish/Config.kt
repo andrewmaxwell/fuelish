@@ -37,7 +37,7 @@ class Config(val json: JSONObject) {
         val DEFAULTS: String = """
         {
           "vehicle": "2016 Honda Civic LX 2.0L",
-          "serverUrl": "https://fuelish.emailandrewmaxwell.workers.dev",
+          "serverUrl": "https://fuelish.andrewmaxwell.dev",
           "deviceToken": "",
           "chunkSeconds": 60,
           "chunkMaxBytes": 33554432,

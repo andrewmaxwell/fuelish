@@ -6,7 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SERVER="${FUELISH_SERVER:-https://fuelish.emailandrewmaxwell.workers.dev}"
+SERVER="${FUELISH_SERVER:-https://fuelish.andrewmaxwell.dev}"
 export JAVA_HOME="${JAVA_HOME:-/Applications/Android Studio.app/Contents/jbr/Contents/Home}"
 
 if [ -n "$(git status --porcelain)" ]; then

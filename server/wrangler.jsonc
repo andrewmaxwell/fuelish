@@ -5,6 +5,10 @@
   "account_id": "d559eef7d175e4069c592f3ee26b14c7",
   "compatibility_date": "2026-10-01",
   "observability": { "enabled": true },
+  // Served at fuelish.andrewmaxwell.dev (Cloudflare makes the DNS record and certificate);
+  // workers.dev stays on so phones set up with the old URL keep uploading.
+  "routes": [{ "pattern": "fuelish.andrewmaxwell.dev", "custom_domain": true }],
+  "workers_dev": true,
   // One Worker serves the API (/api/*) and the static web app (../web).
   "assets": {
     "directory": "../web",
