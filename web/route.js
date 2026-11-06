@@ -385,10 +385,12 @@ const Route = (() => {
 
     const cursor = L.marker([0, 0], { icon: dotIcon("end-dot ring", 18), interactive: false, keyboard: false });
     const moments = L.layerGroup().addTo(map);
+    const placeLayer = L.layerGroup().addTo(map);
     // Labels that would overlap one listed earlier are hidden until zooming in separates them.
+    // Named places go first, so they win over moments.
     function declutter() {
       const placed = [];
-      moments.eachLayer((mk) => {
+      for (const layer of [placeLayer, moments]) layer.eachLayer((mk) => {
         const el = mk.getTooltip()?.getElement();
         if (!el) return;
         el.style.visibility = "";
@@ -398,7 +400,35 @@ const Route = (() => {
       });
     }
     map.on("zoomend resize", () => { declutter(); declutterTicks(); });
+
+    // Named places along the drive, labeled where the drive was there; and a ring for one place
+    // (named or not) while its name is being edited.
+    // Over the route and its markers (its own pane, drawn as SVG so the canvas route can't cover it).
+    map.createPane("place-ring").style.zIndex = "650";
+    const ring = L.circleMarker([0, 0], { radius: 18, color: "#f0b429", weight: 3, fillColor: "#f0b429", fillOpacity: 0.18, interactive: false, pane: "place-ring", renderer: L.svg({ pane: "place-ring" }) });
+    let placeList = [];
     return {
+      // [{ lat, lon, name }]: each named place labeled once.
+      places(list) {
+        placeList = list;
+        placeLayer.clearLayers();
+        const done = [];
+        for (const v of list) {
+          if (!v.name || done.some((d) => d.name === v.name && haversine(d.lat, d.lon, v.lat, v.lon) < 300)) continue;
+          done.push(v);
+          L.circleMarker([v.lat, v.lon], { radius: 4, color: "#0b0b0b", weight: 2, fillColor: "#f0b429", fillOpacity: 1, interactive: false })
+            .bindTooltip(v.name.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`), { permanent: true, direction: "right", offset: [6, 0], className: "place-label" })
+            .addTo(placeLayer);
+        }
+        declutter();
+      },
+      // Ring place k of the list (null: none), panning to it if it's off screen.
+      highlightPlace(k) {
+        const v = placeList[k];
+        if (!v) { ring.remove(); return; }
+        ring.setLatLng([v.lat, v.lon]).addTo(map);
+        if (!map.getBounds().pad(-0.1).contains([v.lat, v.lon])) map.panTo([v.lat, v.lon]);
+      },
       // Labels pinned to the map at notable moments: [{ i: point index, text, dir? }]. Hover or tap shows that moment.
       moments(list) {
         moments.clearLayers();

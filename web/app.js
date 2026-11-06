@@ -179,15 +179,25 @@ const Places = (() => {
     });
     return named(out);
   }
-  // The same from one trip's detailed points: its start, stops along the way (Route.summary's), its end.
+  // The same from detailed points, one trip or several (an outing, a day, a week): each drive's start,
+  // stops along the way (Route.summary's) and end. Where the next drive starts where one ended, that's
+  // one stop, as long as the time between. Each visit has `i`, the point it's at.
   function visitsOfPoints(pts, stops) {
     const mean = (a, b, k) => pts.slice(a, b + 1).reduce((n, p) => n + p[k], 0) / (b - a + 1);
-    return named([
-      { lat: pts[0].lat, lon: pts[0].lon, kind: "start" },
-      ...stops.filter((x) => x.ms >= STOP_MS).map((x) => ({ lat: mean(x.i0, x.i1, "lat"), lon: mean(x.i0, x.i1, "lon"), ms: x.ms, kind: "stop" }))
-        .filter(away([pts[0].lat, pts[0].lon], [pts.at(-1).lat, pts.at(-1).lon])),
-      { lat: pts.at(-1).lat, lon: pts.at(-1).lon, kind: "end" },
-    ]);
+    const out = [];
+    Route.tripRanges(pts).forEach(([a, b]) => {
+      const s = pts[a], e = pts[b], prev = out.at(-1);
+      if (prev && Route.haversine(prev.lat, prev.lon, s.lat, s.lon) <= PARK_M) Object.assign(prev, { kind: "stop", ms: s.t - prev.t });
+      else out.push({ lat: s.lat, lon: s.lon, i: a, t: s.t, kind: "start" });
+      const far = away([s.lat, s.lon], [e.lat, e.lon]);
+      for (const x of stops) {
+        if (x.i0 < a || x.i1 > b || x.ms < STOP_MS) continue;
+        const v = { lat: mean(x.i0, x.i1, "lat"), lon: mean(x.i0, x.i1, "lon"), ms: x.ms, i: x.i0, t: pts[x.i0].t, kind: "stop" };
+        if (far(v)) out.push(v);
+      }
+      out.push({ lat: e.lat, lon: e.lon, i: b, t: e.t, kind: "end" });
+    });
+    return named(out);
   }
   function named(vs) {
     for (const v of vs) v.name = nameAt(v.lat, v.lon, v.kind === "stop" ? STOP_M : END_M);
@@ -991,8 +1001,8 @@ async function showTrip(id, share = null, focusT = null) {
   const sm = Route.summary(pts);
   sm.durMs = endOf(r) - r.startedWallMs;
   sideRoute(sm, { engine: pts.engine.length > 0 || pts.engineRaw.length > 0 });
-  if (!share) placesSection(pts, sm, live);
   const view = drawRoute(pts, sm);
+  if (!share) placesSection(pts, sm, view, live, { retitle: (l) => { document.querySelector(".trip-head h1").textContent = l ?? tripName(r.startedWallMs); } });
   if (focusT != null) {
     // Opened at a moment (from Insights): zoom there and hold the cursor on it.
     let best = 0;
@@ -1033,35 +1043,52 @@ async function showTrip(id, share = null, focusT = null) {
   }
 }
 
-// Where a trip started, stopped along the way and ended, each with a name to type. The names are
-// shared with Compare and describe trips in the list ("Home → Aldi"); the page title follows them.
-function placesSection(pts, sm, live) {
+// Where the drive (one trip, an outing, a day or a week) started, stopped and ended, each with a
+// name to type. Named places are labeled on the map, and the place whose name is being edited is
+// ringed there. The names are shared with Compare and describe trips in the list ("Home → Aldi");
+// `retitle(label)` (optional) puts the description in the page title.
+function placesSection(pts, sm, view, live, { retitle = null, withDay = false } = {}) {
   const host = document.getElementById("places-sec");
   if (!host) return;
-  const draw = () => {
+  const when = (t) => new Date(t).toLocaleString([], { weekday: withDay ? "short" : undefined, hour: "numeric", minute: "2-digit" });
+  const what = { start: "Started", stop: "Stopped", end: "Ended" };
+  const draw = (focusI = null) => {
     const vs = Places.visitsOfPoints(pts, sm.stops);
-    const h1 = document.querySelector(".trip-head h1");
-    if (h1) h1.textContent = Places.labelOf(vs) ?? tripName(pts[0].t);
-    const what = { start: "Started at", stop: "Stopped at", end: "Ended at" };
+    retitle?.(Places.labelOf(vs));
+    view.places(vs);
+    view.highlightPlace(null);
     host.hidden = false;
     host.innerHTML = `<h2>Places</h2>
       <div class="place-rows">${vs.map((v, i) => `
-        <label class="place-row"><span>${what[v.kind]}${v.ms ? ` <small>${fmtDur(v.ms)}</small>` : ""}</span>
+        <label class="place-row"><span>${what[v.kind]} <small>${esc(when(v.t))}${v.ms ? ` · ${fmtDur(v.ms)}` : ""}</small></span>
           <input value="${esc(v.name ?? "")}" placeholder="Name this place" data-i="${i}" maxlength="80"></label>`).join("")}</div>
       <p class="hint" id="places-note">Names are shared with Compare and every browser.</p>`;
-    host.querySelectorAll("input").forEach((inp) => inp.addEventListener("change", async () => {
-      const v = vs[+inp.dataset.i];
-      inp.disabled = true;
-      try {
-        await Places.rename(v.lat, v.lon, inp.value.trim());
-      } catch (e) {
-        if (e.message === "unauthorized" || !live()) return;
-        inp.disabled = false;
-        document.getElementById("places-note").innerHTML = `<span class="bad">Couldn't save: ${esc(e.message)}</span>`;
-        return;
-      }
-      if (live()) draw();
-    }));
+    host.querySelectorAll("input").forEach((inp) => {
+      const k = +inp.dataset.i;
+      inp.addEventListener("focus", () => view.highlightPlace(k));
+      inp.addEventListener("blur", () => view.highlightPlace(null));
+      inp.closest(".place-row").addEventListener("mouseenter", () => view.highlightPlace(k));
+      inp.closest(".place-row").addEventListener("mouseleave", () => { if (document.activeElement !== inp) view.highlightPlace(null); });
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+      inp.addEventListener("change", async () => {
+        const v = vs[k];
+        // Where focus went (Tab to the next field), to put it back after redrawing.
+        const next = () => [...host.querySelectorAll("input")].indexOf(document.activeElement);
+        inp.disabled = true;
+        try {
+          await Places.rename(v.lat, v.lon, inp.value.trim());
+        } catch (e) {
+          if (e.message === "unauthorized" || !live()) return;
+          inp.disabled = false;
+          document.getElementById("places-note").innerHTML = `<span class="bad">Couldn't save: ${esc(e.message)}</span>`;
+          return;
+        }
+        if (!live()) return;
+        const go = next();
+        draw();
+        if (go >= 0) host.querySelectorAll("input")[go]?.focus();
+      });
+    });
   };
   draw();
 }
@@ -1423,6 +1450,7 @@ async function showMany(kind, key) {
       sub = `${f(from)} – ${f(addDays(to, -1))}`;
     }
   }
+  const placesHost = `<section class="side-sec places-sec" id="places-sec" hidden></section>`;
   const nav = prev || next ? `<nav class="period-nav">
       ${prev ? `<a href="${prev}">← Earlier</a>` : ""}${next ? `<a href="${next}">Later →</a>` : ""}</nav>` : "";
 
@@ -1462,7 +1490,7 @@ async function showMany(kind, key) {
         <div class="map-status" id="rt-status">${shown.length ? "Loading trips…" : `No trips ${kind === "day" ? "this day" : "this week"}.`}</div>
       </section>
       <aside class="trip-side">
-        ${shown.length ? sidePanel(outing ? "" : `<section class="side-sec"><h2>${plural(listed, "trip")}</h2><ol class="legs trip-rows">${rows}</ol></section>`) : ""}
+        ${shown.length ? sidePanel((outing ? "" : `<section class="side-sec"><h2>${plural(listed, "trip")}</h2><ol class="legs trip-rows">${rows}</ol></section>`) + placesHost) : ""}
       </aside>
     </div>`;
   if (!shown.length) return;
@@ -1484,6 +1512,10 @@ async function showMany(kind, key) {
   sm.durMs = d.drivingMs;
   sideRoute(sm, { engine: engines.some((e) => e.length), trips: new Set(drive).size });
   const view = drawRoute(pts, sm, { withDay: kind === "week" });
+  placesSection(pts, sm, view, live, {
+    withDay: kind === "week",
+    retitle: outing ? (l) => { document.querySelector(".trip-head h1").textContent = l ?? outingName(recs[0].startedWallMs); } : null,
+  });
   if (d.rows.length) {
     const gas = await withTimeout(Gas.forTrip(pts[0].lat, pts[0].lon, shown[0].startedWallMs), 8000);
     if (!live()) return;

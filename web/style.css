@@ -500,6 +500,13 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
   font-size: 12px; font-weight: 600; padding: 3px 7px; border-radius: 7px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4); line-height: 1.35;
 }
 .leaflet-tooltip.moment::before { border-top-color: rgba(15, 15, 14, 0.86); }
+/* A named place on the map: amber like the brand dot, so it doesn't read as a moment of the drive. */
+.leaflet-tooltip.place-label {
+  background: #f0b429; color: #0b0b0b; border: 0; font-size: 12px; font-weight: 700; padding: 2px 7px; border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.leaflet-tooltip.place-label::before { border-right-color: #f0b429; }
+.place-row:focus-within span { color: var(--text); }
 .readout {
   position: absolute; z-index: 500; top: 12px; right: 12px; min-width: 170px;
   background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(8px);
@@ -648,7 +655,7 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 
 /* A trip's places, each with a name to type. */
 .place-rows { display: grid; gap: 6px; margin-top: 8px; }
-.place-row { display: grid; grid-template-columns: 7.5em 1fr; align-items: center; gap: 10px; font-size: 14px; color: var(--text-2); }
-.place-row small { color: var(--muted); }
+.place-row { display: grid; grid-template-columns: 8.5em 1fr; align-items: center; gap: 10px; font-size: 14px; color: var(--text-2); }
+.place-row small { display: block; color: var(--muted); font-size: 12px; line-height: 1.2; }
 .place-row input { min-width: 0; font: inherit; color: var(--text); background: var(--page); border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; }
 .places-sec .hint { margin: 8px 0 0; }
