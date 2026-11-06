@@ -187,12 +187,13 @@ const Places = (() => {
     const out = [];
     Route.tripRanges(pts).forEach(([a, b]) => {
       const s = pts[a], e = pts[b], prev = out.at(-1);
-      if (prev && Route.haversine(prev.lat, prev.lon, s.lat, s.lon) <= PARK_M) Object.assign(prev, { kind: "stop", ms: s.t - prev.t });
-      else out.push({ lat: s.lat, lon: s.lon, i: a, t: s.t, kind: "start" });
+      // `leaves`: the drive (pts' trip index) that sets off from here.
+      if (prev && Route.haversine(prev.lat, prev.lon, s.lat, s.lon) <= PARK_M) Object.assign(prev, { kind: "stop", ms: s.t - prev.t, leaves: s.trip });
+      else out.push({ lat: s.lat, lon: s.lon, i: a, t: s.t, kind: "start", leaves: s.trip });
       const far = away([s.lat, s.lon], [e.lat, e.lon]);
       for (const x of stops) {
         if (x.i0 < a || x.i1 > b || x.ms < STOP_MS) continue;
-        const v = { lat: mean(x.i0, x.i1, "lat"), lon: mean(x.i0, x.i1, "lon"), ms: x.ms, i: x.i0, t: pts[x.i0].t, kind: "stop" };
+        const v = { lat: mean(x.i0, x.i1, "lat"), lon: mean(x.i0, x.i1, "lon"), ms: x.ms, i: x.i0, t: pts[x.i0].t, kind: "stop", along: true };
         if (far(v)) out.push(v);
       }
       out.push({ lat: e.lat, lon: e.lon, i: b, t: e.t, kind: "end" });
@@ -1047,10 +1048,13 @@ async function showTrip(id, share = null, focusT = null) {
 // name to type. Named places are labeled on the map, and the place whose name is being edited is
 // ringed there. The names are shared with Compare and describe trips in the list ("Home → Aldi");
 // `retitle(label)` (optional) puts the description in the page title.
-function placesSection(pts, sm, view, live, { retitle = null, withDay = false } = {}) {
+//
+// On a page of several drives, `drives` (Map: pts' trip index -> its recordings) puts each drive in the
+// list too, after the place it set off from: a link to its page that brings it forward on the map.
+function placesSection(pts, sm, view, live, { retitle = null, withDay = false, drives = null, failed = [] } = {}) {
   const host = document.getElementById("places-sec");
   if (!host) return;
-  const when = (t) => new Date(t).toLocaleString([], { weekday: withDay ? "short" : undefined, hour: "numeric", minute: "2-digit" });
+  const when = (t) => clock(t); // a week's list has day headings
   const what = { start: "Started", stop: "Stopped", end: "Ended" };
   const draw = (focusI = null) => {
     const vs = Places.visitsOfPoints(pts, sm.stops);
@@ -1058,10 +1062,20 @@ function placesSection(pts, sm, view, live, { retitle = null, withDay = false } 
     view.places(vs);
     view.highlightPlace(null);
     host.hidden = false;
-    host.innerHTML = `<h2>Places</h2>
-      <div class="place-rows">${vs.map((v, i) => `
-        <label class="place-row"><span>${what[v.kind]} <small>${esc(when(v.t))}${v.ms ? ` · ${fmtDur(v.ms)}` : ""}</small></span>
-          <input value="${esc(v.name ?? "")}" placeholder="Name this place" data-i="${i}" maxlength="80"></label>`).join("")}</div>
+    let lastDay = "";
+    const rows = vs.map((v, i) => {
+      const day = withDay ? dayLabel(v.t) : "";
+      const head = day && day !== lastDay ? `<div class="row-day">${esc(day)}</div>` : "";
+      lastDay = day || lastDay;
+      const recs = drives && v.leaves != null ? drives.get(v.leaves) || [] : [];
+      const drive = recs.length ? driveRow(recs) : "";
+      return `${head}
+        <label class="place-row${drives && v.along ? " along" : ""}"><span>${what[v.kind]} <small>${esc(when(v.t))}${v.ms ? ` · ${fmtDur(v.ms)}` : ""}</small></span>
+          <input value="${esc(v.name ?? "")}" placeholder="Name this place" data-i="${i}" maxlength="80"></label>${drive}`;
+    }).join("");
+    host.innerHTML = `<h2>${drives ? `${plural([...drives.values()].filter((x) => x.length).length, "trip")} · places` : "Places"}</h2>
+      <div class="place-rows">${rows}</div>
+      ${failed.length ? `<p class="hint bad">${plural(failed.length, "trip")} (${failed.map((r) => esc(clock(r.startedWallMs))).join(", ")}) couldn't load; reload to try again.</p>` : ""}
       <p class="hint" id="places-note">Names are shared with Compare and every browser.</p>`;
     host.querySelectorAll("input").forEach((inp) => {
       const k = +inp.dataset.i;
@@ -1091,6 +1105,16 @@ function placesSection(pts, sm, view, live, { retitle = null, withDay = false } 
     });
   };
   draw();
+}
+
+// One drive in the places list: when, how far, how long. Several recordings carried on as one drive
+// (an app update in the middle) are one row, linked to the first.
+function driveRow(recs) {
+  const m = recs.filter(moved), r = recs[0], last = recs.at(-1);
+  const t = totals(recs);
+  return `<a class="trip-row drive-row" href="#/r/${esc(r.id)}" data-id="${esc(r.id)}">
+    <b>${esc(clock(r.startedWallMs))} – ${esc(clock(endOf(last)))}</b>
+    <span>${m.length ? `${miles(t.meters)} · ${fmtDur(t.movingMs)}${recs.some((x) => x.routeGaps) ? " · partial" : ""}` : noRouteLabel(r).toLowerCase()}</span></a>`;
 }
 
 // A recording without a usable GPS track (parked warm-up, garage start, location off) can still
@@ -1454,25 +1478,9 @@ async function showMany(kind, key) {
   const nav = prev || next ? `<nav class="period-nav">
       ${prev ? `<a href="${prev}">← Earlier</a>` : ""}${next ? `<a href="${next}">Later →</a>` : ""}</nav>` : "";
 
-  // The trips, grouped into outings, with day headings in a week.
-  // Trips whose route the list can't see (routeGaps) still go on the map: it loads full routes.
+  // The trips are listed with the places, once the route is in (see placesSection). Trips whose route
+  // the list can't see (routeGaps) still go on the map: it loads full routes.
   const shown = recs.filter((r) => r.trip || r.routeGaps > 0);
-  // Recordings that never moved aren't listed (as on an outing's row of trips); they're still on the map.
-  let rows = "", lastDay = "", listed = 0;
-  outings(shown).forEach((all) => {
-    const o = legsOf(all);
-    listed += o.length;
-    o.forEach((r, i) => {
-      const d = dayLabel(r.startedWallMs);
-      if (kind === "week" && d !== lastDay) rows += `<li class="row-day">${esc(d)}</li>`;
-      lastDay = d;
-      if (i) rows += `<li class="leg-stop">Stopped ${fmtDur(r.startedWallMs - endOf(o[i - 1]))}</li>`;
-      rows += `<li><a class="trip-row" href="#/r/${esc(r.id)}" data-id="${esc(r.id)}">
-        <b>${esc(timeRange(r))}</b>
-        <span>${moved(r) ? `${miles(r.trip.meters)} · ${fmtDur(r.trip.movingMs)} · top ${Math.round(r.trip.maxMps * Route.MPH)} mph${r.routeGaps ? " · partial" : ""}` : noRouteLabel(r).toLowerCase()}</span>
-      </a></li>`;
-    });
-  });
 
   app.innerHTML = `
     <div class="trip trip-many">
@@ -1490,7 +1498,7 @@ async function showMany(kind, key) {
         <div class="map-status" id="rt-status">${shown.length ? "Loading trips…" : `No trips ${kind === "day" ? "this day" : "this week"}.`}</div>
       </section>
       <aside class="trip-side">
-        ${shown.length ? sidePanel((outing ? "" : `<section class="side-sec"><h2>${plural(listed, "trip")}</h2><ol class="legs trip-rows">${rows}</ol></section>`) + placesHost) : ""}
+        ${shown.length ? sidePanel(placesHost) : ""}
       </aside>
     </div>`;
   if (!shown.length) return;
@@ -1501,7 +1509,7 @@ async function showMany(kind, key) {
   const d = await loadDrive(shown, { onProgress: progress, live });
   if (!live()) return;
   const { drive, lists, engines, pts } = d;
-  for (const r of d.failed) document.querySelector(`.trip-row[data-id="${CSS.escape(r.id)}"] span, .stretches [data-id="${CSS.escape(r.id)}"] small`)?.insertAdjacentText("beforeend", " · couldn't load the route");
+  for (const r of d.failed) document.querySelector(`.stretches [data-id="${CSS.escape(r.id)}"] small`)?.insertAdjacentText("beforeend", " · couldn't load the route");
   if (pts.length < 2) {
     status.textContent = "Not enough GPS fixes to draw a route.";
     return;
@@ -1512,8 +1520,11 @@ async function showMany(kind, key) {
   sm.durMs = d.drivingMs;
   sideRoute(sm, { engine: engines.some((e) => e.length), trips: new Set(drive).size });
   const view = drawRoute(pts, sm, { withDay: kind === "week" });
+  // Each drive's recordings, for its row in the list; ones that never moved aren't listed.
+  const drives = new Map();
+  shown.forEach((r, i) => { if (!(r.trip && !moved(r))) (drives.get(drive[i]) || drives.set(drive[i], []).get(drive[i])).push(r); });
   placesSection(pts, sm, view, live, {
-    withDay: kind === "week",
+    withDay: kind === "week", drives, failed: d.failed,
     retitle: outing ? (l) => { document.querySelector(".trip-head h1").textContent = l ?? outingName(recs[0].startedWallMs); } : null,
   });
   if (d.rows.length) {
@@ -1525,14 +1536,14 @@ async function showMany(kind, key) {
   }
 
   // Hovering a trip in the list (or an outing's trip in the row up top) brings it forward on the map.
+  // Listened for on the page, since the list is redrawn when a place is named.
   const index = new Map(shown.map((r, i) => [r.id, drive[i]]));
-  document.querySelectorAll(".trip-row, .stretches [data-id]").forEach((a) => {
-    const k = index.get(a.dataset.id);
-    a.addEventListener("mouseenter", () => view.focus(k));
-    a.addEventListener("focus", () => view.focus(k));
-    a.addEventListener("mouseleave", () => view.focus(null));
-    a.addEventListener("blur", () => view.focus(null));
-  });
+  const rowOf = (e) => e.target.closest?.(".trip-row, .stretches [data-id]");
+  const page = document.querySelector(".trip-many");
+  for (const [on, off] of [["mouseover", "mouseout"], ["focusin", "focusout"]]) {
+    page.addEventListener(on, (e) => { const a = rowOf(e); if (a) view.focus(index.get(a.dataset.id)); });
+    page.addEventListener(off, (e) => { const a = rowOf(e); if (a && !a.contains(e.relatedTarget)) view.focus(null); });
+  }
 }
 
 // Small amounts of fuel and money need more digits than big ones.

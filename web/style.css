@@ -220,10 +220,10 @@ main { max-width: 1160px; margin: 0 auto; padding: 24px 16px 48px; }
 .legs .pill { margin-left: auto; }
 .leg-stop { position: relative; padding: 2px 0 2px 18px; color: var(--muted); font-size: 13px; }
 .leg-stop::before { content: ""; position: absolute; left: 4px; top: 0; bottom: 0; border-left: 2px dotted var(--axis); }
-.trip-rows { margin-top: 0; }
-.trip-rows a { display: grid; gap: 0; }
 .row-day { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.06em; margin: 12px 0 2px; }
 .row-day:first-child { margin-top: 0; }
+.place-rows .row-day { margin: 10px 0 0; }
+.place-rows .row-day:first-child { margin-top: 0; }
 .outing-nav, .period-nav { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 12px; font-size: 14px; }
 .outing-nav span { color: var(--text-2); }
 /* The whole outing, then each trip in it: one page, switched here. Scrolls sideways when long. */
@@ -655,7 +655,17 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 
 /* A trip's places, each with a name to type. */
 .place-rows { display: grid; gap: 6px; margin-top: 8px; }
-.place-row { display: grid; grid-template-columns: 8.5em 1fr; align-items: center; gap: 10px; font-size: 14px; color: var(--text-2); }
+.place-row { display: grid; grid-template-columns: 9.5em 1fr; align-items: center; gap: 10px; font-size: 14px; color: var(--text-2); }
 .place-row small { display: block; color: var(--muted); font-size: 12px; line-height: 1.2; }
 .place-row input { min-width: 0; font: inherit; color: var(--text); background: var(--page); border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; }
 .places-sec .hint { margin: 8px 0 0; }
+/* A drive between two places: a link along a dotted line, like the road between them. */
+.drive-row {
+  display: grid; margin: 0 0 0 4px; padding: 4px 8px 4px 16px; border-left: 2px dotted var(--axis); border-radius: 0 8px 8px 0;
+  color: inherit; text-decoration: none; font-size: 13px;
+}
+.drive-row b { font-weight: 650; font-variant-numeric: tabular-nums; }
+.drive-row span { color: var(--text-2); }
+.drive-row:hover, .drive-row:focus-visible { background: var(--accent-soft); }
+/* A stop in the middle of a drive: inside its dotted line. */
+.place-row.along { margin: -6px 0 0 4px; padding: 6px 0 4px 16px; border-left: 2px dotted var(--axis); grid-template-columns: calc(9.5em - 22px) 1fr; }
