@@ -302,7 +302,11 @@ class RecordingWriter(
     companion object {
         const val FORMAT_VERSION = 1
 
-        /** 2 = every GPS fix as [wallMs, lat, lon, speedMps, hAccM, bearingDeg, joltMps2]; null = unknown. */
+        /**
+         * 2 = every GPS fix as [wallMs, lat, lon, speedMps, hAccM, bearingDeg, joltMps2, pressureHpa];
+         * null = unknown. pressureHpa (the barometer's mean since the previous fix) was added later:
+         * older chunks stop at joltMps2.
+         */
         const val TRACK_FORMAT = 2
 
         /**

@@ -17,17 +17,25 @@ class PollItem(val pid: Int, var intervalNs: Long, val tier: String, val knownLe
  * which bounds how much they can take. When the ECU accepts multi-PID requests, due items
  * are batched and remaining slots are filled with fast items, so slow PIDs ride along
  * nearly for free.
+ *
+ * [pinned] PIDs (airflow and the commanded air-fuel ratio: what the fuel estimate needs) go in every
+ * multi-PID request. When the Bluetooth link stalls and a request takes 0.5 s instead of 50 ms,
+ * every medium PID is overdue on every turn and would otherwise fill whole requests, leaving seconds
+ * with no airflow and so no fuel. Pinned only with room for at least one other PID, and not while
+ * demoted (the car has stopped answering it).
  */
-class PollScheduler(val items: List<PollItem>, var maxBatch: Int) {
+class PollScheduler(val items: List<PollItem>, var maxBatch: Int, val pinned: Set<Int> = emptySet()) {
     fun next(nowNs: Long): List<PollItem> {
         val due = items.filter { it.dueNs <= nowNs }.sortedWith(fairOrder)
         if (due.isEmpty()) return emptyList()
         val head = due.first()
         if (maxBatch <= 1 || !head.knownLength) return listOf(head)
-        val batch = mutableListOf(head)
+        val pins = items.filter { it.pid in pinned && it.knownLength && !it.demoted }
+        val batch = (if (pins.size < maxBatch) pins else emptyList()).toMutableList()
+        if (head !in batch) batch += head
         for (it in due) {
             if (batch.size >= maxBatch) break
-            if (it !== head && it.knownLength) batch += it
+            if (it !in batch && it.knownLength) batch += it
         }
         if (batch.size < maxBatch) {
             for (it in items.filter { it.tier == FAST && it.knownLength && it !in batch }.sortedWith(fairOrder)) {

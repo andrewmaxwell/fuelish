@@ -1,0 +1,16 @@
+# Security headers for the web app (Cloudflare static assets read this file; it isn't served).
+#
+# Content-Security-Policy: scripts only from this site, Leaflet on cdnjs (also pinned by hash in
+# index.html) and Google's sign-in script, so an injected <script> or inline handler can't run and
+# can't send the session or the saved web token anywhere. Requests go only to this site and Google's
+# sign-in. Images: this site, map tiles, Google profile pictures. Inline styles are allowed: the page
+# sets colors and positions with style attributes (no script runs from a style).
+# Google sign-in needs its script, its button's iframe and styles, and requests under /gsi/.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://accounts.google.com/gsi/style; img-src 'self' data: blob: https://tile.openstreetmap.org https://*.googleusercontent.com https://cdnjs.cloudflare.com; connect-src 'self' https://accounts.google.com/gsi/; frame-src https://accounts.google.com/gsi/; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+  Cross-Origin-Opener-Policy: same-origin-allow-popups
+  Strict-Transport-Security: max-age=31536000

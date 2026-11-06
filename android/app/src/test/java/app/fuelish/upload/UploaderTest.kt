@@ -28,6 +28,7 @@ class UploaderTest {
     private var requests = 0
     private val accounts = HashMap<String, String>() // token -> account id, answered at /me (none: an older server, 404)
     private val othersTrips = HashSet<String>() // recording ids the server says belong to someone else
+    private val deletedTrips = HashSet<String>() // recording ids deleted on the server (410)
     private val asked = mutableListOf<String>() // recording ids requests were about
     private val base get() = "http://127.0.0.1:${server.address.port}"
 
@@ -52,6 +53,7 @@ class UploaderTest {
             val auth = ex.requestHeaders.getFirst("Authorization")
             val (code, text) = when {
                 auth != "Bearer tok" && auth?.removePrefix("Bearer ") !in accounts -> 401 to "bad token"
+                parts[0] in deletedTrips -> 410 to "this trip was deleted"
                 parts[0] in othersTrips && parts.size <= 3 && parts.getOrNull(1) != "verify" -> 403 to "recording belongs to someone else"
                 parts.size == 1 -> {
                     metas[parts[0]] = String(body)
@@ -354,6 +356,20 @@ class UploaderTest {
         val r1 = store.readMeta("a").getLong("rev")
         store.writeMeta("a", JSONObject().put("id", "a").put("rev", 0)) // a stale in-memory copy
         assertTrue(store.readMeta("a").getLong("rev") > r1)
+    }
+
+    @Test
+    fun aTripDeletedOnTheServerIsDroppedFromThePhone() {
+        val store = RecordingStore(tmp.newFolder())
+        makeRecording(store, "a", 2)
+        makeRecording(store, "b", 1)
+        makeRecording(store, "live", 1, status = "recording")
+        deletedTrips += setOf("a", "live")
+        val r = Uploader(store, base, "tok").uploadAll()
+        assertTrue("got $r", r is UploadResult.Done)
+        assertTrue(!store.dir("a").exists()) // gone, and nothing more is sent for it
+        assertTrue(store.dir("live").exists()) // still being recorded: kept for now
+        assertTrue(store.fullyUploaded("b")) // the others carry on
     }
 
     @Test

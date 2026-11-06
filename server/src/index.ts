@@ -106,6 +106,15 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   };
 
   if (m === "GET" && p[0] === "me" && p.length === 1) return me(who, env);
+  // Deleting your own: every trip of yours, or your whole account.
+  if (m === "DELETE" && p[0] === "me" && p.length === 2 && p[1] === "trips") {
+    need("read");
+    return deleteMyTrips(who, env);
+  }
+  if (m === "DELETE" && p[0] === "me" && p.length === 1) {
+    need("read");
+    return deleteMe(who, env);
+  }
 
   if (p[0] === "users" && p.length === 1 && m === "GET") {
     need("read");
@@ -175,6 +184,12 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
     need("read");
     return getRecording(id, env);
   }
+  if (p.length === 2 && m === "DELETE") {
+    need("read");
+    await needTripOwner(id, who, env, "delete");
+    await deleteRecordings([id], env);
+    return json({ ok: true });
+  }
   if (p.length === 3 && p[2] === "verify" && m === "POST") {
     need("upload");
     return verifyRecording(id, who, env);
@@ -192,7 +207,7 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   }
   if (p.length === 3 && p[2] === "links" && m === "POST") {
     need("read");
-    return createLinks(url, id, env);
+    return createLinks(id, env);
   }
   if (m === "GET" && (p[2] === "download" || p[2] === "chunks")) {
     need("read");
@@ -269,6 +284,7 @@ async function readBounded(req: Request, max: number, what: string): Promise<Arr
 // carries `rev` (raised on every write). An older revision never replaces a newer one, and a
 // finished recording is never reopened by a late "recording" snapshot.
 async function putRecording(req: Request, id: string, who: Principal, env: Env): Promise<Response> {
+  if (await isDeleted(id, env)) throw new HttpError(410, "this trip was deleted");
   const text = new TextDecoder().decode(await readBounded(req, MAX_META_BYTES, "metadata"));
   let meta: any;
   try {
@@ -313,6 +329,7 @@ async function putRecording(req: Request, id: string, who: Principal, env: Env):
 
 // The phone asks this before deleting its copy: does the server hold every chunk 0..chunkCount-1?
 async function verifyRecording(id: string, who: Principal, env: Env): Promise<Response> {
+  if (await isDeleted(id, env)) throw new HttpError(410, "this trip was deleted");
   const d = await recordingDetail(id, env);
   if (!canWrite(who, d.recording.userId)) throw new HttpError(403, "recording belongs to someone else");
   return json({ complete: d.recording.complete, chunkCount: d.recording.chunkCount, missing: d.missing });
@@ -357,6 +374,7 @@ function canWrite(who: Principal, owner: string | null): boolean {
 }
 
 async function putChunk(req: Request, id: string, seq: number, who: Principal, env: Env): Promise<Response> {
+  if (await isDeleted(id, env)) throw new HttpError(410, "this trip was deleted");
   const sha = (req.headers.get("X-Fuelish-Sha256") ?? "").toLowerCase();
   if (!SHA_RE.test(sha)) throw new HttpError(400, "missing X-Fuelish-Sha256");
   const metaHeader = req.headers.get("X-Fuelish-Meta");
@@ -831,11 +849,73 @@ function shareToken(): string {
 }
 
 // Sharing a trip, and seeing or stopping its links, is up to the person whose trip it is (or the owner).
-async function needTripOwner(id: string, who: Principal, env: Env): Promise<void> {
+async function needTripOwner(id: string, who: Principal, env: Env, what = "share"): Promise<void> {
   const r = await env.DB.prepare("SELECT user_id FROM recordings WHERE id = ?").bind(id).first<{ user_id: string | null }>();
   if (!r) throw new HttpError(404, "recording not found");
-  if (!who.admin && (r.user_id == null || r.user_id !== who.userId)) throw new HttpError(403, "only the person whose trip it is can share it");
+  if (!who.admin && (r.user_id == null || r.user_id !== who.userId)) throw new HttpError(403, `only the person whose trip it is can ${what} it`);
 }
+
+// ---------- deleting ----------
+
+/**
+ * Removes recordings for good: their chunks in R2, their rows, their share links. Each id is kept as
+ * deleted (nothing else about it), so a phone still holding a copy is told 410 and lets it go
+ * instead of uploading it again. Marked first, so an upload landing meanwhile is turned away.
+ */
+async function deleteRecordings(ids: string[], env: Env): Promise<number> {
+  const now = Date.now();
+  for (let i = 0; i < ids.length; i += 50) {
+    const group = ids.slice(i, i + 50);
+    await env.DB.batch(group.map((id) => env.DB.prepare("INSERT OR REPLACE INTO deleted_recordings (id, deleted_at_ms) VALUES (?, ?)").bind(id, now)));
+    const keys = (await env.DB.batch(group.map((id) => env.DB.prepare("SELECT r2_key FROM chunks WHERE recording_id = ?").bind(id))))
+      .flatMap((r) => (r.results as { r2_key: string }[]).map((c) => c.r2_key));
+    for (let k = 0; k < keys.length; k += 1000) await env.RECORDINGS.delete(keys.slice(k, k + 1000));
+    await env.DB.batch(group.flatMap((id) => [
+      env.DB.prepare("DELETE FROM shares WHERE recording_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM chunks WHERE recording_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM recordings WHERE id = ?").bind(id),
+    ]));
+  }
+  return ids.length;
+}
+
+async function myTripIds(who: Principal, env: Env): Promise<string[]> {
+  if (!who.userId) throw new HttpError(409, "sign in with Google first");
+  const { results } = await env.DB.prepare("SELECT id FROM recordings WHERE user_id = ?").bind(who.userId).all<{ id: string }>();
+  return results.map((r) => r.id);
+}
+
+async function deleteMyTrips(who: Principal, env: Env): Promise<Response> {
+  return json({ ok: true, trips: await deleteRecordings(await myTripIds(who, env), env) });
+}
+
+// Everything about a person: their trips, phone keys, sessions, their own time setting, the invites
+// they made, and the account. The owner can't: the server would have nobody to run it.
+async function deleteMe(who: Principal, env: Env): Promise<Response> {
+  if (who.admin) throw new HttpError(409, "the owner can't delete their account (you can delete your trips)");
+  const trips = await deleteRecordings(await myTripIds(who, env), env);
+  const uid = who.userId!;
+  const people = await env.DB.prepare("SELECT value_json FROM prefs WHERE key = 'people'").first<{ value_json: string }>();
+  const stmts = [
+    env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(uid),
+    env.DB.prepare("DELETE FROM device_keys WHERE user_id = ?").bind(uid),
+    env.DB.prepare("DELETE FROM invites WHERE created_by = ?").bind(uid),
+    // The invite they joined with stays used up (and revoked), just no longer pointing at them.
+    env.DB.prepare("UPDATE invites SET used_by = NULL, revoked_at_ms = COALESCE(revoked_at_ms, ?) WHERE used_by = ?").bind(Date.now(), uid),
+    env.DB.prepare("DELETE FROM users WHERE id = ?").bind(uid),
+  ];
+  if (people) {
+    const v = JSON.parse(people.value_json);
+    if (uid in v) {
+      delete v[uid];
+      stmts.unshift(env.DB.prepare("UPDATE prefs SET value_json = ?, updated_at_ms = updated_at_ms + 1 WHERE key = 'people'").bind(JSON.stringify(v)));
+    }
+  }
+  await env.DB.batch(stmts);
+  return json({ ok: true, trips }, 200, { "Set-Cookie": sessionCookie("", 0) });
+}
+
+const isDeleted = async (id: string, env: Env) => !!(await env.DB.prepare("SELECT 1 FROM deleted_recordings WHERE id = ?").bind(id).first());
 
 async function listShares(id: string, env: Env): Promise<Response> {
   const { results } = await env.DB.prepare(
@@ -886,14 +966,16 @@ async function getShared(token: string, env: Env): Promise<Response> {
   return json(sharedView(await recordingDetail(s.recording_id, env)));
 }
 
-async function createLinks(url: URL, id: string, env: Env): Promise<Response> {
+// Paths on this server, not full URLs: the page fetches them from wherever it was loaded (behind a
+// custom domain, the Worker sees that domain, which locally pointed links at production).
+async function createLinks(id: string, env: Env): Promise<Response> {
   const base = `/api/v1/recordings/${id}`;
   const { results } = await env.DB.prepare("SELECT seq FROM chunks WHERE recording_id = ? ORDER BY seq")
     .bind(id)
     .all<{ seq: number }>();
-  const all = url.origin + (await signPath(`${base}/download`, env));
+  const all = await signPath(`${base}/download`, env);
   const chunks: Record<number, string> = {};
-  for (const { seq } of results) chunks[seq] = url.origin + (await signPath(`${base}/chunks/${seq}`, env));
+  for (const { seq } of results) chunks[seq] = await signPath(`${base}/chunks/${seq}`, env);
   return json({ all, chunks, expiresInSeconds: LINK_TTL_S });
 }
 
@@ -1178,7 +1260,7 @@ async function downloadApp(version: string, env: Env): Promise<Response> {
 function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...extra },
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...extra },
   });
 }
 

@@ -83,6 +83,48 @@ class ObdTest {
     }
 
     @Test
+    fun fuelReadingsRideInEveryRequestEvenWhenTheLinkStalls() {
+        // The Civic's setup, with requests taking 700 ms (a Bluetooth stall): the 14 medium PIDs are
+        // overdue every turn. Without pinning, airflow (0x10) would be crowded out for whole seconds.
+        fun run(pinned: Set<Int>): List<PollItem> {
+            val fast = listOf(0x04, 0x0B, 0x0C, 0x0D, 0x10, 0x11, 0x44, 0x49).map { PollItem(it, 0, PollScheduler.FAST, true) }
+            val medium = (0x60 until 0x6E).map { PollItem(it, 500_000_000L, "medium", true) }
+            val s = PollScheduler(fast + medium, 6, pinned)
+            var t = 0L
+            val batches = mutableListOf<List<PollItem>>()
+            while (t < 20_000_000_000L) {
+                val b = s.next(t)
+                batches += b
+                t += 700_000_000
+                s.completed(b, b.map { it.pid }.toSet(), t)
+            }
+            return batches.map { b -> b.firstOrNull { it.pid == 0x10 } ?: PollItem(-1, 0, "none", true) }
+        }
+        val unpinned = run(emptySet()).count { it.pid == 0x10 }
+        val pinnedRuns = run(setOf(0x10, 0x44))
+        assertTrue("airflow in every request when pinned", pinnedRuns.all { it.pid == 0x10 })
+        assertTrue("without pinning airflow was starved ($unpinned of ${pinnedRuns.size})", unpinned < pinnedRuns.size / 2)
+    }
+
+    @Test
+    fun pinnedPidsLeaveRoomAndStepAsideWhenDemoted() {
+        val maf = PollItem(0x10, 0, PollScheduler.FAST, true)
+        val lambda = PollItem(0x44, 0, PollScheduler.FAST, true)
+        val slow = PollItem(0x05, 5_000_000_000L, "slow", true)
+        // Two per request: no room to pin both and still serve anything else, so nothing is pinned.
+        assertEquals(2, PollScheduler(listOf(maf, lambda, slow), 2, setOf(0x10, 0x44)).next(0).size)
+        val s = PollScheduler(listOf(maf, lambda, slow), 3, setOf(0x10, 0x44))
+        assertEquals(setOf(0x10, 0x44, 0x05), s.next(0).map { it.pid }.toSet())
+        // A demoted pinned PID (the car stopped answering it) isn't forced in: here the request
+        // fills up with what's due instead. (With a slot spare it may still ride along, like any fast PID.)
+        lambda.intervalNs = 30_000_000_000L
+        lambda.lastNs = 0
+        val slow2 = PollItem(0x06, 5_000_000_000L, "slow", true)
+        val s2 = PollScheduler(listOf(maf, lambda, slow, slow2), 3, setOf(0x10, 0x44))
+        assertEquals(setOf(0x10, 0x05, 0x06), s2.next(1).map { it.pid }.toSet())
+    }
+
+    @Test
     fun schedulerBatchesWhenAllowed() {
         val items = listOf(0x0C, 0x0D, 0x11, 0x04).map { PollItem(it, 0, PollScheduler.FAST, true) } +
             PollItem(0x05, 5_000_000_000L, "slow", true)

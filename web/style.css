@@ -313,6 +313,10 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 .row-area { fill: var(--accent-soft); }
 
 .share { position: relative; margin-left: auto; }
+.del-btn { cursor: pointer; color: var(--muted); background: transparent; font: inherit; font-size: inherit; }
+.del-btn:hover { color: var(--bad); }
+button.ghost.danger { color: var(--bad); border: 1px solid var(--border); }
+.del-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .share-pop > summary { list-style: none; cursor: pointer; color: var(--accent); font-weight: 600; }
 .share-pop > summary::-webkit-details-marker { display: none; }
 .share-btn.on::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--good, #3fc66b); margin-right: 6px; vertical-align: 1px; }
@@ -697,3 +701,17 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 .ins-tow { margin: 0 0 16px; max-width: 360px; }
 .cost-form h3 { grid-column: 1 / -1; margin: 8px 0 -6px; font-size: 15px; }
 .towing-nav button.link { white-space: nowrap; }
+
+/* Stops page: the costliest places to stop, a list beside the map. */
+.stops-rows { list-style: none; margin: 8px 0 0; padding: 0; display: grid; }
+.stop-row {
+  width: 100%; display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; text-align: left;
+  background: transparent; border: 0; border-top: 1px solid var(--border); color: var(--text); font: inherit; cursor: pointer;
+}
+.stop-row:hover b { color: var(--accent); }
+.stop-row small { display: block; font-size: 12px; }
+.stop-name { min-width: 0; }
+.stop-name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stop-cost { text-align: right; flex: none; font-variant-numeric: tabular-nums; }
+.stops-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--text-2); }
+.stops-legend > span:first-child { color: var(--muted); }

@@ -56,6 +56,10 @@ class PhoneSensors(
     /** Largest |‖a‖ − g| from the accelerometer since the last GPS fix (m/s²); NaN if none. */
     private var joltSinceFix = Double.NaN
 
+    /** Air pressure readings since the last GPS fix (hPa), averaged into the fix: the road's height. */
+    private var pressureSum = 0.0
+    private var pressureN = 0
+
     private val listeners = mutableListOf<SensorEventListener>()
     private val locationListeners = mutableListOf<LocationListener>()
     private var gnssStatusCallback: GnssStatus.Callback? = null
@@ -134,6 +138,9 @@ class PhoneSensors(
                         val v = e.values
                         val dev = kotlin.math.abs(kotlin.math.sqrt((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).toDouble()) - SensorManager.GRAVITY_EARTH)
                         if (joltSinceFix.isNaN() || dev > joltSinceFix) joltSinceFix = dev
+                    } else if (type == Sensor.TYPE_PRESSURE && e.values.isNotEmpty() && e.values[0] > 0f) {
+                        pressureSum += e.values[0]
+                        pressureN++
                     }
                     if (storeGapNs > 0) {
                         if (lastStoredTs != Long.MIN_VALUE && e.timestamp - lastStoredTs < storeGapNs) return
@@ -189,8 +196,11 @@ class PhoneSensors(
                             if (l.hasAccuracy()) round(l.accuracy.toDouble(), 1) else Double.NaN,
                             if (l.hasBearing()) round(l.bearing.toDouble(), 0) else Double.NaN,
                             round(joltSinceFix, 2),
+                            if (pressureN > 0) round(pressureSum / pressureN, 3) else Double.NaN,
                         )
                         joltSinceFix = Double.NaN
+                        pressureSum = 0.0
+                        pressureN = 0
                     }
                     emit(stream, l.elapsedRealtimeNanos, locationLine(l, provider), track)
                 }

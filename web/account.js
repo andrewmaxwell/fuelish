@@ -317,6 +317,12 @@ const Account = (() => {
           <h2>Your phones</h2>
           <p class="muted">Phones that upload your trips. A phone gets added when you sign in on it in the Fuelish app.</p>
           ${mine.length ? `<ul class="rows">${mine.map((d) => `<li><span><b>${esc(d.name)}</b><small class="muted">added ${ago(d.createdAtMs)} · last upload ${ago(d.lastUsedMs)}</small></span><button class="ghost" data-revoke="${esc(d.id)}">Remove</button></li>`).join("")}</ul>` : `<p class="muted">None yet.</p>`}
+        </section>
+        <section class="card">
+          <h2>Delete your data</h2>
+          <p class="muted">Deleting takes it off the server for good: routes, engine data and share links. A phone still holding a deleted trip lets it go too. One trip at a time: Delete on its page.</p>
+          <div class="del-actions"><button class="ghost danger" id="del-trips">Delete all my trips</button>${m.admin ? "" : `<button class="ghost danger" id="del-me">Delete my account</button>`}</div>
+          <div id="del-out"></div>
         </section>` : ""}
         ${admin ? `
         <section class="card">
@@ -370,6 +376,27 @@ const Account = (() => {
         showAccount();
       });
     }));
+    // Deleting: all your trips, or (not the owner) your whole account. Typed confirmation for both.
+    const sure = (what) => (prompt(`${what}\n\nThis can't be undone. Type DELETE to go ahead.`) || "").trim().toUpperCase() === "DELETE";
+    const delTrips = document.getElementById("del-trips");
+    if (delTrips) delTrips.onclick = () => {
+      if (!sure("Delete every trip of yours from the server?")) return;
+      return act(delTrips, async () => {
+        const r = await api("/me/trips", { method: "DELETE" });
+        document.getElementById("del-out").innerHTML = `<p class="muted" role="status">Deleted ${plural(r.trips, "trip")}.</p>`;
+      });
+    };
+    const delMe = document.getElementById("del-me");
+    if (delMe) delMe.onclick = () => {
+      if (!sure("Delete your account? Your trips, phones and settings go with it, and getting back in needs a new invite.")) return;
+      return act(delMe, async () => {
+        await api("/me", { method: "DELETE" });
+        try { localStorage.clear(); } catch {}
+        window.FuelishApp?.signedOut?.();
+        location.hash = "#/";
+        location.reload();
+      });
+    };
     const inviteBtn = document.getElementById("invite");
     const emailBox = document.getElementById("invite-email");
     const hasEmail = () => emailBox.value.includes("@");

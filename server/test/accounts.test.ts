@@ -177,6 +177,38 @@ describe("accounts", () => {
     expect((await put(dad, "places", [{ lat: 1, lon: 1, name: "Dad's" }])).status).toBe(200);
   });
 
+  it("lets each person delete their own trips, and turns away re-uploads of a deleted one", async () => {
+    const dad = sessionOf(await signIn(DAD));
+    const del = (h: Record<string, string>, path: string) => call(path, { method: "DELETE", headers: { ...h, "X-Fuelish": "1" } });
+    expect((await del(dad, "/recordings/old1")).status).toBe(403);
+    expect((await call("/recordings/old1", { method: "DELETE", headers: dad })).status).toBe(403); // no X-Fuelish header
+    expect((await del(dad, "/recordings/dad3")).status).toBe(200);
+    expect((await call("/recordings/dad3", { headers: andrew })).status).toBe(404);
+    const truck = JSON.stringify({ id: "dad3", deviceId: "dad-phone", status: "stopped", startedWallMs: 6000, chunkCount: 0, vehicle: "Truck" });
+    expect((await call("/recordings/dad3", { method: "PUT", headers: dadPhone, body: truck })).status).toBe(410);
+    expect((await call("/recordings/dad3/verify", { method: "POST", headers: dadPhone })).status).toBe(410);
+    // The owner can't delete their account (only their trips).
+    expect((await del(andrew, "/me")).status).toBe(409);
+  });
+
+  it("lets someone delete their whole account", async () => {
+    const r = await signIn({ sub: "g-bro", email: "bro@example.com", name: "Bro" }, { device: { name: "Pixel 9" } });
+    const bro = sessionOf(r), broPhone = { Authorization: `Bearer ${((await r.json()) as any).deviceToken}` };
+    const trip = JSON.stringify({ id: "bro1", deviceId: "bro-phone", status: "stopped", startedWallMs: 7000, chunkCount: 0 });
+    expect((await call("/recordings/bro1", { method: "PUT", headers: broPhone, body: trip })).status).toBe(200);
+    const gone = await call("/me", { method: "DELETE", headers: { ...bro, "X-Fuelish": "1" } });
+    expect(gone.status).toBe(200);
+    expect(await gone.json()).toEqual({ ok: true, trips: 1 });
+    expect(gone.headers.get("Set-Cookie")).toMatch(/Max-Age=0/);
+    expect((await call("/me", { headers: bro })).status).toBe(401);
+    expect((await call("/recordings/bro1", { headers: andrew })).status).toBe(404);
+    expect((await call("/recordings/bro2", { method: "PUT", headers: broPhone, body: trip })).status).toBe(401);
+    // Gone for good: signing in again needs a new invite.
+    expect((await signIn({ sub: "g-bro", email: "bro@example.com", name: "Bro" })).status).toBe(403);
+    const users: any = await (await call("/users", { headers: andrew })).json();
+    expect(users.users.map((u: any) => u.name)).not.toContain("Bro");
+  });
+
   it("only lets the owner invite or manage people", async () => {
     const dad = sessionOf(await signIn(DAD));
     expect((await call("/invites", { method: "POST", headers: { ...dad, "X-Fuelish": "1" } })).status).toBe(403);
@@ -189,7 +221,7 @@ describe("accounts", () => {
     const r = await call("/admin/phones/andrew-phone", { method: "PUT", headers: { ...andrew, ...POST }, body: JSON.stringify({ userId: dadId }) });
     expect(await r.json()).toEqual({ ok: true, trips: 1 });
     const dads: any = await (await call(`/recordings?user=${dadId}`, { headers: andrew })).json();
-    expect(dads.recordings.map((x: any) => x.id).sort()).toEqual(["dad1", "dad3", "old1"]);
+    expect(dads.recordings.map((x: any) => x.id).sort()).toEqual(["dad1", "old1"]);
   });
 
   it("refuses cookie changes without the X-Fuelish header", async () => {

@@ -79,7 +79,10 @@ Android/data/app.fuelish/files/recordings/<id>/
   chunk-000000.ndjson.gz     finished chunk (immutable; uploaded as-is, then deleted from the phone)
   chunk-000000.meta.json     per-chunk stats: records, per-stream counts and min/max intervals, sha256, and
                              `track` (trackFormat 2): every GPS fix as [wallMs, lat, lon, speedMps, hAccM,
-                             bearingDeg, joltMps2], where jolt = max |‖accel‖ − g| since the previous fix.
+                             bearingDeg, joltMps2, pressureHpa], where jolt = max |‖accel‖ − g| since the
+                             previous fix and pressureHpa is the barometer's mean since then (null without
+                             a barometer; absent from chunks recorded before late 2026). The web page turns
+                             pressure into the road's height for grades (web/terrain.js).
                              Older chunks (no trackFormat) only have a point every 5 s; the web app rebuilds
                              their route from the raw chunks instead.
                              `engine` (engineFormat 1, only when OBD values arrived): rows of [wallMs at the

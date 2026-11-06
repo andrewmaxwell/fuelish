@@ -21,7 +21,7 @@ const Route = (() => {
 
   // ---------- building points ----------
 
-  // Point: { t: wall ms, lat, lon, v: m/s|null, acc: m|null, brg: deg|null, jolt: m/s²|null,
+  // Point: { t: wall ms, lat, lon, v: m/s|null, acc: m|null, brg: deg|null, jolt: m/s²|null, baro: hPa|null,
   //          a: forward accel m/s²|null, side: sideways accel m/s² (+ = turning right)|null }
   // A chunk's summarized track is used only when it's really there (an oversized sidecar can have
   // had it dropped on the phone); the rest are rebuilt from their raw data (see rawChunks).
@@ -31,7 +31,7 @@ const Route = (() => {
 
   function fromChunks(chunks) {
     const pts = chunks.filter(hasTrack).flatMap((c) => c.meta.track).map((p) => ({
-      t: p[0], lat: p[1], lon: p[2], v: p[3], acc: p[4], brg: p[5], jolt: p[6],
+      t: p[0], lat: p[1], lon: p[2], v: p[3], acc: p[4], brg: p[5], jolt: p[6], baro: p[7] ?? null,
     }));
     return derive(pts);
   }

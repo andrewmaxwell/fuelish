@@ -325,7 +325,7 @@ function showLogin(msg = "") {
   routeCache.clear();
   engineCache.clear();
   tripRowsCache.clear();
-  RowStore.clear();
+  Kept.clear();
   Prefs.clear();
   Account.showLogin(msg);
 }
@@ -359,7 +359,7 @@ async function route() {
   Account.renderHeader();
   const h = location.hash;
   // The section links in the header, with the current one marked.
-  const section = h.startsWith("#/routes") ? "routes" : h.startsWith("#/costs") ? "costs" : h.startsWith("#/insights") ? "insights" : h.startsWith("#/cvt") ? "cvt" : h.startsWith("#/account") ? "account" : "trips";
+  const section = h.startsWith("#/routes") ? "routes" : h.startsWith("#/stops") ? "stops" : h.startsWith("#/costs") ? "costs" : h.startsWith("#/insights") ? "insights" : h.startsWith("#/cvt") ? "cvt" : h.startsWith("#/account") ? "account" : "trips";
   const nav = document.getElementById("main-nav");
   nav.hidden = false;
   nav.querySelectorAll("a").forEach((a) => (a.dataset.section === section ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
@@ -369,8 +369,9 @@ async function route() {
   const cvt = h.startsWith("#/cvt");
   const costs = h.startsWith("#/costs");
   const account = h.startsWith("#/account");
+  const stops = h.startsWith("#/stops");
   const many = h.match(/^#\/(day|week)\/(\d{4}-\d{2}-\d{2})/) || h.match(/^#\/(outing)\/([A-Za-z0-9_-]+)/);
-  document.body.classList.toggle("page-trip", !!(trip || many));
+  document.body.classList.toggle("page-trip", !!(trip || many || stops));
   // On a narrow screen the links scroll sideways: keep the current one in view. Measured after the
   // page class is set, since a trip page hides the header (and everything in it measures 0).
   const here = nav.querySelector("[aria-current]");
@@ -387,6 +388,7 @@ async function route() {
     else if (cvt) await showCvt();
     else if (costs) await showCosts();
     else if (account) await Account.showAccount();
+    else if (stops) await showStops();
     else if (many) await showMany(many[1], many[2]);
     else await showList();
   } catch (e) {
@@ -1057,7 +1059,7 @@ async function showTrip(id, share = null, focusT = null) {
         ${share ? "" : `<a href="#/" class="back">← Trips</a>`}
         <h1>${esc(tripName(r.startedWallMs))}</h1>
         <p class="muted">${esc(day)} · ${esc(timeRange(r))}</p>
-        <div class="pills">${pills}${!share && Account.canShare(r) ? `<div class="share" id="share"></div>` : ""}</div>
+        <div class="pills">${pills}${!share && Account.canShare(r) ? `<div class="share" id="share"></div><button type="button" class="pill del-btn" id="del-trip">Delete…</button>` : ""}</div>
         <div id="trip-context"></div>
         ${r.status === "recording" ? `<p class="hint" id="upd">Still recording; the route fills in as parts upload. <span id="upd-state"></span></p>`
           : !r.complete ? `<p class="hint" id="upd">${r.chunksReceived} of ${r.chunkCount ?? "?"} parts uploaded so far; the phone sends the rest on Wi-Fi. <span id="upd-state"></span></p>` : ""}
@@ -1072,7 +1074,21 @@ async function showTrip(id, share = null, focusT = null) {
       <aside class="trip-side">${sidePanel(share ? "" : `<section class="side-sec places-sec" id="places-sec" hidden></section>`)}</aside>
     </div>`;
 
-  if (!share && Account.canShare(r)) shareControls(id);
+  if (!share && Account.canShare(r)) {
+    shareControls(id);
+    const del = document.getElementById("del-trip");
+    del.onclick = async () => {
+      if (!confirm("Delete this trip? Its route, engine data and share links come off the server for good. If the phone still has a copy, it lets it go too.")) return;
+      del.disabled = true;
+      try {
+        await api(`/recordings/${id}`, { method: "DELETE" });
+        location.hash = "#/";
+      } catch (e) {
+        del.disabled = false;
+        if (e.message !== "unauthorized") alert(`Couldn't delete it: ${e.message}`);
+      }
+    };
+  }
   // Not awaited: the route doesn't wait for it. It also says whether the trip was towing, which the
   // engine figures then take into account.
   const context = share ? Promise.resolve(null) : tripContext(r, live);
@@ -1431,47 +1447,58 @@ async function showCvt() {
 // them. Gas prices are fetched once, waited for once, and only when `gas` is asked for.
 const tripRowsCache = new Map(); // `${id}@${updatedAtMs}@${chunksReceived}` -> rows (null: no engine data)
 
-// The same rows kept in this browser between visits (IndexedDB), so each trip is read from the
-// server once rather than on every visit. A stored copy counts only if it was worked out by the
-// engine.js and route.js running now (a digest of their text), so changing either redoes them all.
-// Anything going wrong here just means reading from the server as before. Cleared on sign-out.
-const RowStore = (() => {
-  const STORE = "engineRows";
-  let dbP = null, verP = null;
+// Results worked out from a trip's data, kept in this browser between visits (IndexedDB), so pages
+// that cover every trip read each one from the server once. A stored copy counts only if the scripts
+// that made it are the ones running now (a digest of their text), so changing them redoes them all.
+// Anything going wrong here just means working it out again. Cleared on sign-out.
+const Kept = (() => {
+  const STORES = ["engineRows", "stops"];
+  let dbP = null;
   const open = () => dbP ||= new Promise((res) => {
     try {
-      const req = indexedDB.open("fuelish", 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+      const req = indexedDB.open("fuelish", 2);
+      req.onupgradeneeded = () => { for (const s of STORES) if (!req.result.objectStoreNames.contains(s)) req.result.createObjectStore(s); };
       req.onsuccess = () => res(req.result);
       req.onerror = req.onblocked = () => res(null);
     } catch { res(null); }
   });
-  const version = () => verP ||= Promise.all(["engine.js", "route.js"].map((f) => fetch(f).then((r) => (r.ok ? r.text() : Promise.reject(new Error(f))))))
+  const req = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  const digest = (files) => Promise.all(files.map((f) => fetch(f).then((r) => (r.ok ? r.text() : Promise.reject(new Error(f))))))
     .then(async (texts) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(texts.join("\0"))))].slice(0, 12).map((b) => b.toString(16).padStart(2, "0")).join(""))
     .catch(() => null);
-  const req = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-  // Rows are an array with a few properties of its own (calibrated, shiftMs) that storing would drop.
-  const extras = (rows) => Object.fromEntries(Object.keys(rows).filter((k) => !/^\d+$/.test(k)).map((k) => [k, rows[k]]));
-  async function get(key) {
-    try {
-      const [db, v] = await Promise.all([open(), version()]);
-      if (!db || !v) return undefined;
-      const hit = await req(db.transaction(STORE).objectStore(STORE).get(key));
-      if (!hit || hit.v !== v) return undefined;
-      return hit.rows ? Object.assign(hit.rows, hit.extras) : null;
-    } catch { return undefined; }
-  }
-  async function put(key, rows) {
-    try {
-      const [db, v] = await Promise.all([open(), version()]);
-      if (db && v) await req(db.transaction(STORE, "readwrite").objectStore(STORE).put({ v, rows, extras: rows ? extras(rows) : null }, key));
-    } catch {}
+  // Arrays can carry properties of their own (engine rows: calibrated, shiftMs) that storing would drop.
+  const extras = (v) => (Array.isArray(v) ? Object.fromEntries(Object.keys(v).filter((k) => !/^\d+$/.test(k)).map((k) => [k, v[k]])) : null);
+  /** A store whose entries are good while `files` are unchanged. */
+  function store(name, files) {
+    let verP = null;
+    const version = () => verP ||= digest(files);
+    return {
+      async get(key) {
+        try {
+          const [db, v] = await Promise.all([open(), version()]);
+          if (!db || !v) return undefined;
+          const hit = await req(db.transaction(name).objectStore(name).get(key));
+          if (!hit || hit.v !== v) return undefined;
+          return hit.value && hit.extras ? Object.assign(hit.value, hit.extras) : hit.value;
+        } catch { return undefined; }
+      },
+      async put(key, value) {
+        try {
+          const [db, v] = await Promise.all([open(), version()]);
+          if (db && v) await req(db.transaction(name, "readwrite").objectStore(name).put({ v, value, extras: extras(value) }, key));
+        } catch {}
+      },
+    };
   }
   async function clear() {
-    try { const db = await open(); if (db) await req(db.transaction(STORE, "readwrite").objectStore(STORE).clear()); } catch {}
+    try {
+      const db = await open();
+      if (db) for (const s of STORES) await req(db.transaction(s, "readwrite").objectStore(s).clear());
+    } catch {}
   }
-  return { get, put, clear };
+  return { store, clear };
 })();
+const RowStore = Kept.store("engineRows", ["engine.js", "route.js"]);
 
 async function engineTrips(recordings, live, onStatus = () => {}, { gas = true } = {}) {
   const asc = [...recordings].sort((a, b) => a.startedWallMs - b.startedWallMs);
@@ -1570,6 +1597,117 @@ async function loadDrive(recs, { onProgress = () => {}, live = () => true } = {}
     pts: lists.flat(), rows: engines.flat(),
     drivingMs: recs.reduce((n, r) => n + (endOf(r) - r.startedWallMs), 0),
   };
+}
+
+// ---------- stops ----------
+
+// Each trip's stops (Stops.events), kept in this browser like engine rows; null: no engine data.
+const StopStore = Kept.store("stops", ["engine.js", "route.js", "ribbon.js", "stops.js"]);
+async function tripStops(r) {
+  const key = `${r.id}@${r.updatedAtMs}@${r.chunksReceived}`;
+  const kept = await StopStore.get(key);
+  if (kept !== undefined) return kept;
+  const d = await loadDrive([r]);
+  if (d.failed.length) throw new Error("couldn't load");
+  let evs = null;
+  if (d.rows.length && d.pts.length > 1) {
+    Engine.attach(d.pts, d.rows);
+    evs = Stops.events(d.pts, Ribbon.decompose(d.pts, { vehicle: r.meta.vehicle ?? "", towing: !!r.towing }));
+  }
+  if (r.complete && r.status !== "recording") StopStore.put(key, evs);
+  return evs;
+}
+
+// Where stopping costs the most, over every drive with engine data (whose trips: the header picker).
+async function showStops() {
+  const live = current();
+  const { recordings } = await allRecordings();
+  if (!live()) return;
+  const recs = recordings.filter((r) => r.trip && moved(r)).sort((a, b) => a.startedWallMs - b.startedWallMs);
+  app.innerHTML = `
+    <div class="trip trip-many stops-page">
+      <header class="trip-head">
+        <a href="#/" class="back">← Trips</a>
+        <h1>Stops</h1>
+        <p class="muted" id="stops-sub">Where stopping costs you the most: gas burned waiting and getting back up to speed, and time lost against driving straight through.</p>
+      </header>
+      <section class="trip-map">
+        <div id="map"></div>
+        <div class="map-legend">${Stops.legendHtml()}</div>
+        <div class="map-status" id="rt-status">${recs.length ? "Loading trips…" : "No trips yet."}</div>
+      </section>
+      <aside class="trip-side"><section class="side-sec" id="stops-list"></section></aside>
+    </div>`;
+  if (!recs.length) return;
+  const status = document.getElementById("rt-status");
+  let done = 0, next = 0;
+  const all = [], failed = [];
+  let engineTrips = 0;
+  await Promise.all(Array.from({ length: Math.min(4, recs.length) }, async () => {
+    while (next < recs.length && live()) {
+      const r = recs[next++];
+      try {
+        const evs = await tripStops(r);
+        if (evs) {
+          engineTrips++;
+          const start = r.trip?.path?.[0];
+          const gas = await withTimeout(Gas.forTrip(start?.[0], start?.[1], r.startedWallMs), 8000);
+          const perHour = Costs.personTime(r.userId);
+          for (const e of evs) all.push({ ...e, trip: r.id, price: gas?.price ?? null, perHour });
+        }
+      } catch (e) {
+        if (e.message === "unauthorized") throw e;
+        failed.push(r);
+      }
+      done++;
+      if (status) status.innerHTML = `Loading trips… <progress max="${recs.length}" value="${done}"></progress>`;
+    }
+  }));
+  if (!live()) return;
+  const groups = Stops.places(all);
+  if (!groups.length) {
+    status.textContent = engineTrips ? "No stops along the way yet (starts, ends and errands don't count)." : "No trips with engine data yet.";
+    return;
+  }
+  status.remove();
+  // A stop at a named place is called by it; elsewhere, how far and which way from the nearest one.
+  const named = Prefs.get("places") || [];
+  const name = (g) => {
+    let best = null, bd = 5000;
+    for (const p of named) { const d = Route.haversine(p.lat, p.lon, g.lat, g.lon); if (d < bd) { bd = d; best = p; } }
+    if (!best) return null;
+    if (bd <= 60) return best.name;
+    const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+    const y = g.lat - best.lat, x = (g.lon - best.lon) * Math.cos((g.lat * Math.PI) / 180);
+    const dir = dirs[Math.round(((Math.atan2(x, y) * 180) / Math.PI + 360) % 360 / 45) % 8];
+    const mi = bd / 1609.344;
+    return `${mi < 0.1 ? `${Math.round(bd / 0.3048 / 10) * 10} ft` : `${mi.toFixed(1)} mi`} ${dir} of ${best.name}`;
+  };
+  const minutes = (ms) => (ms >= 60000 ? fmtDur(ms) : `${Math.round(ms / 1000)} s`);
+  const costOf = (g) => (g.priced ? Costs.money(g.dollars) : `${Engine.galOf(g.g).toFixed(3)} gal`);
+  const label = (g, k) => `${esc(name(g) ?? `Stop ${k + 1}`)}<br>${plural(g.n, "stop")} · ${esc(costOf(g))} gas · ${esc(minutes(g.lostMs))} lost<br>usually ${esc(minutes(Stops.median(g.waits)))} waiting`;
+  const view = Stops.map(document.getElementById("map"), groups, label);
+  onLeave(() => view.map.remove());
+  const ro = new ResizeObserver(() => view.map.invalidateSize());
+  ro.observe(document.getElementById("map"));
+  onLeave(() => ro.disconnect());
+
+  const totalGas = groups.reduce((a, g) => a + g.dollars, 0), totalTime = groups.reduce((a, g) => a + g.lostMs, 0), n = groups.reduce((a, g) => a + g.n, 0);
+  const anyTime = groups.some((g) => g.timeDollars > 0);
+  document.getElementById("stops-sub").textContent =
+    `${plural(n, "stop")} at ${plural(groups.length, "place")} over ${plural(engineTrips, "trip")}: ${groups.every((g) => g.priced) ? Costs.money(totalGas) : "some"} in gas and ${fmtDur(totalTime)} lost.` +
+    (failed.length ? ` ${plural(failed.length, "trip")} couldn't load; reload to try again.` : "");
+  const top = groups.slice(0, 25);
+  document.getElementById("stops-list").innerHTML = `<h2>Costliest places to stop</h2>
+    <ol class="stops-rows">${top.map((g, k) => `<li><button type="button" class="stop-row" data-k="${k}">
+      <span class="stop-name"><b>${esc(name(g) ?? `Stop ${k + 1}`)}</b><small class="muted">${plural(g.n, "stop")}${g.trips.size > 1 ? ` on ${plural(g.trips.size, "trip")}` : ""} · usually ${esc(minutes(Stops.median(g.waits)))}</small></span>
+      <span class="stop-cost"><b>${esc(anyTime && g.priced ? Costs.money(g.dollars + g.timeDollars) : costOf(g))}</b><small class="muted">${anyTime && g.priced ? `${esc(Costs.money(g.dollars))} gas + ${esc(Costs.money(g.timeDollars))} time` : "gas"} · ${esc(minutes(g.lostMs))}</small></span>
+    </button></li>`).join("")}</ol>
+    <p class="hint">Gas is what burned waiting plus what it took to get back up to speed. Time is what each stop lost against carrying on at the speed you had${anyTime ? ", valued at what your time is worth on the Costs page" : ""}. Name a place on any trip page and it's named here too.</p>`;
+  document.getElementById("stops-list").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-k]");
+    if (b) view.focus(+b.dataset.k);
+  });
 }
 
 // The cruising speed the score and the savings lines use (chosen on the savings card).

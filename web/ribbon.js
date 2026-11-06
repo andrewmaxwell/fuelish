@@ -146,7 +146,10 @@ const Ribbon = (() => {
       while (hi + 1 < n && pts[hi + 1].t <= t + HALF_MS) slide(++hi, 1);
       while (lo <= hi && pts[lo].t < t - HALF_MS) slide(lo++, -1);
       const p = pts[i];
-      if ((p.v ?? 0) < MOVING || !(fuel[i] >= 0) || !(wMi > 0.002)) continue;
+      // A fix whose second has no fuel reading (the adapter skipped it, ~3% of seconds) takes its
+      // width from the seconds around it, so the band doesn't break; only a dropout long enough to
+      // leave the whole window without readings leaves a gap.
+      if ((p.v ?? 0) < MOVING || !(wMi > 0.002)) continue;
       // A window reaching into the next trip (pages of several drives) isn't this stretch: skip it.
       if (pts[lo].trip !== p.trip || pts[hi].trip !== p.trip) {
         let mi = 0;
@@ -323,7 +326,8 @@ const Ribbon = (() => {
       return `<button type="button" class="rb-cause" data-cause="${c.key}" aria-pressed="${only === c.key}">${swatch(c)}<span>${labelOf(c, d)}</span><b>${money(t, price)}</b><small>${pct}%</small></button>`;
     }).join("");
     const ref = 0.025; // gal/mi: 10 px
-    const down = d.hasGrades && d.totals.downhill > 0.02 * total ? ` Downhills saved about ${money(d.totals.downhill, price)}.` : "";
+    const src = d.pts.gradeSource === "barometer" ? "the phone's barometer" : "USGS ground heights";
+    const down = d.hasGrades ? ` Hills from ${src}${d.totals.downhill > 0.02 * total ? `; downhills saved about ${money(d.totals.downhill, price)}` : ""}.` : "";
     return `<div class="rb-legend">${rows}</div>
       <p class="hint">Band width is gas per mile (<span class="rb-scale"></span> ${perMileText(ref, price)}); circles are gas burned standing still, at the same scale.${down} Tap a cause to show it alone.</p>`;
   }

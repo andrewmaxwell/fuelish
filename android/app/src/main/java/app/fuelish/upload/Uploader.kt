@@ -12,6 +12,8 @@ import kotlin.concurrent.withLock
 
 private val CONFLICT = UploadResult.Retry("conflict", 0)
 private val REFUSED = UploadResult.Retry("refused", 0)
+// The trip was deleted on the server (by its person, on the web page): the phone lets it go too.
+private val GONE = UploadResult.Retry("deleted on the server", 0)
 
 sealed class UploadResult {
     data class Done(val chunks: Int) : UploadResult()
@@ -80,6 +82,13 @@ class Uploader(
                     continue
                 }
                 fun refused(r: UploadResult?): Boolean {
+                    if (r === GONE) {
+                        // Deleted on the server: the phone's copy goes too, unless it's still being
+                        // recorded (then it goes once the recording ends and the next upload runs).
+                        if (store.readMeta(id).optString("status") == "recording") held += id
+                        else store.dir(id).deleteRecursively()
+                        return true
+                    }
                     if (r !== REFUSED) return false
                     held += id
                     return true
@@ -93,7 +102,7 @@ class Uploader(
                     when (val r = putChunk(id, seq)) {
                         null -> uploaded++
                         CONFLICT -> conflicts += "$id/$seq"
-                        REFUSED -> { held += id; skip = true }
+                        REFUSED, GONE -> { refused(r); skip = true }
                         else -> return r.withChunks(uploaded)
                     }
                     if (skip) break
@@ -102,7 +111,9 @@ class Uploader(
                 val m2 = putMetaIfChanged(id)
                 if (refused(m2)) continue
                 m2?.let { return it.withChunks(uploaded) }
-                verifyIfFinished(id)?.let { return it.withChunks(uploaded) }
+                val v = verifyIfFinished(id)
+                if (refused(v)) continue
+                v?.let { return it.withChunks(uploaded) }
                 if (deleteAfterUpload && store.fullyUploaded(id)) store.dir(id).deleteRecursively()
             }
         } catch (e: IOException) {
@@ -165,6 +176,7 @@ class Uploader(
         val body = File(store.dir(id), RecordingStore.META).readBytes()
         val r = request("PUT", "$baseUrl/api/v1/recordings/$id", mapOf("Content-Type" to "application/json"), body, null)
         // 403 here: the trip is someone else's on the server (or this key can't upload). Only it waits.
+        if (r.code == 410) return GONE
         if (r.code == 403 || r.code == 409) return refuse(id, r)
         classify(r, "metadata $id")?.let { return it }
         // Hash of the bytes actually sent; if the file changed meanwhile it is re-sent next time.
@@ -186,6 +198,7 @@ class Uploader(
             store.unfinishedFiles(id).isNotEmpty() || store.uploadedMetaHash(id) != store.metaHash(id)) return null
         val r = request("POST", "$baseUrl/api/v1/recordings/$id/verify", emptyMap(), ByteArray(0), null)
         if (r.code == 404) return null // an older server without /verify: keep the local copy
+        if (r.code == 410) return GONE
         classify(r, "verify $id")?.let { return it }
         val body = runCatching { org.json.JSONObject(r.body) }.getOrNull() ?: return null
         if (body.optBoolean("complete")) {
@@ -234,6 +247,7 @@ class Uploader(
             "X-Fuelish-Meta" to Base64.getUrlEncoder().withoutPadding().encodeToString(metaJson.toByteArray()),
         )
         val r = request("PUT", "$baseUrl/api/v1/recordings/$id/chunks/$seq", headers, null, store.chunkFile(id, seq))
+        if (r.code == 410) return GONE
         if (r.code == 409) return CONFLICT
         if (r.code == 403) return refuse(id, r)
         classify(r, "chunk $id/$seq")?.let { return it }

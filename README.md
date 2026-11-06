@@ -54,6 +54,10 @@ docs/      data-format.md: every record type, clock and file
    **Insights** (`#/insights`) covers every drive with engine data: totals, fuel economy by speed and by engine
    temperature, and a grid of how the engine signals correlate, with a scatter for any pair and links to the
    moments they disagree most.
+   **Stops** (`#/stops`) adds up every stop along every drive with engine data (lights, stop signs, traffic; not
+   a trip's start or end, nor anything over 5 minutes): the gas burned waiting plus the gas to get back up to
+   speed, and the time lost against carrying on at the speed you had. Stops within ~35 m are one place; the map
+   sizes each place by what it cost and colors it by the usual wait, and the list ranks the costliest.
    **Repeated trips** (`#/routes`) groups drives between the same two places (named once, for every browser)
    into leaderboards: least gas, quickest, cheapest all in, best mpg, with cold starts and thin fuel data marked.
    When you've driven a journey more than one way, the ways are compared side by side by median time, gas and cost.
@@ -148,6 +152,9 @@ authorized JavaScript origins are `https://fuelish.andrewmaxwell.dev`, the worke
 - **Seeing trips**: everyone signed in can see everyone's trips; the header's "whose trips" picker starts on your own.
 - **Changing things**: only you (or the owner) can share your trips or correct their towing, and only the people who
   drive a vehicle can change its costs. Place names are everyone's; the shared starting cost settings are the owner's.
+- **Deleting**: a trip's page has Delete (its person or the owner); Account has "Delete all my trips" and, for
+  everyone but the owner, "Delete my account". Deleted trips leave only their id, so a phone still holding one
+  is told 410 and drops its copy.
 - `WEB_TOKEN` and `DEVICE_TOKEN` keep working (as the owner). Sessions are an HttpOnly cookie for a year; requests
   that change something must carry `X-Fuelish: 1`, which another site can't add.
 

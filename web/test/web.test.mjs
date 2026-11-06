@@ -10,7 +10,7 @@ export function load(...files) {
   const ctx = vm.createContext({ console, fetch: async () => ({ ok: false }), setTimeout, Promise, Map, Set, Math, Date, JSON });
   for (const f of files) vm.runInContext(readFileSync(new URL(f, dir), "utf8") + "\n;globalThis.__last = 1;", ctx, { filename: f });
   // Top-level const declarations aren't properties of the context; expose them.
-  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}), ...(typeof Ribbon !== 'undefined' ? { Ribbon } : {}), ...(typeof Terrain !== 'undefined' ? { Terrain } : {}) })", ctx);
+  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}), ...(typeof Ribbon !== 'undefined' ? { Ribbon } : {}), ...(typeof Terrain !== 'undefined' ? { Terrain } : {}), ...(typeof Stops !== 'undefined' ? { Stops } : {}) })", ctx);
 }
 const { Engine, Route, extent } = load("route.js", "engine.js");
 
@@ -482,4 +482,72 @@ test("with grades, climbing gets its own lane and downhills count as saved", () 
   const flat = Ribbon.decompose(pts, { vehicle: "2016 Honda Civic 2.0L" });
   assert.equal(flat.totals.climb, 0);
   assert.ok(!Ribbon.legendHtml(flat, 3).includes("Climbing") && Ribbon.legendHtml(flat, 3).includes("Hills & other"));
+});
+
+test("a stop costs its wait, the gas to get going again, and the time lost against carrying on", () => {
+  const { Ribbon, Stops } = load("route.js", "engine.js", "ribbon.js", "stops.js");
+  // Idle 10 s at the start, cruise 15 m/s for 40 s, brake to a stop over 5 s, wait 20 s, speed back
+  // up over 10 s, cruise 40 s, then park and idle 10 s at the end.
+  const plan = [[10, 0], [40, 15], [5, -3], [20, 0], [10, 1.5], [40, 15], [5, -3], [10, 0]];
+  const pts = [];
+  let lat = 38.6, v = 0, t = 0;
+  for (const [n, x] of plan) {
+    for (let k = 0; k < n; k++) {
+      const a = Math.abs(x) < 4 ? x : 0;
+      if (Math.abs(x) >= 4) v = x;
+      pts.push({ t: t * 1000, lat, lon: -90.3, v, a, eng: { fuelGs: a > 0 ? 2.5 : v > 0 ? 1 : 0.15, rpm: 900, cut: false } });
+      v = Math.max(0, v + a);
+      lat += v / 111195;
+      t++;
+    }
+  }
+  const evs = Stops.events(pts, Ribbon.decompose(pts, { vehicle: "2016 Honda Civic 2.0L" }));
+  assert.equal(evs.length, 1); // the start and the end aren't stops
+  const [e] = evs;
+  assert.ok(e.waitMs >= 20000 && e.waitMs < 26000, `wait ${e.waitMs}`);
+  assert.ok(e.lostMs > e.waitMs, `lost ${e.lostMs} vs wait ${e.waitMs}`); // slowing and speeding up lose time too
+  assert.ok(e.goG > 0 && e.idleG > 0 && Math.abs(e.g - e.goG - e.idleG) < 1e-9);
+  // Two stops a car length apart are one place; one 200 m away is another.
+  const places = Stops.places([
+    { ...e, trip: "a", price: 3 },
+    { ...e, lat: e.lat + 0.00005, trip: "b", price: 3 },
+    { ...e, lat: e.lat + 0.002, trip: "b", price: 3 },
+  ]);
+  assert.equal(places.length, 2);
+  assert.equal(places[0].n, 2);
+  assert.equal(places[0].trips.size, 2);
+});
+
+test("barometer heights follow the road, drop cabin pressure jumps, and take their drift from the ground", () => {
+  const { Terrain } = load("route.js", "engine.js", "terrain.js");
+  // 2 km north at 20 m/s, one fix a second: the road climbs 30 m over the middle kilometer. The
+  // barometer drifts (weather) and jumps 0.4 hPa (about 3.5 m) once when the fan comes on.
+  const pts = [], dem = [];
+  const roadAt = (m) => 100 + 30 * Math.min(1, Math.max(0, (m - 500) / 1000));
+  const hPaAt = (alt) => 1013.25 * (1 - alt / 44330) ** 5.255;
+  for (let s = 0; s <= 100; s++) {
+    const m = s * 20, alt = roadAt(m);
+    pts.push({ t: s * 1000, lat: 38.6 + m / 111195, lon: -90.3, baro: hPaAt(alt) + 0.002 * s + (s >= 40 ? -0.4 : 0) });
+    dem.push(alt + (s === 50 ? -12 : 0)); // the ground under a bridge at s = 50
+  }
+  const h = Terrain.baroHeights(pts, Float64Array.from(dem));
+  for (const s of [0, 30, 45, 50, 70, 100]) assert.ok(Math.abs(h[s] - roadAt(s * 20)) < 1.5, `at ${s}: ${h[s]} vs ${roadAt(s * 20)}`);
+  // Uncorrected, the jump would have read as a 3.5 m step at s = 40.
+  const g = Terrain.grades(pts, h);
+  assert.ok(Math.abs(g[60] - 0.03) < 0.006, `climb ${g[60]}`);
+  assert.ok(Math.abs(g[10]) < 0.006, `flat ${g[10]}`);
+});
+
+test("a second without a fuel reading doesn't break the band; a long dropout does", () => {
+  const { Ribbon } = load("route.js", "engine.js", "ribbon.js");
+  const pts = [];
+  let lat = 38.6;
+  for (let s = 0; s < 60; s++) {
+    const missing = s === 20 || (s >= 35 && s < 50); // one second, then 15 s without fuel
+    pts.push({ t: s * 1000, lat, lon: -90.3, v: 15, a: 0, eng: { fuelGs: missing ? null : 1, rpm: 1800, cut: false } });
+    lat += 15 / 111195;
+  }
+  const d = Ribbon.decompose(pts, { vehicle: "2016 Honda Civic 2.0L" });
+  assert.ok(d.lanes[20] && Math.abs(d.perMile[20] - d.perMile[15]) / d.perMile[15] < 0.05, "filled from its neighbors");
+  assert.equal(d.lanes[42], null); // nothing within ±4 s: no width
 });

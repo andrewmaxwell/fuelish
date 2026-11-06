@@ -93,7 +93,8 @@ describe("upload pipeline", () => {
 
     // Signed link download, no bearer header.
     const links: any = await (await call("/recordings/rec1/links", { method: "POST", headers: WEB })).json();
-    const res = await exports.default.fetch(new Request(links.all));
+    expect(links.all).toMatch(/^\/api\/v1\//);
+    const res = await exports.default.fetch(new Request("https://fuelish.test" + links.all));
     expect(res.status).toBe(200);
     // workerd's DecompressionStream stops after one gzip member, so compare bytes:
     // the download must be exactly the stored members in seq order.
@@ -103,7 +104,7 @@ describe("upload pipeline", () => {
 
     // Flip the signature's first hex digit to a value guaranteed to differ.
     const tampered = links.all.replace(/sig=(.)/, (_: string, c: string) => `sig=${c === "0" ? "1" : "0"}`);
-    expect((await exports.default.fetch(new Request(tampered))).status).toBe(403);
+    expect((await exports.default.fetch(new Request("https://fuelish.test" + tampered))).status).toBe(403);
   });
 
   it("refuses to let another device overwrite a recording", async () => {
@@ -447,5 +448,25 @@ describe("terrain", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("deleting", () => {
+  it("removes a trip's chunks from storage, its rows and its share links", async () => {
+    await call("/recordings/del1", { method: "PUT", headers: DEVICE, body: JSON.stringify({ id: "del1", deviceId: "devD", status: "recording", startedWallMs: 9 }) });
+    const body = await gzip("{}\n");
+    const put = (seq: number) => call(`/recordings/del1/chunks/${seq}`, { method: "PUT", headers: { ...DEVICE, "X-Fuelish-Sha256": "" }, body });
+    for (const seq of [0, 1]) {
+      const b = await gzip(`{"seq":${seq}}\n`);
+      expect((await call(`/recordings/del1/chunks/${seq}`, { method: "PUT", headers: { ...DEVICE, "X-Fuelish-Sha256": await sha(b) }, body: b })).status).toBe(201);
+    }
+    const share: any = await (await call("/recordings/del1/shares", { method: "POST", headers: WEB })).json();
+    expect((await env.RECORDINGS.list({ prefix: "recordings/del1/" })).objects.length).toBe(2);
+    expect((await call("/recordings/del1", { method: "DELETE", headers: WEB })).status).toBe(200);
+    expect((await env.RECORDINGS.list({ prefix: "recordings/del1/" })).objects.length).toBe(0);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM chunks WHERE recording_id = 'del1'").first<any>()).n).toBe(0);
+    expect((await call(`/shared/${share.token}`)).status).toBe(404);
+    expect((await put(2)).status).toBe(410);
+    expect((await call("/recordings/del1", { method: "DELETE", headers: WEB })).status).toBe(404);
   });
 });

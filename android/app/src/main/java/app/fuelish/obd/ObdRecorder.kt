@@ -364,7 +364,10 @@ class ObdRecorder(
 
     private fun poll(s: ElmSession) {
         setState("polling")
-        val sched = PollScheduler(buildItems(), maxBatch)
+        // Airflow and the commanded air-fuel ratio in every request (see PollScheduler), unless the
+        // config names others ("everyRequest": [] turns it off).
+        val pinned = cfg.optJSONArray("everyRequest")?.let { Config.hexList(it).toSet() } ?: setOf(0x10, 0x44)
+        val sched = PollScheduler(buildItems(), maxBatch, pinned)
         val timeoutMs = cfg.optLong("requestTimeoutMs", 2_000)
         val rvIntervalNs = cfg.optLong("adapterVoltageIntervalMs", 5_000) * 1_000_000
         val demoteAfter = cfg.optInt("demoteAfterMisses", 5)
