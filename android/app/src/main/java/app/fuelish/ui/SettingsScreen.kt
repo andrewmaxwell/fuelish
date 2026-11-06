@@ -91,6 +91,13 @@ fun SettingsScreen(close: () -> Unit) {
 
     val obd = cfg.getJSONObject("obd")
     val auto = cfg.getJSONObject("auto")
+    var pairNote by remember { mutableStateOf("") }
+    val pair = rememberAdapterPairing { name, problem ->
+        pairNote = if (name != null) "Using $name." else problem
+        cfg = JSONObject(Prefs.config(ctx).json.toString())
+    }
+    // The server and raw JSON are for whoever runs the server; everyone else never needs them.
+    var advancedOpen by remember { mutableStateOf(false) }
 
     Column(Modifier.safeDrawingPadding().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -109,6 +116,47 @@ fun SettingsScreen(close: () -> Unit) {
             )
         }
 
+        Section("OBD adapter") {
+            Muted("Plug it in with the car on and press its button, then tap Find adapter. Or choose one that's already paired.")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = { pairNote = ""; pair() }) { Text("Find adapter") }
+                TextButton(onClick = { ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }) { Text("Bluetooth settings") }
+            }
+            if (pairNote.isNotEmpty()) Muted(pairNote)
+            DeviceList(
+                btOk, bonded, selected = obd.optString("deviceAddress"), noneLabel = "No adapter (phone sensors only)",
+            ) { name, addr -> update { getJSONObject("obd").put("deviceAddress", addr).put("deviceName", name) } }
+        }
+
+        Section("Auto-record") {
+            val on = auto.optBoolean("enabled")
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Record automatically", style = MaterialTheme.typography.bodyLarge)
+                    Muted("Starts when your phone connects to the car's Bluetooth and stops about 10 seconds after you park.")
+                }
+                Switch(checked = on, onCheckedChange = { v -> update { getJSONObject("auto").put("enabled", v) } })
+            }
+            if (on) {
+                Spacer(Modifier.height(8.dp))
+                Text("Your car's Bluetooth", style = MaterialTheme.typography.titleSmall)
+                DeviceList(
+                    btOk, bonded.filter { it.second != obd.optString("deviceAddress") },
+                    selected = auto.optString("carAddress"), noneLabel = null,
+                ) { name, addr -> update { getJSONObject("auto").put("carAddress", addr).put("carName", name) } }
+                Spacer(Modifier.height(8.dp))
+                SetupRow(
+                    bgLocationOk, "Location all the time",
+                    "Needed so recording can start while the phone is in your pocket", "Allow",
+                ) { bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) }
+            }
+        }
+
+        AdvancedSection(cfg, advancedOpen, { advancedOpen = it }) { json ->
+            Prefs.saveConfig(ctx, json)
+            cfg = JSONObject(Prefs.config(ctx).json.toString())
+        }
+        if (advancedOpen || cfg.optString("serverUrl").isBlank()) {
         Section("Upload server") {
             var result by remember { mutableStateOf<ServerCheck.Result?>(null) }
             var checking by remember { mutableStateOf(false) }
@@ -141,41 +189,6 @@ fun SettingsScreen(close: () -> Unit) {
             }
         }
 
-        Section("OBD adapter") {
-            Muted("Pair the adapter in Android's Bluetooth settings first (press the button on the OBDLink to pair), then choose it here.")
-            TextButton(onClick = { ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }) { Text("Open Bluetooth settings") }
-            DeviceList(
-                btOk, bonded, selected = obd.optString("deviceAddress"), noneLabel = "No adapter (phone sensors only)",
-            ) { name, addr -> update { getJSONObject("obd").put("deviceAddress", addr).put("deviceName", name) } }
-        }
-
-        Section("Auto-record") {
-            val on = auto.optBoolean("enabled")
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Record automatically", style = MaterialTheme.typography.bodyLarge)
-                    Muted("Starts when your phone connects to the car's Bluetooth and stops about 10 seconds after you park.")
-                }
-                Switch(checked = on, onCheckedChange = { v -> update { getJSONObject("auto").put("enabled", v) } })
-            }
-            if (on) {
-                Spacer(Modifier.height(8.dp))
-                Text("Your car's Bluetooth", style = MaterialTheme.typography.titleSmall)
-                DeviceList(
-                    btOk, bonded.filter { it.second != obd.optString("deviceAddress") },
-                    selected = auto.optString("carAddress"), noneLabel = null,
-                ) { name, addr -> update { getJSONObject("auto").put("carAddress", addr).put("carName", name) } }
-                Spacer(Modifier.height(8.dp))
-                SetupRow(
-                    bgLocationOk, "Location all the time",
-                    "Needed so recording can start while the phone is in your pocket", "Allow",
-                ) { bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) }
-            }
-        }
-
-        AdvancedSection(cfg) { json ->
-            Prefs.saveConfig(ctx, json)
-            cfg = JSONObject(Prefs.config(ctx).json.toString())
         }
         Spacer(Modifier.height(24.dp))
     }
@@ -234,8 +247,7 @@ private fun DeviceList(
 }
 
 @Composable
-private fun AdvancedSection(cfg: JSONObject, save: (String) -> Unit) {
-    var open by remember { mutableStateOf(false) }
+private fun AdvancedSection(cfg: JSONObject, open: Boolean, setOpen: (Boolean) -> Unit, save: (String) -> Unit) {
     var text by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
     var info by remember { mutableStateOf("") }
@@ -243,10 +255,10 @@ private fun AdvancedSection(cfg: JSONObject, save: (String) -> Unit) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Advanced", style = MaterialTheme.typography.titleMedium)
-                Muted("Sensor rates, OBD signal lists, chunk size, upload rules")
+                Muted("Upload server, sensor rates, OBD signal lists, chunk size, upload rules. You won't need these unless you run the server.")
             }
             TextButton(onClick = {
-                open = !open
+                setOpen(!open)
                 info = ""
                 if (open) text = JSONObject(cfg.toString()).apply { put("deviceToken", "") }.toString(2)
                 error = ""
@@ -269,7 +281,7 @@ private fun AdvancedSection(cfg: JSONObject, save: (String) -> Unit) {
                     if (j.optString("deviceToken").isBlank()) j.put("deviceToken", cfg.optString("deviceToken"))
                     save(j.toString())
                     error = ""
-                    open = false
+                    setOpen(false)
                 } catch (e: IllegalArgumentException) {
                     error = "Not saved: ${e.message}"
                 } catch (e: Exception) {

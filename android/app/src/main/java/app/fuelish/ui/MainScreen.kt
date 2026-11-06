@@ -115,33 +115,32 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
         }
         Spacer(Modifier.height(8.dp))
 
-        // The adapter and auto-record are optional (phone sensors alone make a trip), so they don't hold
-        // setup open. The vehicle does, unless an adapter will name it from the VIN on the first drive.
-        val vehicleOk = cfg.vehicle.isNotBlank() || obdChosen
-        val setupDone = missing.isEmpty() && batteryOk && serverOk && vehicleOk && (!autoOn || bgLocationOk)
-        // While setup is unfinished it comes first; afterwards it disappears.
-        if (setupDone || st.recording) {
-            if (st.recording) RecordingCard(st) else IdleCard(locationOk, autoOn, auto.optString("carName"), st.stopping, openSettings)
+        // Setup is one step at a time: each says why it matters, and the next appears when it's done.
+        // The adapter can be skipped (phone sensors alone make a trip); with one, the first drive names
+        // the vehicle from the VIN, so only someone without an adapter types it.
+        val skippedAdapter = remember(refresh) { Prefs.skippedAdapter(ctx) }
+        val suggestion = remember(refresh) { Prefs.autoSuggestion(ctx) }
+        var pairProblem by remember { mutableStateOf("") }
+        val pair = rememberAdapterPairing { _, problem ->
+            pairProblem = problem
+            refresh++
         }
-        if (!setupDone) {
-            Section("Setup") {
-                SetupRow(
-                    missing.isEmpty(), "Permissions",
-                    if (missing.isEmpty()) "Granted" else "Needed: " + missing.map(::permissionLabel).distinct().joinToString(", "),
-                    "Grant",
-                ) { permLauncher.launch(PERMISSIONS) }
-                SetupRow(batteryOk, "Unrestricted battery", "Keeps recording and uploads running with the screen off", "Allow") {
-                    @SuppressLint("BatteryLife")
-                    val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))
-                    ctx.startActivity(i)
-                }
-                when {
-                    serverOk -> SetupRow(true, "Signed in", Prefs.uploadTarget(ctx).accountName ?: cfg.serverUrl.removePrefix("https://"), null) {}
-                    cfg.serverUrl.isNotBlank() -> SetupRow(
-                        false, "Sign in with Google",
-                        signInError.ifEmpty { "Your drives upload as yours, and your trips show up here." },
-                        if (signingIn) null else "Sign in",
-                    ) {
+        var askedPerms by remember { mutableStateOf(false) }
+        val carName = auto.optString("carName")
+        fun save(change: org.json.JSONObject.() -> Unit) {
+            runCatching { Prefs.saveConfig(ctx, org.json.JSONObject(cfg.json.toString()).apply(change).toString()) }
+            refresh++
+        }
+
+        val steps = buildList {
+            if (cfg.serverUrl.isBlank()) {
+                add(Step(false, "Upload server", "", "Where recordings are sent.", "Set up", openSettings))
+            } else {
+                add(Step(
+                    serverOk, "Sign in", Prefs.uploadTarget(ctx).accountName ?: "Signed in",
+                    signInError.ifEmpty { "Use the Google account you were invited with. Your drives upload as yours and show up on the Trips page." },
+                    if (signingIn) null else "Sign in with Google",
+                    {
                         signingIn = true
                         signInError = ""
                         signIn { err ->
@@ -149,38 +148,103 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
                             signInError = err.orEmpty()
                             refresh++
                         }
-                    }
-                    else -> SetupRow(false, "Upload server", "Where recordings are sent", "Set up", openSettings)
-                }
-                SetupRow(
-                    cfg.vehicle.isNotBlank(), "Vehicle",
-                    when {
-                        cfg.vehicle.isNotBlank() -> cfg.vehicle
-                        obdChosen -> "Filled in from your car on the first drive. Or type it now."
-                        else -> "Year, make and model, like \"2019 Ram 1500\""
                     },
-                    "Type it", openSettings,
-                )
-                SetupRow(
-                    obdChosen, "OBD adapter",
-                    if (obdChosen) cfg.obd.optString("deviceName") else "Optional. Pair the OBDLink, then choose it here",
-                    "Choose", openSettings,
-                )
-                SetupRow(
-                    autoOn, "Auto-record",
-                    if (autoOn) "Starts when your phone connects to ${auto.optString("carName")}"
-                    else "Optional. Records every drive by itself when your phone connects to the car's Bluetooth.",
-                    "Set up", openSettings,
-                )
-                if (autoOn) {
-                    SetupRow(bgLocationOk, "Location all the time", "Lets auto-record start while the phone is in your pocket", "Allow") {
-                        bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                ))
+            }
+            add(Step(
+                missing.isEmpty(), "Permissions", "Location, nearby devices and notifications",
+                "Location maps each drive. Nearby devices lets Fuelish talk to the OBD adapter. Notifications show while a drive is recording." +
+                    if (askedPerms && missing.isNotEmpty()) " Still needed: ${missing.map(::permissionLabel).distinct().joinToString(", ")}." else "",
+                "Allow", { askedPerms = true; permLauncher.launch(PERMISSIONS) },
+                extra = if (askedPerms && missing.isNotEmpty()) {
+                    {
+                        TextButton(onClick = {
+                            ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName)))
+                        }) { Text("Android stopped asking? Open Fuelish's settings") }
+                    }
+                } else null,
+            ))
+            add(Step(
+                obdChosen || skippedAdapter, "OBD adapter",
+                if (obdChosen) cfg.obd.optString("deviceName") else "None: phone sensors only",
+                pairProblem.ifEmpty {
+                    "Plug the adapter into the port under the steering wheel, turn the car on, and press the adapter's button. " +
+                        "It reads the engine, for real fuel numbers."
+                },
+                "Find adapter", { pairProblem = ""; pair() },
+                skip = "I don't have one" to { Prefs.setSkippedAdapter(ctx, true); refresh++ },
+            ))
+            add(Step(
+                batteryOk, "Battery", "Unrestricted",
+                "So Android doesn't stop a recording or an upload while the screen is off.",
+                "Allow",
+                {
+                    @SuppressLint("BatteryLife")
+                    val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))
+                    ctx.startActivity(i)
+                },
+            ))
+            if (!obdChosen) {
+                add(Step(
+                    cfg.vehicle.isNotBlank(), "Vehicle", cfg.vehicle,
+                    "Year, make and model. It sets the weight and the fuel rating your drives are compared with.",
+                    null, {},
+                    extra = {
+                        var typed by remember { mutableStateOf("") }
+                        OutlinedTextField(
+                            typed, { typed = it }, Modifier.fillMaxWidth().padding(top = 8.dp), singleLine = true,
+                            label = { Text("Like \"2019 Ram 1500\"") },
+                        )
+                        Button(onClick = { save { put("vehicle", typed.trim()).put("vehicleVin", "") } }, enabled = typed.isNotBlank()) { Text("Save") }
+                    },
+                ))
+            }
+            if (autoOn) {
+                add(Step(
+                    bgLocationOk, "Location all the time", "Allowed",
+                    "Choose \"Allow all the time\" so recording can start by itself when your phone connects to $carName.",
+                    "Allow", { bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) },
+                ))
+            }
+        }
+        val current = steps.indexOfFirst { !it.done }
+        val setupDone = current < 0
+        // While setup is unfinished it comes first; afterwards it disappears.
+        if (setupDone || st.recording) {
+            if (st.recording) RecordingCard(st) else IdleCard(locationOk, autoOn, carName, st.stopping, openSettings)
+        }
+        if (!setupDone) {
+            Section("Set up Fuelish") {
+                Muted("Step ${current + 1} of ${steps.size}")
+                steps.forEachIndexed { i, step ->
+                    when {
+                        step.done -> SetupRow(true, step.title, step.summary, null) {}
+                        i == current -> CurrentStep(step)
+                        else -> SetupRow(false, step.title, "", null) {}
                     }
                 }
             }
         }
+        // After a drive with the car's Bluetooth connected: one tap to record every drive by itself.
+        if (suggestion != null && !autoOn && !st.recording) {
+            Section("Record every drive automatically?") {
+                Text(
+                    "Your phone was connected to ${suggestion.first} on that drive. Fuelish can start recording whenever it connects, and stop after you park.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(onClick = {
+                        save { getJSONObject("auto").put("enabled", true).put("carAddress", suggestion.second).put("carName", suggestion.first) }
+                        Prefs.answerAutoSuggestion(ctx, true)
+                        if (!bgLocationOk) bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                    }) { Text("Yes, record automatically") }
+                    TextButton(onClick = { Prefs.answerAutoSuggestion(ctx, false); refresh++ }) { Text("No thanks") }
+                }
+            }
+        }
 
-        if (!setupDone && !st.recording) IdleCard(locationOk, autoOn, auto.optString("carName"), st.stopping, openSettings)
+        if (!setupDone && !st.recording) IdleCard(locationOk, autoOn, carName, st.stopping, openSettings)
         if (st.recording) LiveDetails(st)
 
         Section("Uploads") {
@@ -393,5 +457,34 @@ private fun LiveDetails(st: app.fuelish.RecorderStatus) {
         HorizontalDivider(Modifier.padding(vertical = 8.dp))
         Text("Samples in the last second", style = MaterialTheme.typography.titleSmall)
         st.sensorRates.toSortedMap().forEach { (k, v) -> Line(k, "%.0f".format(v)) }
+    }
+}
+
+/** One first-run setup step. [why] shows while it's the step to do; [summary] once it's done. */
+private class Step(
+    val done: Boolean,
+    val title: String,
+    val summary: String,
+    val why: String,
+    val action: String?,
+    val run: () -> Unit,
+    val skip: Pair<String, () -> Unit>? = null,
+    val extra: (@Composable () -> Unit)? = null,
+)
+
+@Composable
+private fun CurrentStep(s: Step) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+        Text(s.title, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(4.dp))
+        Text(s.why, style = MaterialTheme.typography.bodyMedium)
+        s.extra?.invoke()
+        if (s.action != null || s.skip != null) {
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (s.action != null) Button(onClick = s.run) { Text(s.action) }
+                s.skip?.let { (label, run) -> TextButton(onClick = run) { Text(label) } }
+            }
+        }
     }
 }

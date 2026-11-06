@@ -196,11 +196,23 @@ grep '^WEB_TOKEN=' server/.secrets.env | cut -d= -f2- | tr -d '"'"'"' \r' | gh s
 
 Until they're set, the workflow only runs the tests and warns that it skipped publishing.
 
-First run on the phone:
-1. **Grant permissions** (location "while using the app", nearby devices/Bluetooth, notifications).
-2. **Allow unrestricted battery** (button on the main screen). This keeps recording and uploads alive with the screen off.
-3. **Sign in with Google** on the Trips page (the server URL is filled in). That also sets up uploads from this phone.
-4. Pair the MX+ in Android Bluetooth settings (press the button on the adapter), then pick it under Settings → OBD adapter.
+First run on the phone: the recorder's **Set up Fuelish** card walks through one step at a time, each with a
+sentence on why it's needed:
+1. **Sign in with Google** (the server URL is built in). Someone new needs an invite made for their Google
+   address (Account → Invite someone); signing in uses it, so they never sign up on the web.
+2. **Permissions**: location, nearby devices (Bluetooth), notifications.
+3. **OBD adapter**: plug it in, press its button, tap **Find adapter**. Android's companion-device sheet lists
+   nearby adapters and pairs the one tapped, with no trip to Bluetooth settings. Or **I don't have one**.
+4. **Battery**: unrestricted, so recording and uploads keep going with the screen off. (Being the adapter's
+   companion app may already allow this, in which case the step is checked off.)
+5. **Vehicle**, only without an adapter. With one, the first drive reads the VIN and the server names the car
+   with NHTSA's decoder (`GET /api/v1/vehicles/vin/:vin`). A name typed in Settings is never replaced.
+
+After a drive with the car's Bluetooth connected, the recorder offers **Record every drive automatically?** for
+that car (a car stereo or hands-free kit; never headphones or the adapter). Yes turns on auto-record and asks
+for "Allow all the time" location; No never asks about that device again.
+
+Settings has the vehicle, adapter and auto-record. The server, device token and raw JSON are under Advanced.
 
 ### Auto-record with the car's Bluetooth
 

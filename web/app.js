@@ -378,7 +378,10 @@ async function showList() {
   const { recordings } = await allRecordings();
   if (!live()) return;
   if (!recordings.length) {
-    app.innerHTML = `<div class="empty"><h1>No trips yet</h1><p class="muted">Trips show up here once the phone uploads them (on Wi-Fi, or when you tap Upload now).</p></div>`;
+    // Someone new: say what happens next, where they are (in the app, or on the web).
+    app.innerHTML = Account.inApp()
+      ? `<div class="empty"><h1>Your first drive goes here</h1><p class="muted">Drive somewhere. A few minutes after you park, the trip shows up here with its route, cost and mpg.</p><p class="muted">It uploads on Wi-Fi. To send it sooner, tap the bar at the bottom, then Upload now.</p></div>`
+      : `<div class="empty"><h1>No trips yet</h1><p class="muted">Trips show up here after the Fuelish app on your Android phone records a drive and uploads it.</p>${/Android/i.test(navigator.userAgent) ? "" : `<p class="muted">No app yet? Open this page on your phone and get it from the Account page.</p>`}</div>`;
     return;
   }
   const thisWeek = weekStart(Date.now());

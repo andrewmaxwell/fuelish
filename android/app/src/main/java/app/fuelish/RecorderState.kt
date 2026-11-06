@@ -122,6 +122,48 @@ object Prefs {
     fun carConnected(c: Context) = sp(c).getBoolean("carConnected", false)
     fun setCarConnected(c: Context, connected: Boolean) = sp(c).edit().putBoolean("carConnected", connected).apply()
 
+    /**
+     * Bluetooth devices connected right now, as far as the connect/disconnect broadcasts say: address ->
+     * when it connected. Entries from before the phone last started are dropped (no disconnect comes
+     * across a restart).
+     */
+    fun btConnected(c: Context): Set<String> {
+        val bootWall = System.currentTimeMillis() - android.os.SystemClock.elapsedRealtime()
+        return sp(c).getStringSet("btConnected", emptySet()).orEmpty()
+            .mapNotNull { e -> e.split('|').takeIf { it.size == 2 && (it[1].toLongOrNull() ?: 0) > bootWall }?.get(0) }
+            .toSet()
+    }
+
+    @Synchronized
+    fun setBtConnected(c: Context, address: String, connected: Boolean) {
+        val now = sp(c).getStringSet("btConnected", emptySet()).orEmpty().filterNot { it.startsWith("$address|", ignoreCase = true) }.toMutableSet()
+        if (connected) now += "$address|${System.currentTimeMillis()}"
+        sp(c).edit().putStringSet("btConnected", now).apply()
+    }
+
+    /** A car Bluetooth seen during a drive, offered for auto-record: name to address. Null when none. */
+    fun autoSuggestion(c: Context): Pair<String, String>? {
+        val a = sp(c).getString("autoSuggestAddr", null) ?: return null
+        return (sp(c).getString("autoSuggestName", null) ?: "your car") to a
+    }
+
+    fun setAutoSuggestion(c: Context, name: String, address: String) =
+        sp(c).edit().putString("autoSuggestName", name).putString("autoSuggestAddr", address).apply()
+
+    /** Answers the suggestion; a "no" means that device is never suggested again. */
+    fun answerAutoSuggestion(c: Context, accepted: Boolean) {
+        val a = sp(c).getString("autoSuggestAddr", null)
+        val e = sp(c).edit().remove("autoSuggestName").remove("autoSuggestAddr")
+        if (!accepted && a != null) e.putStringSet("autoDeclined", autoDeclined(c) + a.uppercase())
+        e.apply()
+    }
+
+    fun autoDeclined(c: Context): Set<String> = sp(c).getStringSet("autoDeclined", emptySet()).orEmpty()
+
+    /** Set up without an OBD adapter on purpose: setup stops asking for one. */
+    fun skippedAdapter(c: Context) = sp(c).getBoolean("skippedAdapter", false)
+    fun setSkippedAdapter(c: Context, skipped: Boolean) = sp(c).edit().putBoolean("skippedAdapter", skipped).apply()
+
     fun store(c: Context): RecordingStore {
         val base = c.getExternalFilesDir(null) ?: c.filesDir
         return RecordingStore(File(base, "recordings"))

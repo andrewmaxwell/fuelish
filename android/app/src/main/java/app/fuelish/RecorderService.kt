@@ -19,6 +19,7 @@ import android.os.Process
 import android.os.SystemClock
 import androidx.core.app.ServiceCompat
 import app.fuelish.auto.AutoStopPolicy
+import app.fuelish.auto.CarBluetooth
 import app.fuelish.obd.BluetoothSppTransport
 import app.fuelish.obd.ObdRecorder
 import app.fuelish.record.JsonLine
@@ -172,6 +173,7 @@ class RecorderService : Service() {
             power.sample()
 
             startObd()
+            runCatching { CarBluetooth.noticeCar(ctx) }
 
             tickThread.start()
             tick = Handler(tickThread.looper)
@@ -298,6 +300,7 @@ class RecorderService : Service() {
 
         fun stop(reason: String) {
             synchronized(meta) { ended = true }
+            runCatching { CarBluetooth.noticeCar(ctx) }
             RecorderState.status.value = RecorderState.status.value.copy(stopping = true)
             tick.removeCallbacksAndMessages(null)
             tickThread.quitSafely()

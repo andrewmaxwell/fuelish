@@ -9,6 +9,7 @@ import android.app.PendingIntent
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -33,6 +34,8 @@ class CarBluetoothReceiver : BroadcastReceiver() {
             else -> return
         }
         val device = IntentCompat.getParcelableExtra(intent, BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java) ?: return
+        // Every device, not just the chosen car: a drive later suggests the car it was connected to.
+        Prefs.setBtConnected(context, device.address, connected)
         CarBluetooth.onCarEvent(context, device.address, connected)
     }
 }
@@ -79,6 +82,39 @@ object CarBluetooth {
     fun looksLikeCar(d: BluetoothDevice): Boolean {
         val c = d.bluetoothClass?.deviceClass ?: return false
         return c == BluetoothClass.Device.AUDIO_VIDEO_CAR_AUDIO || c == BluetoothClass.Device.AUDIO_VIDEO_HANDSFREE
+    }
+
+    /** A car that doesn't say "car audio": some other audio device that isn't headphones or a speaker. */
+    @SuppressLint("MissingPermission")
+    private fun maybeCar(d: BluetoothDevice): Boolean {
+        val cls = d.bluetoothClass ?: return false
+        if (cls.majorDeviceClass != BluetoothClass.Device.Major.AUDIO_VIDEO) return false
+        return cls.deviceClass !in setOf(
+            BluetoothClass.Device.AUDIO_VIDEO_HEADPHONES, BluetoothClass.Device.AUDIO_VIDEO_WEARABLE_HEADSET,
+            BluetoothClass.Device.AUDIO_VIDEO_PORTABLE_AUDIO, BluetoothClass.Device.AUDIO_VIDEO_LOUDSPEAKER,
+            BluetoothClass.Device.AUDIO_VIDEO_HIFI_AUDIO,
+        )
+    }
+
+    /**
+     * During a drive: if auto-record isn't set up, remembers the car's Bluetooth the phone is connected
+     * to, so the app can offer "record automatically when connected to it?". A car stereo wins over
+     * other audio; headphones, the OBD adapter and anything already turned down never count.
+     */
+    @SuppressLint("MissingPermission")
+    fun noticeCar(c: Context) {
+        val cfg = Prefs.config(c)
+        if (cfg.auto.optBoolean("enabled") && cfg.auto.optString("carAddress").isNotBlank()) return
+        if (Prefs.autoSuggestion(c) != null) return
+        if (c.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return
+        val adapter = c.getSystemService(BluetoothManager::class.java)?.adapter ?: return
+        val obd = cfg.obd.optString("deviceAddress")
+        val declined = Prefs.autoDeclined(c)
+        val connected = Prefs.btConnected(c)
+            .filter { !it.equals(obd, ignoreCase = true) && it.uppercase() !in declined }
+            .mapNotNull { runCatching { adapter.getRemoteDevice(it.uppercase()) }.getOrNull() }
+        val car = connected.firstOrNull(::looksLikeCar) ?: connected.singleOrNull(::maybeCar) ?: return
+        Prefs.setAutoSuggestion(c, car.name ?: "your car", car.address)
     }
 
     /** Location in a service started from the background needs "Allow all the time". */

@@ -312,11 +312,12 @@ const Account = (() => {
         ${admin ? `
         <section class="card">
           <h2>Invite someone</h2>
-          <p class="muted">With their Google address, they just install the app and sign in: no link to keep track of. Each invite is for one person and lasts two weeks.</p>
+          <p class="muted">Enter the Google address they'll sign in with. The link gets them the app, and signing in there is all they do. Each invite is for one person and lasts two weeks.</p>
           <div class="invite-form">
             <input type="email" id="invite-email" placeholder="Their Gmail address" autocomplete="off" aria-label="Their Google account's email address">
-            <button class="primary" id="invite">Make an invite link</button>
+            <button class="primary" id="invite" disabled>Make an invite link</button>
           </div>
+          <p class="muted small"><a href="#" id="invite-plain">Don't know their address? Make a link without one</a> (they'll sign up on the web first).</p>
           <div id="invite-out"></div>
           ${admin[0].invites.filter((i) => !i.usedAtMs && i.expiresAtMs > Date.now()).length ? `<h3>Waiting to be used</h3><ul class="rows">${admin[0].invites.filter((i) => !i.usedAtMs && i.expiresAtMs > Date.now()).map((i) => `<li><span>${i.email ? esc(i.email) : `Made ${ago(i.createdAtMs)}`}<small class="muted">${i.email ? `made ${ago(i.createdAtMs)} · ` : ""}expires ${ago(i.expiresAtMs)}</small></span><span><button class="ghost" data-copy="${esc(i.code)}">Copy link</button><button class="ghost" data-uninvite="${esc(i.code)}">Cancel</button></span></li>`).join("")}</ul>` : ""}
         </section>
@@ -361,19 +362,30 @@ const Account = (() => {
       });
     }));
     const inviteBtn = document.getElementById("invite");
-    if (inviteBtn) inviteBtn.onclick = () => act(inviteBtn, async () => {
-      {
-        const email = document.getElementById("invite-email").value.trim();
-        const inv = await api("/invites", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(email ? { email } : {}) });
-        const url = link(inv.code);
-        const out = document.getElementById("invite-out");
-        out.innerHTML = `${inv.email ? `<p class="muted">Send them this link. It has the app download; they open the app and sign in with Google as <b>${esc(inv.email)}</b>.</p>` : ""}<div class="invite-link"><input readonly value="${esc(url)}"><button class="ghost" id="copy-inv">Copy</button>${navigator.share ? `<button class="ghost" id="share-inv">Send…</button>` : ""}</div>`;
-        out.querySelector("input").select();
-        document.getElementById("copy-inv").onclick = (e) => copy(e.target, url);
-        const share = document.getElementById("share-inv");
-        if (share) share.onclick = () => navigator.share({ title: "Join Fuelish", text: "Join me on Fuelish to track your drives:", url }).catch(() => {});
-      }
-    });
+    const emailBox = document.getElementById("invite-email");
+    const hasEmail = () => emailBox.value.includes("@");
+    // `email` empty: a plain link, for someone whose Google address you don't know.
+    const makeInvite = (el, email) => act(el, async () => {
+      const inv = await api("/invites", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(email ? { email } : {}) });
+      const url = link(inv.code);
+      const out = document.getElementById("invite-out");
+      out.innerHTML = `<p class="muted">${inv.email
+        ? `Send them this link. It gets them the app; they open it and sign in with Google as <b>${esc(inv.email)}</b>.`
+        : "Send them this link. They sign up with it on the web, then get the app from there."}</p><div class="invite-link"><input readonly value="${esc(url)}"><button class="ghost" id="copy-inv">Copy</button>${navigator.share ? `<button class="ghost" id="share-inv">Send…</button>` : ""}</div>`;
+      out.querySelector("input").select();
+      document.getElementById("copy-inv").onclick = (e) => copy(e.target, url);
+      const share = document.getElementById("share-inv");
+      if (share) share.onclick = () => navigator.share({ title: "Join Fuelish", text: "Join me on Fuelish to track your drives:", url }).catch(() => {});
+    }).finally(() => (inviteBtn.disabled = !hasEmail()));
+    if (inviteBtn) {
+      emailBox.oninput = () => (inviteBtn.disabled = !hasEmail());
+      emailBox.onkeydown = (e) => { if (e.key === "Enter" && hasEmail()) makeInvite(inviteBtn, emailBox.value.trim()); };
+      inviteBtn.onclick = () => makeInvite(inviteBtn, emailBox.value.trim());
+      document.getElementById("invite-plain").onclick = (e) => {
+        e.preventDefault();
+        makeInvite(e.target, "");
+      };
+    }
     app.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = () => copy(b, link(b.dataset.copy))));
     app.querySelectorAll("[data-uninvite]").forEach((b) => (b.onclick = () => act(b, async () => {
       await api(`/invites/${b.dataset.uninvite}`, { method: "DELETE" });

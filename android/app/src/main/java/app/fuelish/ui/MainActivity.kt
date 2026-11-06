@@ -314,6 +314,7 @@ private fun RecorderStrip(refreshKey: Any, open: () -> Unit) {
         up.pending > 0 -> "${up.pending} part${if (up.pending == 1) "" else "s"} to upload"
         !locationOk -> "tap to finish"
         autoOn -> "starts with ${auto.optString("carName")}"
+        Prefs.autoSuggestion(ctx) != null -> "tap to record every drive by itself"
         else -> "tap to start"
     }
 
