@@ -150,7 +150,9 @@ car's Bluetooth is still connected), and the web map draws the two as one drive.
 - `complete` means every seq 0..chunkCount-1 is present, not just that many chunks. Chunks past a
   final chunkCount are refused.
 - `GET /recordings` is paged, newest first by (start time, id): pass the previous page's `next`
-  (`"<startMs>:<id>"`) as `?before=`.
+  (`"<startMs>:<id>"`) as `?before=`. `?since=<ms>` lists only trips that started then or later, and
+  the answer adds `olderMs`: when the newest trip before that started (null if none). The trip list
+  uses it to show the last five weeks first and load older ones on request.
 - `prefs` (D1): small JSON settings the web page edits, `GET /prefs`, `PUT /prefs/<key>` with the
   web token. Only known keys with the right shape are accepted: `places` (a list of
   `{ lat, lon, name }`, names 1–80 characters) and `costs` (`timePerHour`, `wearPerMile`,

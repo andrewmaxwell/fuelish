@@ -52,18 +52,79 @@ window.addEventListener("resize", navEdges);
 // Every trip in the person picker's choice (or `user`'s: an id, "" for everyone).
 // Each comes marked towing or not (Towing.mark), from its vehicle's other trips and any correction.
 async function allRecordings(user = Account.whoParam()) {
-  let all = [], before = null;
   const prefs = Prefs.load().catch(() => null);
+  const { recordings } = await recordingPages(user);
+  await prefs;
+  Towing.mark(recordings, Prefs.get("towing"));
+  rememberTowing(recordings);
+  return { recordings };
+}
+
+// Towing is judged from all of a vehicle's trips, and the trip list loads only recent ones. So the
+// marks from the last time every trip was loaded are kept in this browser, and the list uses them
+// for the trips they cover; that keeps its scores the same as the trip page's.
+const TOWING_SEEN = "fuelish.towingSeen";
+const readSeen = () => { try { return JSON.parse(localStorage.getItem(TOWING_SEEN) || "{}") || {}; } catch { return {}; } };
+function rememberTowing(recs) {
+  // Merged in: the person picker may have loaded only some people's trips.
+  const seen = readSeen();
+  for (const r of recs) {
+    if (r.towingSource === "you") delete seen[r.id];
+    else seen[r.id] = [r.towing ? 1 : 0, r.towingSource, r.towingRatio, r.towingDetected];
+  }
+  try { localStorage.setItem(TOWING_SEEN, JSON.stringify(seen)); } catch {}
+}
+function recallTowing(recs) {
+  const seen = readSeen();
+  for (const r of recs) {
+    const s = seen[r.id];
+    if (!s || r.towingSource === "you") continue;
+    [r.towing, r.towingSource, r.towingRatio, r.towingDetected] = [!!s[0], s[1], s[2], s[3]];
+  }
+}
+
+// The server's pages of trips, newest first. With `since` (ms) only those that started then or later
+// (before `before`, ms, if given), and `olderMs`: when the newest trip before `since` started, or null.
+async function recordingPages(user, { since = null, before = null } = {}) {
+  let all = [], olderMs;
   for (;;) {
-    const q = [user ? `user=${encodeURIComponent(user)}` : "", before != null ? `before=${encodeURIComponent(before)}` : ""].filter(Boolean).join("&");
+    const q = [
+      user ? `user=${encodeURIComponent(user)}` : "",
+      since != null ? `since=${Math.floor(since)}` : "",
+      before != null ? `before=${encodeURIComponent(before)}` : "",
+    ].filter(Boolean).join("&");
     const page = await api("/recordings" + (q ? "?" + q : ""));
     all = all.concat(page.recordings);
+    if (olderMs === undefined) olderMs = page.olderMs;
     if (page.next == null || !page.recordings.length) break;
     before = page.next;
   }
+  return { recordings: all, olderMs: olderMs ?? null };
+}
+
+// The trip list starts with the last few weeks and reaches further back on request. How far it
+// reaches is kept per person picked while the page is open, so coming back to the list keeps it.
+const RECENT_WEEKS = 5, MORE_WEEKS = 8;
+const listReach = new Map(); // whose -> { since: ms }
+async function recentRecordings(user = Account.whoParam()) {
+  const prefs = Prefs.load().catch(() => null);
+  let since = listReach.get(user)?.since ?? +addDays(weekStart(Date.now()), -7 * (RECENT_WEEKS - 1));
+  let { recordings, olderMs } = await recordingPages(user, { since });
+  // Nothing lately (back from a long break): start from the latest drive instead.
+  if (!recordings.length && olderMs != null) {
+    since = +addDays(weekStart(olderMs), -7 * (RECENT_WEEKS - 1));
+    ({ recordings, olderMs } = await recordingPages(user, { since }));
+  }
+  listReach.set(user, { since });
   await prefs;
-  Towing.mark(all, Prefs.get("towing"));
-  return { recordings: all };
+  Towing.mark(recordings, Prefs.get("towing"));
+  recallTowing(recordings);
+  return { recordings, olderMs, since };
+}
+// Reach further back: at least MORE_WEEKS more, and always as far as the next older drive.
+function reachFurther(user, olderMs) {
+  const at = listReach.get(user)?.since ?? Date.now();
+  listReach.set(user, { since: +weekStart(Math.min(olderMs, +addDays(new Date(at), -7 * MORE_WEEKS))) });
 }
 
 async function api(path, opts = {}) {
@@ -400,7 +461,8 @@ async function route() {
 
 async function showList() {
   const live = current();
-  const { recordings } = await allRecordings();
+  const who = Account.whoParam();
+  const { recordings, olderMs, since } = await recentRecordings(who);
   if (!live()) return;
   if (!recordings.length) {
     // Someone new: say what happens next, where they are (in the app, or on the web).
@@ -457,7 +519,24 @@ async function showList() {
         </div>
         <div class="cards">${g.cards}</div>
       </section>`;
-    }).join("")}`;
+    }).join("")}
+    ${olderMs != null ? `<div class="list-more">
+      <span class="muted">Trips since ${esc(new Date(since).toLocaleDateString(undefined, { month: "long", day: "numeric", ...(new Date(since).getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) }))}</span>
+      <button type="button" class="more-btn" id="older-trips">Show older trips</button>
+    </div>` : ""}`;
+  document.getElementById("older-trips")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    btn.textContent = "Loading…";
+    reachFurther(who, olderMs);
+    // Drawn again in place: the trips above stay where they are on screen.
+    leavePage();
+    try { await showList(); } catch (e) {
+      if (e.message === "unauthorized") return;
+      btn.disabled = false;
+      btn.textContent = `Couldn't load (${e.message}). Try again`;
+    }
+  });
   scoreCards(live);
 }
 

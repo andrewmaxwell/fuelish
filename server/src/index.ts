@@ -448,11 +448,17 @@ export function parseCursor(before: string | null): { ms: number; id: string } {
 }
 
 // `user`: one person's trips ("me" for the caller's own); without it, everyone's.
+// `since` (ms): only trips that started then or later, for showing recent ones first. The answer then
+// says when the newest trip before it started (`olderMs`, null when there's none), so the page knows
+// how far back to reach for more.
 async function listRecordings(url: URL, who: Principal, env: Env): Promise<Response> {
   const { ms, id } = parseCursor(url.searchParams.get("before"));
   let user = url.searchParams.get("user");
   if (user === "me") user = who.userId ?? "";
   if (user != null && !/^[A-Za-z0-9_-]{0,64}$/.test(user)) throw new HttpError(400, "bad user");
+  const sinceParam = url.searchParams.get("since");
+  if (sinceParam != null && !/^\d{1,16}$/.test(sinceParam)) throw new HttpError(400, "bad since");
+  const since = sinceParam == null ? null : Number(sinceParam);
   // Counting a recording's chunks uses the (recording_id, seq) key, so this stays small however long
   // the drives are. Each trip's route summary comes from list_json (see listParts).
   const { results } = await env.DB.prepare(
@@ -463,16 +469,21 @@ async function listRecordings(url: URL, who: Principal, env: Env): Promise<Respo
             (SELECT COALESCE(SUM(c.bytes), 0) FROM chunks c WHERE c.recording_id = r.id) AS bytes
      FROM recordings r WHERE (r.started_at_ms < ?1 OR (r.started_at_ms = ?1 AND r.id < ?2))
        AND (?4 IS NULL OR COALESCE(r.user_id, '') = ?4)
+       AND (?5 IS NULL OR r.started_at_ms >= ?5)
      ORDER BY r.started_at_ms DESC, r.id DESC LIMIT ?3`,
   )
-    .bind(ms, id, PAGE_SIZE, user)
+    .bind(ms, id, PAGE_SIZE, user, since)
     .all<any>();
+  const older = since == null ? undefined : await env.DB.prepare(
+    `SELECT MAX(started_at_ms) AS ms FROM recordings WHERE started_at_ms < ?1 AND (?2 IS NULL OR COALESCE(user_id, '') = ?2)`,
+  ).bind(since, user).first<{ ms: number | null }>();
   const rows = results.map((r) => ({ r, row: recordingRow(r) }));
   const parts = await listParts(rows.map(({ r, row }) => ({ id: r.id, chunks: r.chunks_received, endMs: row.driveEndWallMs, key: r.list_key, json: r.list_json })), env);
   const last = results.at(-1);
   return json({
     recordings: rows.map(({ r, row }) => ({ ...row, ...parts.get(r.id) })),
     next: results.length === PAGE_SIZE ? `${last.started_at_ms}:${last.id}` : null,
+    ...(older ? { olderMs: older.ms ?? null } : {}),
   });
 }
 

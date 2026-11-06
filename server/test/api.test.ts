@@ -279,6 +279,23 @@ describe("paging", () => {
     }
     expect(seen.size).toBe(501);
   });
+
+  it("lists only recent trips with since, and says when the newest older one started", async () => {
+    const stmts = [100, 200, 300, 400].map((ms) =>
+      env.DB.prepare("INSERT INTO recordings (id, device_id, status, started_at_ms, meta_json, created_at_ms, updated_at_ms) VALUES (?, 'd', 'stopped', ?, '{}', 0, 0)").bind(`at-${ms}`, ms));
+    await env.DB.batch(stmts);
+    const get = async (q: string) => (await (await call(`/recordings?${q}`, { headers: WEB })).json()) as any;
+    const recent = await get("since=250");
+    expect(recent.recordings.map((r: any) => r.id).filter((id: string) => id.startsWith("at-"))).toEqual(["at-400", "at-300"]);
+    expect(recent.olderMs).toBe(200);
+    // The stretch before it: since and before together.
+    const more = await get("since=150&before=250");
+    expect(more.recordings.map((r: any) => r.id)).toEqual(["at-200"]);
+    expect(more.olderMs).toBe(100);
+    expect((await get("since=0")).olderMs).toBeNull();
+    expect((await get("before=250")).olderMs).toBeUndefined();
+    expect((await call("/recordings?since=soon", { headers: WEB })).status).toBe(400);
+  });
 });
 
 describe("prefs", () => {

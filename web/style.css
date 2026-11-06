@@ -715,3 +715,7 @@ button.ghost.danger { color: var(--bad); border: 1px solid var(--border); }
 .stop-cost { text-align: right; flex: none; font-variant-numeric: tabular-nums; }
 .stops-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--text-2); }
 .stops-legend > span:first-child { color: var(--muted); }
+
+/* The end of the trip list, while there are older trips to load. */
+.list-more { display: flex; flex-direction: column; align-items: center; gap: 10px; margin: 32px 0 8px; text-align: center; }
+.list-more .more-btn { min-width: 200px; }
