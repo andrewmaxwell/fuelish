@@ -236,17 +236,42 @@ const Account = (() => {
       app.innerHTML = `<div class="card login"><h1>This invite has expired</h1><p class="muted">Invite links work once, for two weeks. Ask for a new one.</p><p><a href="#/">Already joined? Sign in →</a></p></div>`;
       return;
     }
+    // An invite made for one Google address needs no sign-up on the web: on a phone, the app comes
+    // first and signing in there (as that address) is the only sign-in.
+    const forEmail = info.email && !inApp();
+    const who = forEmail ? `<b>${esc(info.email)}</b>` : "";
     app.innerHTML = `
       <div class="card login">
         <h1>Join Fuelish</h1>
         <p>${esc(info.from)} invited you to record your drives and see what they cost.</p>
-        <div class="g-slot"></div>
+        ${forEmail && onAndroid() ? `
+          <a class="button primary" href="/api/v1/app/apk/latest?invite=${encodeURIComponent(code)}" download="fuelish.apk">Download the Fuelish app</a>
+          <ol class="steps">
+            <li>Open the download and tap Install. The first time, Android asks to allow installs from Chrome.</li>
+            <li>Open Fuelish and sign in with Google as ${who}. That's all.</li>
+          </ol>
+          <p class="muted">Only want to look at trips on the web? <a href="#" id="web-signup">Sign up here instead</a></p>
+          <div class="web-signup" hidden><div class="g-slot"></div></div>`
+        : forEmail ? `
+          <p>To record drives, open this link on your Android phone. To see trips here, sign up with ${who}:</p>
+          <div class="g-slot"></div>`
+        : `<div class="g-slot"></div>
+          ${inApp() ? "" : onAndroid()
+            ? `<p class="muted">After you sign up, you can download the Fuelish app here to record your drives.</p>`
+            : `<p class="muted">Recording on an Android phone? After you sign up, open Fuelish on the phone, sign in, and download the app from your Account page.</p>`}`}
         <p class="bad" hidden></p>
-        ${inApp() ? "" : onAndroid()
-          ? `<p class="muted">After you sign up, you can download the Fuelish app here to record your drives.</p>`
-          : `<p class="muted">Recording on an Android phone? After you sign up, open Fuelish on the phone, sign in, and download the app from your Account page.</p>`}
       </div>`;
-    googleButton(app.querySelector(".g-slot"), { invite: code, text: "signup_with", error: app.querySelector(".login .bad") });
+    const slot = app.querySelector(".g-slot");
+    const show = () => googleButton(slot, { invite: code, text: "signup_with", error: app.querySelector(".login .bad") });
+    const webSignup = document.getElementById("web-signup");
+    if (webSignup) {
+      webSignup.onclick = (e) => {
+        e.preventDefault();
+        webSignup.parentElement.hidden = true;
+        app.querySelector(".web-signup").hidden = false;
+        show();
+      };
+    } else show();
   }
 
   const ago = (ms) => (ms ? new Date(ms).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : "never");
@@ -287,10 +312,13 @@ const Account = (() => {
         ${admin ? `
         <section class="card">
           <h2>Invite someone</h2>
-          <p class="muted">Each link lets one person join with their Google account, within two weeks.</p>
-          <button class="primary" id="invite">Make an invite link</button>
+          <p class="muted">With their Google address, they just install the app and sign in: no link to keep track of. Each invite is for one person and lasts two weeks.</p>
+          <div class="invite-form">
+            <input type="email" id="invite-email" placeholder="Their Gmail address" autocomplete="off" aria-label="Their Google account's email address">
+            <button class="primary" id="invite">Make an invite link</button>
+          </div>
           <div id="invite-out"></div>
-          ${admin[0].invites.filter((i) => !i.usedAtMs && i.expiresAtMs > Date.now()).length ? `<h3>Waiting to be used</h3><ul class="rows">${admin[0].invites.filter((i) => !i.usedAtMs && i.expiresAtMs > Date.now()).map((i) => `<li><span>Made ${ago(i.createdAtMs)}<small class="muted">expires ${ago(i.expiresAtMs)}</small></span><span><button class="ghost" data-copy="${esc(i.code)}">Copy link</button><button class="ghost" data-uninvite="${esc(i.code)}">Cancel</button></span></li>`).join("")}</ul>` : ""}
+          ${admin[0].invites.filter((i) => !i.usedAtMs && i.expiresAtMs > Date.now()).length ? `<h3>Waiting to be used</h3><ul class="rows">${admin[0].invites.filter((i) => !i.usedAtMs && i.expiresAtMs > Date.now()).map((i) => `<li><span>${i.email ? esc(i.email) : `Made ${ago(i.createdAtMs)}`}<small class="muted">${i.email ? `made ${ago(i.createdAtMs)} · ` : ""}expires ${ago(i.expiresAtMs)}</small></span><span><button class="ghost" data-copy="${esc(i.code)}">Copy link</button><button class="ghost" data-uninvite="${esc(i.code)}">Cancel</button></span></li>`).join("")}</ul>` : ""}
         </section>
         <section class="card">
           <h2>People</h2>
@@ -335,10 +363,11 @@ const Account = (() => {
     const inviteBtn = document.getElementById("invite");
     if (inviteBtn) inviteBtn.onclick = () => act(inviteBtn, async () => {
       {
-        const inv = await api("/invites", { method: "POST" });
+        const email = document.getElementById("invite-email").value.trim();
+        const inv = await api("/invites", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(email ? { email } : {}) });
         const url = link(inv.code);
         const out = document.getElementById("invite-out");
-        out.innerHTML = `<div class="invite-link"><input readonly value="${esc(url)}"><button class="ghost" id="copy-inv">Copy</button>${navigator.share ? `<button class="ghost" id="share-inv">Send…</button>` : ""}</div>`;
+        out.innerHTML = `${inv.email ? `<p class="muted">Send them this link. It has the app download; they open the app and sign in with Google as <b>${esc(inv.email)}</b>.</p>` : ""}<div class="invite-link"><input readonly value="${esc(url)}"><button class="ghost" id="copy-inv">Copy</button>${navigator.share ? `<button class="ghost" id="share-inv">Send…</button>` : ""}</div>`;
         out.querySelector("input").select();
         document.getElementById("copy-inv").onclick = (e) => copy(e.target, url);
         const share = document.getElementById("share-inv");

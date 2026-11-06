@@ -12,6 +12,8 @@ class Config(val json: JSONObject) {
     val serverUrl get() = json.optString("serverUrl").trimEnd('/')
     val deviceToken get() = json.optString("deviceToken")
     val vehicle get() = json.optString("vehicle")
+    /** The VIN [vehicle] was named from; empty when someone typed the name (then a VIN never renames it). */
+    val vehicleVin get() = json.optString("vehicleVin")
 
     val chunkSeconds get() = json.optInt("chunkSeconds", 60)
     val chunkMaxBytes get() = json.optLong("chunkMaxBytes", 32L shl 20)
@@ -36,7 +38,8 @@ class Config(val json: JSONObject) {
     companion object {
         val DEFAULTS: String = """
         {
-          "vehicle": "2016 Honda Civic LX 2.0L",
+          "vehicle": "",
+          "vehicleVin": "",
           "serverUrl": "https://fuelish.andrewmaxwell.dev",
           "deviceToken": "",
           "chunkSeconds": 60,

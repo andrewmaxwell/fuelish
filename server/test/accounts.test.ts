@@ -101,6 +101,24 @@ describe("accounts", () => {
     expect((await signIn({ sub: "g-other", email: "o@example.com", name: "Other" }, { invite: inv.code })).status).toBe(403);
   });
 
+  it("lets someone in with no link when the invite names their Google address", async () => {
+    const make = (body: object) =>
+      call("/invites", { method: "POST", headers: { ...andrew, ...POST }, body: JSON.stringify(body) });
+    expect((await make({ email: "not an email" })).status).toBe(400);
+    expect((await make({ email: "andrew@example.com" })).status).toBe(409); // already joined
+    const inv: any = await (await make({ email: " Bro@Example.com " })).json();
+    expect(inv.email).toBe("bro@example.com");
+    expect(await (await call(`/invites/${inv.code}`)).json()).toEqual({ usable: true, from: "Andrew", email: "bro@example.com" });
+    const listed: any = await (await call("/invites", { headers: andrew })).json();
+    expect(listed.invites.find((i: any) => i.code === inv.code).email).toBe("bro@example.com");
+
+    // Someone else without a link still can't get in; the named address can, with no code.
+    expect((await signIn({ sub: "g-stranger", email: "stranger@example.com", name: "Stranger" })).status).toBe(403);
+    const r = await signIn({ sub: "g-bro", email: "bro@example.com", name: "Bro" }, { device: { name: "Pixel 9" } });
+    expect(r.status).toBe(200);
+    expect(await (await call(`/invites/${inv.code}`)).json()).toEqual({ usable: false, from: null });
+  });
+
   it("files a phone's uploads under its person, and keeps people out of each other's trips", async () => {
     expect((await call("/recordings/dad1", { method: "PUT", headers: dadPhone, body: meta("dad1", "dad-phone") })).status).toBe(200);
     const mine: any = await (await call("/recordings?user=me", { headers: andrew })).json();
@@ -205,5 +223,17 @@ describe("app updates", () => {
     expect(new Uint8Array(await r.arrayBuffer())).toEqual(apk(5));
     expect((await call("/app/apk/5")).status).toBe(401);
     expect(new Uint8Array(await (await call("/app/apk/latest", { headers: WEB })).arrayBuffer())).toEqual(apk(5));
+  });
+
+  it("lets someone with a usable invite download the app before signing in", async () => {
+    const owner = sessionOf(await signIn(ANDREW));
+    const inv: any = await (await call("/invites", { method: "POST", headers: { ...owner, "X-Fuelish": "1" } })).json();
+    const r = await call(`/app/apk/latest?invite=${inv.code}`);
+    expect(r.status).toBe(200);
+    expect(new Uint8Array(await r.arrayBuffer())).toEqual(apk(5));
+    expect((await call("/app/apk/latest?invite=nope")).status).toBe(403);
+    expect((await call("/app/apk/5?invite=" + inv.code)).status).toBe(401); // only the latest, from the invite page
+    await call(`/invites/${inv.code}`, { method: "DELETE", headers: { ...owner, "X-Fuelish": "1" } });
+    expect((await call(`/app/apk/latest?invite=${inv.code}`)).status).toBe(403);
   });
 });

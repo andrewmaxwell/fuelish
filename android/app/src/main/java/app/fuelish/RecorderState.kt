@@ -68,7 +68,7 @@ object Prefs {
         val keep = runCatching { Config.parse(stored).json }.getOrNull()
         val d = Config.parse(null)
         if (keep != null) {
-            for (k in listOf("serverUrl", "deviceToken", "vehicle")) (keep.opt(k) as? String)?.let { d.json.put(k, it) }
+            for (k in listOf("serverUrl", "deviceToken", "vehicle", "vehicleVin")) (keep.opt(k) as? String)?.let { d.json.put(k, it) }
             for ((block, keys) in listOf("obd" to listOf("deviceAddress", "deviceName"), "auto" to listOf("carAddress", "carName", "enabled"))) {
                 val from = keep.opt(block) as? JSONObject ?: continue
                 for (k in keys) from.opt(k)?.let { v -> if (v is String || v is Boolean) d.json.getJSONObject(block).put(k, v) }

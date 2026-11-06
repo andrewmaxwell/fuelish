@@ -13,7 +13,9 @@ const Engine = (() => {
   const ENGINE_EFF = 0.25;
   const CRR = 0.012, CDA = 0.68, AIR = 1.2; // CdA ≈ 0.30 × 2.25 m² for a compact sedan
   /** Rough loaded weight (car, driver, fuel) by vehicle name; braking waste scales with it. */
-  const massKg = (vehicle = "") => (/civic/i.test(vehicle) ? 1360 : /truck|f-?150|silverado|ram|tundra|sierra/i.test(vehicle) ? 2600 : 1500);
+  // Names come from the VIN decoder ("2019 RAM 1500 5.7L") or whatever someone typed.
+  const massKg = (vehicle = "") => (/civic/i.test(vehicle) ? 1360
+    : /truck|pickup|f-?[1-4]50|silverado|\bram\b|tundra|sierra|tacoma|colorado|canyon|ranger|frontier|titan|gladiator/i.test(vehicle) ? 2600 : 1500);
   const galOf = (g) => g / FUEL_G_PER_L / L_PER_GAL;
   // EPA window-sticker ratings (fueleconomy.gov) for the cars Fuelish knows, to put a drive's mpg
   // in context. Matched on the vehicle name; anything else gets no comparison.

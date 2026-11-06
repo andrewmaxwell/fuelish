@@ -28,6 +28,7 @@ import app.fuelish.sensors.PhoneSensors
 import app.fuelish.sensors.PowerMonitor
 import app.fuelish.ui.MainActivity
 import app.fuelish.upload.UploadWorker
+import app.fuelish.upload.VehicleLookup
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.TimeZone
@@ -127,6 +128,8 @@ class RecorderService : Service() {
         private var obd: ObdRecorder? = null
         private val problems = mutableListOf<String>()
         private var lastCounts = emptyMap<String, Long>()
+        private var vinSeen = false
+        @Volatile private var ended = false
         /** Only recordings that started automatically also stop automatically. */
         private val autoStop = if (trigger == TRIGGER_MANUAL) null else AutoStopPolicy(
             cfg.auto.optLong("stopAfterCarDisconnectS", 10) * 1_000_000_000,
@@ -254,7 +257,35 @@ class RecorderService : Service() {
                     notification("${writer.written.get()} records · GPS ${if (gps != null) "ok" else "waiting"} · OBD ${obd?.status?.state ?: "off"}"),
                 )
             }
+            val vin = obd?.status?.vin.orEmpty()
+            if (!vinSeen && vin.isNotEmpty()) {
+                vinSeen = true
+                nameFromVin(vin)
+            }
             tick.postDelayed(::onTick, 1000)
+        }
+
+        /**
+         * Names the vehicle from the VIN the adapter just read, unless someone typed a name. A phone that
+         * moves to another car gets that car's name, so each trip is labeled with the car it was in.
+         */
+        private fun nameFromVin(vin: String) {
+            val now = Prefs.config(ctx)
+            if (now.vehicleVin.equals(vin, ignoreCase = true)) return
+            if (now.vehicle.isNotBlank() && now.vehicleVin.isBlank()) return
+            Thread({
+                val named = VehicleLookup.name(now.serverUrl, now.deviceToken, vin) ?: return@Thread
+                val latest = Prefs.config(ctx)
+                if (latest.vehicle.isNotBlank() && latest.vehicleVin.isBlank()) return@Thread // typed meanwhile
+                runCatching {
+                    Prefs.saveConfig(ctx, JSONObject(latest.json.toString()).put("vehicle", named).put("vehicleVin", vin).toString())
+                }
+                synchronized(meta) {
+                    meta.put("vehicle", named)
+                    store.writeMeta(id, meta)
+                    if (!ended) event("vehicle_named", "$named ($vin)")
+                }
+            }, "fuelish-vin").apply { isDaemon = true }.start()
         }
 
         private fun onChunkClosed() {
@@ -266,6 +297,7 @@ class RecorderService : Service() {
         }
 
         fun stop(reason: String) {
+            synchronized(meta) { ended = true }
             RecorderState.status.value = RecorderState.status.value.copy(stopping = true)
             tick.removeCallbacksAndMessages(null)
             tickThread.quitSafely()

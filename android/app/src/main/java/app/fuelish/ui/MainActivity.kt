@@ -92,7 +92,7 @@ class MainActivity : ComponentActivity() {
                                 BackHandler(!settingsOpen) { recorderOpen = false }
                                 BackHandler(settingsOpen) { settingsOpen = false }
                                 if (settingsOpen) SettingsScreen { settingsOpen = false }
-                                else MainScreen(openSettings = { settingsOpen = true }, showTrips = { recorderOpen = false })
+                                else MainScreen(openSettings = { settingsOpen = true }, showTrips = { recorderOpen = false }, signIn = ::signInFromSetup)
                             }
                         }
                     }
@@ -140,6 +140,25 @@ class MainActivity : ComponentActivity() {
                 GoogleSignIn.Result.Ok -> web.signInDone(true)
                 GoogleSignIn.Result.Cancelled -> web.signInDone(false)
                 is GoogleSignIn.Result.Failed -> web.signInDone(false, r.message)
+            }
+        }
+    }
+
+    /**
+     * Sign-in straight from the recorder's setup list. No invite code: someone new gets in with an
+     * invite made for their Google address. [done] gets null on success, "" if they backed out, or why
+     * it failed. The trips page reloads to pick up the session.
+     */
+    private fun signInFromSetup(done: (String?) -> Unit) {
+        val server = Prefs.config(this).serverUrl
+        lifecycleScope.launch {
+            when (val r = GoogleSignIn.signIn(this@MainActivity, server, "", "")) {
+                GoogleSignIn.Result.Ok -> {
+                    web.retry()
+                    done(null)
+                }
+                GoogleSignIn.Result.Cancelled -> done("")
+                is GoogleSignIn.Result.Failed -> done(r.message)
             }
         }
     }

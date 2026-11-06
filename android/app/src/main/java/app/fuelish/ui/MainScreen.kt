@@ -64,7 +64,7 @@ val PERMISSIONS = listOfNotNull(
 ).toTypedArray()
 
 @Composable
-fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit) {
+fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (String?) -> Unit) -> Unit) {
     val ctx = LocalContext.current
     val st by RecorderState.status.collectAsStateWithLifecycle()
     val up by RecorderState.upload.collectAsStateWithLifecycle()
@@ -97,6 +97,8 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit) {
     val auto = cfg.auto
     val autoOn = auto.optBoolean("enabled") && auto.optString("carAddress").isNotBlank()
     val obdChosen = cfg.obd.optString("deviceAddress").isNotBlank()
+    var signingIn by remember { mutableStateOf(false) }
+    var signInError by remember { mutableStateOf("") }
     val onWifi = remember(refresh) {
         val cm = ctx.getSystemService(ConnectivityManager::class.java)
         cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true
@@ -113,11 +115,13 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit) {
         }
         Spacer(Modifier.height(8.dp))
 
-        // The adapter is optional (phone sensors alone make a trip), so it doesn't hold setup open.
-        val setupDone = missing.isEmpty() && batteryOk && serverOk && (!autoOn || bgLocationOk)
+        // The adapter and auto-record are optional (phone sensors alone make a trip), so they don't hold
+        // setup open. The vehicle does, unless an adapter will name it from the VIN on the first drive.
+        val vehicleOk = cfg.vehicle.isNotBlank() || obdChosen
+        val setupDone = missing.isEmpty() && batteryOk && serverOk && vehicleOk && (!autoOn || bgLocationOk)
         // While setup is unfinished it comes first; afterwards it disappears.
         if (setupDone || st.recording) {
-            if (st.recording) RecordingCard(st) else IdleCard(locationOk, autoOn, auto.optString("carName"), st.stopping)
+            if (st.recording) RecordingCard(st) else IdleCard(locationOk, autoOn, auto.optString("carName"), st.stopping, openSettings)
         }
         if (!setupDone) {
             Section("Setup") {
@@ -132,14 +136,41 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit) {
                     ctx.startActivity(i)
                 }
                 when {
-                    serverOk -> SetupRow(true, "Signed in", cfg.serverUrl.removePrefix("https://"), null) {}
-                    cfg.serverUrl.isNotBlank() -> SetupRow(false, "Sign in", "Sign in with Google on the Trips page. Your recordings upload as yours.", "Sign in", showTrips)
+                    serverOk -> SetupRow(true, "Signed in", Prefs.uploadTarget(ctx).accountName ?: cfg.serverUrl.removePrefix("https://"), null) {}
+                    cfg.serverUrl.isNotBlank() -> SetupRow(
+                        false, "Sign in with Google",
+                        signInError.ifEmpty { "Your drives upload as yours, and your trips show up here." },
+                        if (signingIn) null else "Sign in",
+                    ) {
+                        signingIn = true
+                        signInError = ""
+                        signIn { err ->
+                            signingIn = false
+                            signInError = err.orEmpty()
+                            refresh++
+                        }
+                    }
                     else -> SetupRow(false, "Upload server", "Where recordings are sent", "Set up", openSettings)
                 }
+                SetupRow(
+                    cfg.vehicle.isNotBlank(), "Vehicle",
+                    when {
+                        cfg.vehicle.isNotBlank() -> cfg.vehicle
+                        obdChosen -> "Filled in from your car on the first drive. Or type it now."
+                        else -> "Year, make and model, like \"2019 Ram 1500\""
+                    },
+                    "Type it", openSettings,
+                )
                 SetupRow(
                     obdChosen, "OBD adapter",
                     if (obdChosen) cfg.obd.optString("deviceName") else "Optional. Pair the OBDLink, then choose it here",
                     "Choose", openSettings,
+                )
+                SetupRow(
+                    autoOn, "Auto-record",
+                    if (autoOn) "Starts when your phone connects to ${auto.optString("carName")}"
+                    else "Optional. Records every drive by itself when your phone connects to the car's Bluetooth.",
+                    "Set up", openSettings,
                 )
                 if (autoOn) {
                     SetupRow(bgLocationOk, "Location all the time", "Lets auto-record start while the phone is in your pocket", "Allow") {
@@ -149,7 +180,7 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit) {
             }
         }
 
-        if (!setupDone && !st.recording) IdleCard(locationOk, autoOn, auto.optString("carName"), st.stopping)
+        if (!setupDone && !st.recording) IdleCard(locationOk, autoOn, auto.optString("carName"), st.stopping, openSettings)
         if (st.recording) LiveDetails(st)
 
         Section("Uploads") {
@@ -256,7 +287,7 @@ private fun HeldTrips(ids: List<String>, changed: () -> Unit) {
 }
 
 @Composable
-private fun IdleCard(locationOk: Boolean, autoOn: Boolean, carName: String, stopping: Boolean) {
+private fun IdleCard(locationOk: Boolean, autoOn: Boolean, carName: String, stopping: Boolean, openSettings: () -> Unit) {
     val ctx = LocalContext.current
     var note by remember { mutableStateOf("") }
     Section {
@@ -265,9 +296,10 @@ private fun IdleCard(locationOk: Boolean, autoOn: Boolean, carName: String, stop
             when {
                 !locationOk -> "Grant permissions above to start recording."
                 autoOn -> "Starts automatically when your phone connects to $carName."
-                else -> "Tap Start, or turn on auto-record in Settings."
+                else -> "Tap Start, or let Fuelish start by itself whenever you get in the car."
             },
         )
+        if (locationOk && !autoOn) TextButton(onClick = openSettings) { Text("Set up auto-record") }
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             note, { note = it }, Modifier.fillMaxWidth(), singleLine = true,

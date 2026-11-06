@@ -1,6 +1,7 @@
 // Fuelish API: receives recording metadata and gzip chunks from the phone,
 // stores chunks in R2 and metadata in D1, and serves them back to the web app.
 
+import { VIN_RE, decodeVin } from "./vehicles";
 import {
   AuthError, INVITE_TTL_MS, SESSION_TTL_MS, identify, randomToken, safeEqual, sessionCookie, signIn, signOut, verifyGoogleIdToken,
   type Principal, type Scope,
@@ -85,6 +86,12 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   }
   // An invite's status, so its page can say who it's from before anyone signs in.
   if (m === "GET" && p[0] === "invites" && p.length === 2) return inviteInfo(p[1], env);
+  // The invite page's download button: someone with a usable invite gets the app before signing in,
+  // and signs in once, in the app.
+  if (m === "GET" && p[0] === "app" && p[1] === "apk" && p[2] === "latest" && p.length === 3 && url.searchParams.has("invite")) {
+    if (!(await usableInvite(url.searchParams.get("invite") ?? "", env))) throw new HttpError(403, "that invite has been used or has expired");
+    return downloadApp("latest", env);
+  }
 
   if (!who) throw new HttpError(401, "missing bearer token");
   const scopes = who.scopes;
@@ -104,7 +111,7 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
   if (p[0] === "invites") {
     needAdmin();
     if (p.length === 1 && m === "GET") return listInvites(env);
-    if (p.length === 1 && m === "POST") return createInvite(who, env);
+    if (p.length === 1 && m === "POST") return createInvite(req, who, env);
     if (p.length === 2 && m === "DELETE") return revokeInvite(p[1], env);
     throw new HttpError(404, "not found");
   }
@@ -123,6 +130,16 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
       return publishApp(req, url, env);
     }
     throw new HttpError(404, "not found");
+  }
+  // A car's name from its VIN (the app asks after reading it over OBD).
+  if (m === "GET" && p[0] === "vehicles" && p[1] === "vin" && p.length === 3) {
+    if (!scopes.includes("upload") && !scopes.includes("read")) throw new HttpError(403, "requires upload or read scope");
+    if (!VIN_RE.test(p[2])) throw new HttpError(400, "not a VIN");
+    const v = await decodeVin(p[2]).catch((e) => {
+      throw new HttpError(502, `couldn't look up the VIN: ${e.message}`);
+    });
+    if (!v) throw new HttpError(404, "that VIN didn't decode to a vehicle");
+    return json(v);
   }
   if (p[0] === "admin") {
     needAdmin();
@@ -811,23 +828,42 @@ async function listUsers(env: Env): Promise<Response> {
   });
 }
 
-async function createInvite(who: Principal, env: Env): Promise<Response> {
+// The body is optional: {"email": "..."} makes the invite work for that Google account without the link.
+async function createInvite(req: Request, who: Principal, env: Env): Promise<Response> {
   if (!who.userId) throw new HttpError(409, "sign in with Google first, then invite people");
+  const text = new TextDecoder().decode(await readBounded(req, 4096, "invite")).trim();
+  let email: string | null = null;
+  if (text) {
+    let body: any;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      throw new HttpError(400, "invite body is not JSON");
+    }
+    if (body?.email != null && body.email !== "") {
+      if (typeof body.email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim()) || body.email.length > 254) {
+        throw new HttpError(400, "that doesn't look like an email address");
+      }
+      email = body.email.trim().toLowerCase();
+      const taken = await env.DB.prepare("SELECT 1 FROM users WHERE lower(email) = ?").bind(email).first();
+      if (taken) throw new HttpError(409, `${email} has already joined`);
+    }
+  }
   const code = randomToken(16);
   const now = Date.now();
-  await env.DB.prepare("INSERT INTO invites (code, created_by, created_at_ms, expires_at_ms) VALUES (?, ?, ?, ?)")
-    .bind(code, who.userId, now, now + INVITE_TTL_MS)
+  await env.DB.prepare("INSERT INTO invites (code, created_by, created_at_ms, expires_at_ms, email) VALUES (?, ?, ?, ?, ?)")
+    .bind(code, who.userId, now, now + INVITE_TTL_MS, email)
     .run();
-  return json({ code, createdAtMs: now, expiresAtMs: now + INVITE_TTL_MS }, 201);
+  return json({ code, email, createdAtMs: now, expiresAtMs: now + INVITE_TTL_MS }, 201);
 }
 
 async function listInvites(env: Env): Promise<Response> {
   const { results } = await env.DB.prepare(
-    `SELECT i.code, i.created_at_ms, i.expires_at_ms, i.used_at_ms, u.name AS used_by_name
+    `SELECT i.code, i.email, i.created_at_ms, i.expires_at_ms, i.used_at_ms, u.name AS used_by_name
      FROM invites i LEFT JOIN users u ON u.id = i.used_by WHERE i.revoked_at_ms IS NULL ORDER BY i.created_at_ms DESC LIMIT 50`,
   ).all<any>();
   return json({
-    invites: results.map((i) => ({ code: i.code, createdAtMs: i.created_at_ms, expiresAtMs: i.expires_at_ms, usedAtMs: i.used_at_ms, usedBy: i.used_by_name })),
+    invites: results.map((i) => ({ code: i.code, email: i.email ?? null, createdAtMs: i.created_at_ms, expiresAtMs: i.expires_at_ms, usedAtMs: i.used_at_ms, usedBy: i.used_by_name })),
   });
 }
 
@@ -836,12 +872,18 @@ async function revokeInvite(code: string, env: Env): Promise<Response> {
   return json({ ok: true });
 }
 
-async function inviteInfo(code: string, env: Env): Promise<Response> {
+async function usableInvite(code: string, env: Env): Promise<any | null> {
+  if (!code) return null;
   const i = await env.DB.prepare(
     "SELECT i.*, u.name AS from_name FROM invites i JOIN users u ON u.id = i.created_by WHERE i.code = ?",
   ).bind(code).first<any>();
-  const usable = !!i && !i.used_by && i.revoked_at_ms == null && i.expires_at_ms > Date.now();
-  return json({ usable, from: usable ? i.from_name : null });
+  return i && !i.used_by && i.revoked_at_ms == null && i.expires_at_ms > Date.now() ? i : null;
+}
+
+// `email` is only there for an invite made for one address: the page tells them which account to use.
+async function inviteInfo(code: string, env: Env): Promise<Response> {
+  const i = await usableInvite(code, env);
+  return json({ usable: !!i, from: i ? i.from_name : null, ...(i?.email ? { email: i.email } : {}) });
 }
 
 async function listDevices(who: Principal, env: Env): Promise<Response> {

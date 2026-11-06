@@ -6,6 +6,8 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -67,6 +69,16 @@ object CarBluetooth {
         c.getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "Car connected", NotificationManager.IMPORTANCE_HIGH),
         )
+    }
+
+    /**
+     * A car stereo or hands-free kit, by the Bluetooth class it reports (most cars say "car audio" or
+     * "hands-free"). Only used to list likely cars first; anything can still be picked.
+     */
+    @SuppressLint("MissingPermission")
+    fun looksLikeCar(d: BluetoothDevice): Boolean {
+        val c = d.bluetoothClass?.deviceClass ?: return false
+        return c == BluetoothClass.Device.AUDIO_VIDEO_CAR_AUDIO || c == BluetoothClass.Device.AUDIO_VIDEO_HANDSFREE
     }
 
     /** Location in a service started from the background needs "Allow all the time". */

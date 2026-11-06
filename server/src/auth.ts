@@ -224,9 +224,14 @@ export async function signIn(
       ]);
       claimed = true;
     } else {
-      const code = opts.invite ?? "";
-      const inv = code ? await env.DB.prepare("SELECT * FROM invites WHERE code = ?").bind(code).first<any>() : null;
-      if (!inv) throw new AuthError(403, "This Fuelish is invite-only. Ask the owner for an invite link.");
+      // The invite in the link, or else an open one made for this Google address.
+      const inv = opts.invite
+        ? await env.DB.prepare("SELECT * FROM invites WHERE code = ?").bind(opts.invite).first<any>()
+        : await env.DB.prepare(
+            "SELECT * FROM invites WHERE email = ? AND used_by IS NULL AND revoked_at_ms IS NULL AND expires_at_ms > ? ORDER BY created_at_ms DESC LIMIT 1",
+          ).bind(google.email.toLowerCase(), now).first<any>();
+      if (!inv) throw new AuthError(403, `This Fuelish is invite-only, and there's no invite for ${google.email}. Ask the owner for one.`);
+      const code: string = inv.code;
       if (inv.used_by || inv.revoked_at_ms != null || inv.expires_at_ms < now) {
         throw new AuthError(403, "That invite link has been used or has expired. Ask for a new one.");
       }

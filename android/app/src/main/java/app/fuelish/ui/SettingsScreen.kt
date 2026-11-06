@@ -83,7 +83,8 @@ fun SettingsScreen(close: () -> Unit) {
     val bonded = remember(refresh) {
         if (!btOk) emptyList()
         else ctx.getSystemService(BluetoothManager::class.java)?.adapter?.bondedDevices
-            ?.map { (it.name ?: "Unnamed device") to it.address }?.sortedBy { it.first.lowercase() } ?: emptyList()
+            ?.sortedWith(compareBy({ !CarBluetooth.looksLikeCar(it) }, { (it.name ?: "").lowercase() }))
+            ?.map { (it.name ?: "Unnamed device") to it.address } ?: emptyList()
     }
     val bgLocationOk = remember(refresh) { CarBluetooth.canStartInBackground(ctx) }
     val bgLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { refresh++ }
@@ -99,7 +100,13 @@ fun SettingsScreen(close: () -> Unit) {
         Muted("Changes save automatically and apply to the next recording.", Modifier.padding(start = 12.dp, bottom = 4.dp))
 
         Section("Car") {
-            SettingField(cfg.optString("vehicle"), "Vehicle") { v -> update { put("vehicle", v.trim()) } }
+            // Typing a name makes it yours: a VIN read later won't rename it.
+            SettingField(cfg.optString("vehicle"), "Vehicle") { v -> update { put("vehicle", v.trim()).put("vehicleVin", "") } }
+            Muted(
+                if (cfg.optString("vehicleVin").isNotBlank()) "Named from the car's VIN. Type to change it."
+                else "Year, make and model. With an OBD adapter, Fuelish fills this in from the car on the first drive.",
+                Modifier.padding(top = 4.dp),
+            )
         }
 
         Section("Upload server") {
@@ -271,7 +278,7 @@ private fun AdvancedSection(cfg: JSONObject, save: (String) -> Unit) {
             }) { Text("Save") }
             OutlinedButton(onClick = {
                 // Keep connection and device choices; reset everything else.
-                val keep = listOf("serverUrl", "deviceToken", "vehicle")
+                val keep = listOf("serverUrl", "deviceToken", "vehicle", "vehicleVin")
                 val d = JSONObject(Config.DEFAULTS)
                 keep.forEach { d.put(it, cfg.opt(it)) }
                 d.getJSONObject("obd").put("deviceAddress", cfg.getJSONObject("obd").optString("deviceAddress"))

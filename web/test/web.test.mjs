@@ -351,3 +351,10 @@ test("minute marks fall where each minute ends, spaced by speed; gas marks by fu
   assert.equal(g.marks.length, 8);
   assert.equal(Route.gasMarks(pts.map((p) => ({ ...p, eng: null })), 3), null);
 });
+
+test("weighs trucks named by the VIN decoder as trucks", () => {
+  for (const v of ["2019 RAM 1500 5.7L", "2021 Ford F-150 3.5L", "2018 Toyota Tacoma 3.5L", "Dad's truck"]) assert.equal(Engine.physics.massKg(v), 2600, v);
+  assert.equal(Engine.physics.massKg("2016 Honda Civic 2.0L"), 1360);
+  assert.equal(Engine.physics.massKg("2020 Toyota Camry 2.5L"), 1500);
+  assert.equal(Engine.physics.massKg("2022 Hyundai Tramonto"), 1500); // "ram" inside a word isn't a Ram
+});
