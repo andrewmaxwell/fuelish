@@ -185,6 +185,18 @@ const Places = (() => {
   function visitsOfPoints(pts, stops) {
     const mean = (a, b, k) => pts.slice(a, b + 1).reduce((n, p) => n + p[k], 0) / (b - a + 1);
     const out = [];
+    // When a drive got where it ended: the first standstill once it was within PARK_M of the end for
+    // good. A recording keeps going for a while after parking (and may shuffle about the lot), so
+    // its last point is later than that.
+    const arrival = (a, b) => {
+      let j = b;
+      while (j > a && Route.haversine(pts[j - 1].lat, pts[j - 1].lon, pts[b].lat, pts[b].lon) <= PARK_M) j--;
+      // Not before it first moved (a short hop may never leave the circle).
+      let m = a;
+      while (m < b && !(pts[m].v > 1)) m++;
+      for (let k = Math.max(j, m); k < b; k++) if (pts[k].v != null && pts[k].v < 0.45) return k;
+      return b;
+    };
     Route.tripRanges(pts).forEach(([a, b]) => {
       const s = pts[a], e = pts[b], prev = out.at(-1);
       // `leaves`: the drive (pts' trip index) that sets off from here.
@@ -196,7 +208,8 @@ const Places = (() => {
         const v = { lat: mean(x.i0, x.i1, "lat"), lon: mean(x.i0, x.i1, "lon"), ms: x.ms, i: x.i0, t: pts[x.i0].t, kind: "stop", along: true };
         if (far(v)) out.push(v);
       }
-      out.push({ lat: e.lat, lon: e.lon, i: b, t: e.t, kind: "end" });
+      const k = arrival(a, b);
+      out.push({ lat: e.lat, lon: e.lon, i: b, t: pts[k].t, kind: "end", arrives: e.trip });
     });
     return named(out);
   }
@@ -1062,13 +1075,18 @@ function placesSection(pts, sm, view, live, { retitle = null, withDay = false, d
     view.places(vs);
     view.highlightPlace(null);
     host.hidden = false;
+    // A week's list gets a heading where the day changes: at a place, or at a drive setting off.
     let lastDay = "";
+    const heading = (t) => {
+      const day = withDay ? dayLabel(t) : "";
+      if (!day || day === lastDay) return "";
+      lastDay = day;
+      return `<div class="row-day">${esc(day)}</div>`;
+    };
     const rows = vs.map((v, i) => {
-      const day = withDay ? dayLabel(v.t) : "";
-      const head = day && day !== lastDay ? `<div class="row-day">${esc(day)}</div>` : "";
-      lastDay = day || lastDay;
+      const head = heading(v.t);
       const recs = drives && v.leaves != null ? drives.get(v.leaves) || [] : [];
-      const drive = recs.length ? driveRow(recs) : "";
+      const drive = recs.length ? heading(recs[0].startedWallMs) + driveRow(recs, vs.find((x) => x.arrives === v.leaves)?.t) : "";
       return `${head}
         <label class="place-row${drives && v.along ? " along" : ""}"><span>${what[v.kind]} <small>${esc(when(v.t))}${v.ms ? ` · ${fmtDur(v.ms)}` : ""}</small></span>
           <input value="${esc(v.name ?? "")}" placeholder="Name this place" data-i="${i}" maxlength="80"></label>${drive}`;
@@ -1108,12 +1126,12 @@ function placesSection(pts, sm, view, live, { retitle = null, withDay = false, d
 }
 
 // One drive in the places list: when, how far, how long. Several recordings carried on as one drive
-// (an app update in the middle) are one row, linked to the first.
-function driveRow(recs) {
+// (an app update in the middle) are one row, linked to the first. It ends when the drive arrived.
+function driveRow(recs, arrivedT = null) {
   const m = recs.filter(moved), r = recs[0], last = recs.at(-1);
   const t = totals(recs);
   return `<a class="trip-row drive-row" href="#/r/${esc(r.id)}" data-id="${esc(r.id)}">
-    <b>${esc(clock(r.startedWallMs))} – ${esc(clock(endOf(last)))}</b>
+    <b>${esc(clock(r.startedWallMs))} – ${esc(clock(arrivedT ?? endOf(last)))}</b>
     <span>${m.length ? `${miles(t.meters)} · ${fmtDur(t.movingMs)}${recs.some((x) => x.routeGaps) ? " · partial" : ""}` : noRouteLabel(r).toLowerCase()}</span></a>`;
 }
 
