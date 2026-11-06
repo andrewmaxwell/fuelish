@@ -66,6 +66,8 @@ async function route(req: Request, url: URL, env: Env, ctx: ExecutionContext): P
 
   // Public data, no token: weekly average gas prices (for trip cost).
   if (m === "GET" && p[0] === "gas-prices" && p.length === 1) return gasPrices(ctx);
+  // Public data, no token: ground elevation tiles (hills on the map's Spend view).
+  if (m === "GET" && p[0] === "terrain" && p.length === 4) return terrainTile(p, ctx);
 
   // Share links work without a token: one recording, trimmed, read-only.
   if (m === "GET" && p[0] === "shared" && p.length === 2) return getShared(p[1], env);
@@ -1188,6 +1190,31 @@ function b64urlDecode(s: string): string {
   const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
   const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
   return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+}
+
+// ---------- terrain ----------
+
+// Ground elevation as Terrarium PNG tiles (AWS Open Data "Terrain Tiles"; in the U.S. from USGS 3DEP
+// at about 10 m): the web page reads a route's height from them to work out its grades. They come
+// through here so the page only ever talks to its own server, and are kept at the edge for a month
+// (they never change). Only the zooms the page uses are passed on.
+const TERRAIN_MAX_Z = 14;
+const TERRAIN_CACHE_S = 30 * 86400;
+
+async function terrainTile(p: string[], ctx: ExecutionContext): Promise<Response> {
+  const yMatch = /^(\d{1,6})\.png$/.exec(p[3]);
+  if (!/^\d{1,2}$/.test(p[1]) || !/^\d{1,6}$/.test(p[2]) || !yMatch) throw new HttpError(404, "no such tile");
+  const z = Number(p[1]), x = Number(p[2]), y = Number(yMatch[1]);
+  if (z > TERRAIN_MAX_Z || x >= 2 ** z || y >= 2 ** z) throw new HttpError(404, "no such tile");
+  const key = new Request(`https://fuelish.internal/terrain/${z}/${x}/${y}.png`);
+  const cache = (caches as unknown as { default: Cache }).default;
+  const hit = await cache.match(key);
+  if (hit) return hit;
+  const res = await fetch(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`);
+  if (!res.ok) throw new HttpError(res.status === 404 || res.status === 403 ? 404 : 502, "couldn't fetch the elevation tile");
+  const out = new Response(res.body, { headers: { "Content-Type": "image/png", "Cache-Control": `public, max-age=${TERRAIN_CACHE_S}, immutable` } });
+  ctx.waitUntil(cache.put(key, out.clone()));
+  return out;
 }
 
 // ---------- gas prices ----------

@@ -244,7 +244,7 @@ const Route = (() => {
     // Fuel per mile here against this drive's average at the same speed (engine.js relCost): where
     // the drive cost more than it had to. Hills, hard acceleration and stop-and-go show up red.
     cost: {
-      label: "Cost", unit: "", engine: true,
+      label: "Vs usual", unit: "", engine: true,
       fmt: (x) => (Math.abs(x - 1) < 0.005 ? "usual" : x < 1 ? `${Math.round((1 - x) * 100)}% less` : `${Math.round((x - 1) * 100)}% more`),
       note: "Fuel per mile against this drive's average at the same speed. Red cost more, blue less (coasting is bluest)",
       value: (p, q) => q.eng?.rel ?? null,
@@ -263,10 +263,15 @@ const Route = (() => {
     },
   };
 
+  // The cost ribbon's view (ribbon.js) draws the route itself thin and plain, for the band beside it.
+  METRICS.plain = { label: "Route", unit: "", fmt: () => "", value: () => null, stops: [[0, "#8d8b86"]], line: 3, plainColor: "#b9b7b1" };
+
   const WIDTHS = { none: "Even", speed: "Speed", accel: "Accel", turn: "Turning", pedal: "Pedal", fuel: "Gal/h" };
-  // What the map offers: four views, each one color at an even width. Cost and pedal need engine data.
+  // What the map offers: Spend (the cost ribbon, ribbon.js), then views that color the line at an even
+  // width. Spend, Vs usual and Pedal need engine data.
   const VIEWS = {
-    cost: { label: "Cost", color: "cost", engine: true },
+    spend: { label: "Spend", color: "plain", engine: true },
+    cost: { label: "Vs usual", color: "cost", engine: true },
     speed: { label: "Speed", color: "speed" },
     smooth: { label: "Smooth", color: "accel" },
     pedal: { label: "Pedal", color: "pedal", engine: true },
@@ -489,12 +494,12 @@ const Route = (() => {
     marks.clearLayers();
     const color = METRICS[state.color];
     const widthM = state.width === "none" ? null : METRICS[state.width];
-    const colorOf = segmentColors(pts, state);
+    const colorOf = color.plainColor ? () => color.plainColor : segmentColors(pts, state);
     const segs = [];
     for (let i = 1; i < pts.length; i++) {
       const p = pts[i - 1], q = pts[i];
       if (q.t - p.t > 5000) continue; // GPS gap: don't draw a straight line across it
-      let w = 6;
+      let w = color.line ?? 6;
       if (widthM) {
         let wv = widthM.value(p, q);
         if (wv != null && widthM.abs) wv = Math.abs(wv);

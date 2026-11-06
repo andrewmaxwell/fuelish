@@ -1710,22 +1710,29 @@ const money = (d) => (d < 10 ? "$" + d.toFixed(2) : "$" + Math.round(d).toLocale
 // ---------- map, charts and controls (shared) ----------
 
 function drawRoute(pts, sm, { withDay = false } = {}) {
-  // `view` is the saved choice; none saved yet means Cost on drives with engine data, else Speed.
+  // `view` is the saved choice; none saved yet means Spend on drives with engine data, else Speed.
+  // (A choice of the old default, Cost, saved before Spend existed moves to the new default once.)
   // `marks`: ticks across the route every minute ("min"), every so much gas ("gas"), or none ("off").
   let state = { view: null, labels: true, marks: "min" };
   try {
     const saved = JSON.parse(localStorage.getItem(VIEW_KEY) || "{}");
-    state = { view: Route.VIEWS[saved.view] ? saved.view : null, labels: saved.labels ?? true, marks: ["min", "gas", "off"].includes(saved.marks) ? saved.marks : "min" };
+    const old = saved.view === "cost" && !saved.spend;
+    state = { view: Route.VIEWS[saved.view] && !old ? saved.view : null, labels: saved.labels ?? true, marks: ["min", "gas", "off"].includes(saved.marks) ? saved.marks : "min" };
   } catch {}
   // One drive's readout says how far into it a moment is; marks count on through every trip shown.
   const oneTrip = Route.tripRanges(pts).length === 1;
   let price = null;
+  // The Spend view: gas split by cause (ribbon.js), drawn as a band beside the route; `ribbonOnly`
+  // is the one cause shown alone (null: all).
+  let ribbon = null, ribbonLayer = null, ribbonOnly = null, ribbonOpts = null, terrain = null;
+  // Grades come from elevation tiles a moment later; the band is split again with them.
+  const splitRibbon = () => { if (ribbonOpts) ribbon = Ribbon.decompose(pts, ribbonOpts); };
 
   // What's drawn: the chosen view, except engine views on a drive without engine data.
   let hasEngine = false;
   const shownState = {};
   const effective = () => {
-    const want = state.view ?? (hasEngine ? "cost" : "speed");
+    const want = state.view ?? (hasEngine ? "spend" : "speed");
     const view = Route.VIEWS[want].engine && !hasEngine ? "speed" : want;
     const marks = state.marks === "gas" && !hasEngine ? "min" : state.marks;
     return Object.assign(shownState, { view, color: Route.VIEWS[view].color, width: "none", labels: state.labels, marks });
@@ -1751,6 +1758,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
         ${p.eng.rel != null ? `<dt>Fuel/mi, 20 s</dt><dd>${esc(Route.METRICS.cost.fmt(p.eng.rel))}${Math.abs(p.eng.rel - 1) >= 0.005 ? " than usual" : ""}</dd>` : ""}
         <dt>Fuel</dt><dd>${p.eng.cut ? "cut off" : fmt(p.eng.gph, 2, " gal/h")}</dd>
         <dt>RPM</dt><dd>${fmt(p.eng.rpm, 0, "")}</dd>` : ""}
+        ${ribbon && shownState.view === "spend" ? Ribbon.readoutHtml(ribbon, i, price) : ""}
       </dl>`;
   };
 
@@ -1787,21 +1795,39 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
     return `<div class="marks-switch">${every ? `<span class="marks-key"><i></i>${esc(every)}</span>` : ""}<div class="seg marks" role="group" aria-label="Marks along the route">${opts.map(([k, l]) =>
       `<button type="button" data-marks="${k}" aria-pressed="${shownState.marks === k}">${l}</button>`).join("")}</div></div>`;
   };
-  const legend = () => { document.getElementById("rt-legend").innerHTML = Route.legendHtml(shownState, pts) + marksSwitch(); };
+  const legend = () => {
+    document.getElementById("rt-legend").innerHTML =
+      (shownState.view === "spend" && ribbon ? Ribbon.legendHtml(ribbon, price, ribbonOnly) : Route.legendHtml(shownState, pts)) + marksSwitch();
+  };
+  // The band shows only on the Spend view, over the plain route.
+  const syncRibbon = () => {
+    if (shownState.view === "spend" && ribbon) {
+      if (!ribbonLayer) ribbonLayer = Ribbon.layer(ribbon);
+      else ribbonLayer.setData(ribbon);
+      if (!view.map.hasLayer(ribbonLayer)) ribbonLayer.addTo(view.map);
+    } else if (ribbonLayer) ribbonLayer.remove();
+  };
   document.getElementById("rt-legend").addEventListener("click", (e) => {
+    const c = e.target.closest("[data-cause]");
+    if (c) {
+      ribbonOnly = ribbonOnly === c.dataset.cause ? null : c.dataset.cause;
+      ribbonLayer?.only(ribbonOnly);
+      legend();
+      return;
+    }
     const b = e.target.closest("[data-marks]");
     if (!b) return;
     state.marks = b.dataset.marks;
     effective(); drawMarks(); legend(); save();
   });
-  const recolor = () => { effective(); view.redraw(); drawMarks(); legend(); };
+  const recolor = () => { effective(); view.redraw(); syncRibbon(); drawMarks(); legend(); };
   // Notable moments, labeled on the map (again with engine ones once that data is in).
   view.moments(momentsFor(pts, sm));
   const labels = document.getElementById("moments-toggle");
   const syncLabels = () => { labels.setAttribute("aria-pressed", String(!!state.labels)); view.showMoments(!!state.labels); };
   labels.onclick = () => { state.labels = !state.labels; syncLabels(); save(); };
   syncLabels();
-  const save = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify(state)); } catch {} };
+  const save = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify({ ...state, spend: true })); } catch {} };
   const syncButtons = () => document.querySelectorAll(".map-controls .seg").forEach((g) =>
     g.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(shownState[g.dataset.key] === b.dataset.v))));
   document.querySelectorAll(".map-controls .seg").forEach((g) => g.addEventListener("click", (e) => {
@@ -1827,6 +1853,14 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
     Engine.attach(pts, Engine.relCost(Engine.smoothMpg(rows)));
     hasEngine = true;
     price = gas?.price ?? null;
+    ribbonOpts = { vehicle, towing };
+    splitRibbon();
+    terrain ||= Terrain.attach(pts).then((n) => {
+      if (!n || !document.getElementById("map")) return;
+      splitRibbon();
+      syncRibbon();
+      legend();
+    }).catch(() => {});
     document.querySelectorAll("[data-engine]").forEach((b) => { b.hidden = false; });
     recolor();
     syncButtons();

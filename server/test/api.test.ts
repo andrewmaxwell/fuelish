@@ -428,3 +428,24 @@ describe("gas prices", () => {
     expect(parseEiaWeekly(html, Date.UTC(2026, 0, 1)).length).toBe(2);
   });
 });
+
+describe("terrain", () => {
+  it("passes on elevation tiles without a token, and only real ones", async () => {
+    const { vi } = await import("vitest");
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (u: any) =>
+      String(u).endsWith("/terrarium/13/2026/3105.png") ? new Response(png, { headers: { "Content-Type": "image/png" } }) : new Response("no", { status: 403 }));
+    try {
+      const r = await call("/terrain/13/2026/3105.png");
+      expect(r.status).toBe(200);
+      expect(r.headers.get("Cache-Control")).toMatch(/max-age=\d+/);
+      expect(new Uint8Array(await r.arrayBuffer())).toEqual(png);
+      for (const bad of ["/terrain/15/0/0.png", "/terrain/13/9000/0.png", "/terrain/13/1/x.png", "/terrain/a/1/1.png"]) {
+        expect((await call(bad)).status).toBe(404);
+      }
+      expect((await call("/terrain/13/1/1.png")).status).toBe(404); // missing upstream
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

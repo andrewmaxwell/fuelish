@@ -10,7 +10,7 @@ export function load(...files) {
   const ctx = vm.createContext({ console, fetch: async () => ({ ok: false }), setTimeout, Promise, Map, Set, Math, Date, JSON });
   for (const f of files) vm.runInContext(readFileSync(new URL(f, dir), "utf8") + "\n;globalThis.__last = 1;", ctx, { filename: f });
   // Top-level const declarations aren't properties of the context; expose them.
-  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}) })", ctx);
+  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}), ...(typeof Ribbon !== 'undefined' ? { Ribbon } : {}), ...(typeof Terrain !== 'undefined' ? { Terrain } : {}) })", ctx);
 }
 const { Engine, Route, extent } = load("route.js", "engine.js");
 
@@ -406,4 +406,80 @@ test("each trip is costed with its driver's time and its vehicle's per-mile cost
   assert.equal(truck.timePerHour, 40);
   assert.equal(truck.wearPerMile, 0.13); // a pickup's own starting point, not the sedan's
   assert.ok(Costs.trip({ minutes: 60, miles: 50, gal: 2, price: 3 }, truck).total > Costs.trip({ minutes: 60, miles: 50, gal: 2, price: 3 }, civic).total);
+});
+
+test("the cost ribbon splits every gram of a drive's gas by cause", () => {
+  const { Ribbon } = load("route.js", "engine.js", "ribbon.js");
+  // 30 s standing at idle, 15 s speeding up to 20 m/s, 90 s cruising, then coasting with fuel cut.
+  const pts = [];
+  let lat = 38.6, v = 0;
+  for (let s = 0; s < 150; s++) {
+    const a = s >= 30 && s < 45 ? 20 / 15 : s >= 135 ? -0.5 : 0;
+    const fuel = s < 30 ? 0.15 : s < 45 ? 0.6 + 0.004 * 1500 * a * v / 100 : s < 135 ? 0.3 + 0.0006 * v * v : 0;
+    pts.push({ t: s * 1000, lat, lon: -90.3, v, a, eng: { fuelGs: fuel, rpm: 900, cut: s >= 135 } });
+    v = Math.max(0, v + a);
+    lat += v / 111320;
+  }
+  const d = Ribbon.decompose(pts, { vehicle: "2016 Honda Civic 2.0L" });
+  const burned = pts.slice(0, -1).reduce((g, p) => g + p.eng.fuelGs, 0);
+  const split = Object.values(d.totals).reduce((g, x) => g + x, 0);
+  assert.ok(Math.abs(split - burned) < 1e-9, `${split} vs ${burned}`);
+  // Standing still includes pulling away below 4.5 mph: that gas belongs to the stop, not the road.
+  const slow = pts.slice(0, -1).filter((p) => p.v < 2).reduce((g, p) => g + p.eng.fuelGs, 0);
+  assert.ok(Math.abs(d.totals.idle - slow) < 1e-9, `idle ${d.totals.idle} vs ${slow}`);
+  assert.equal(d.stops.length, 1);
+  assert.ok(d.totals.accel > 0 && d.totals.air > 0 && d.totals.roll > 0);
+  // Cruising has a band; standing still and coasting with fuel cut have no gas per mile.
+  assert.ok(d.perMile[100] > 0);
+  assert.equal(d.lanes[10], null);
+  assert.ok(d.perMile[145] < 1e-9);
+  // Speeding up is a bigger share of the band while speeding up than while cruising.
+  const accel = Ribbon.CAUSES.findIndex((c) => c.key === "accel");
+  const share = (i) => d.lanes[i][accel] / d.perMile[i];
+  assert.ok(share(40) > share(100) + 0.1, `${share(40)} vs ${share(100)}`);
+});
+
+test("grades come from the ground's height along the road, one trip at a time", () => {
+  const { Terrain } = load("route.js", "engine.js", "terrain.js");
+  // 1 km due north, a fix every 10 m: flat for 300 m, 5% up for 400 m, flat again. Then a second trip
+  // starting 100 m higher, which mustn't read as a cliff.
+  const pts = [], h = [];
+  for (let i = 0; i <= 100; i++) {
+    pts.push({ t: i * 1000, lat: 38.6 + (i * 10) / 111195, lon: -90.3 });
+    h.push(150 + 0.05 * Math.min(400, Math.max(0, i * 10 - 300)));
+  }
+  for (let i = 0; i <= 20; i++) {
+    pts.push({ t: 200000 + i * 1000, lat: 38.7 + (i * 10) / 111195, lon: -90.3, trip: 1 });
+    h.push(300);
+  }
+  const g = Terrain.grades(pts, Float64Array.from(h));
+  assert.ok(Math.abs(g[50] - 0.05) < 0.005, `mid-climb ${g[50]}`);
+  assert.ok(Math.abs(g[15]) < 0.005 && Math.abs(g[90]) < 0.005, `flat ${g[15]} ${g[90]}`);
+  assert.ok(Math.abs(g[0]) < 0.005); // one-sided at the start of a trip
+  assert.ok(g.slice(101).every((x) => x == null || Math.abs(x) < 0.005), "the second trip is flat");
+});
+
+test("with grades, climbing gets its own lane and downhills count as saved", () => {
+  const { Ribbon } = load("route.js", "engine.js", "terrain.js", "ribbon.js");
+  // 20 m/s throughout: 60 s up a 4% grade (fuel up with it), then 60 s down 4% (fuel cut).
+  const pts = [];
+  let lat = 38.6;
+  for (let s = 0; s < 120; s++) {
+    const up = s < 60;
+    pts.push({ t: s * 1000, lat, lon: -90.3, v: 20, a: 0, grade: up ? 0.04 : -0.04, eng: { fuelGs: up ? 2.2 : 0, rpm: 1800, cut: !up } });
+    lat += 20 / 111195;
+  }
+  const d = Ribbon.decompose(pts, { vehicle: "2016 Honda Civic 2.0L" });
+  assert.ok(d.hasGrades);
+  assert.ok(d.totals.climb > d.totals.other, `climb ${d.totals.climb} vs other ${d.totals.other}`);
+  assert.ok(d.totals.downhill > 0);
+  const burned = pts.slice(0, -1).reduce((g, p) => g + p.eng.fuelGs, 0);
+  const split = ["base", "roll", "air", "climb", "accel", "other", "idle"].reduce((g, k) => g + d.totals[k], 0);
+  assert.ok(Math.abs(split - burned) < 1e-9);
+  assert.ok(Ribbon.legendHtml(d, 3).includes("Climbing"));
+  // Without grades, climbs are in "Hills & other" and there's no Climbing row.
+  for (const p of pts) p.grade = null;
+  const flat = Ribbon.decompose(pts, { vehicle: "2016 Honda Civic 2.0L" });
+  assert.equal(flat.totals.climb, 0);
+  assert.ok(!Ribbon.legendHtml(flat, 3).includes("Climbing") && Ribbon.legendHtml(flat, 3).includes("Hills & other"));
 });

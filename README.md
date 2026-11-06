@@ -25,8 +25,13 @@ docs/      data-format.md: every record type, clock and file
    deleted from the phone, and a finished recording's folder is removed once the server has all of it
    (`upload.deleteAfterUpload`, default on).
 4. The web page lists trips by day (route outline, distance, moving time, top speed). Each trip opens on a full-size
-   map with four views over it: **Cost** (with the OBD adapter, the default: fuel per mile over ~20 s against the
-   drive's own average at that speed, so climbs, ramps and stop-and-go show red and coasting blue), **Speed**,
+   map with five views over it: **Spend** (with the OBD adapter, the default: a band beside the route as wide as the
+   gas spent per mile there, split into lanes by what it went to: the engine just running, tires, air, climbing,
+   speeding up and everything else, from physics fitted to the drive's own fuel readings; gas burned standing still
+   is a circle at the stop, at the same scale; what downhills saved is counted too; `web/ribbon.js`. Grades come
+   from USGS ground heights, the AWS Terrain Tiles passed through the Worker at `/api/v1/terrain`; `web/terrain.js`),
+   **Vs usual** (with the adapter: fuel per mile over ~20 s against the drive's own average at that speed, so
+   ramps and stop-and-go show red and coasting blue), **Speed**,
    **Smooth** (braking red, speeding up blue) and **Pedal**. Small ticks cross the route every minute (wide apart
    on the highway, bunched in town, stacked at stops) or, with engine data, every 5–100¢ of gas (wide where the car
    sips, bunched on climbs and hard starts); every fifth is labeled. Notable moments are labeled on the map (hardest brake and
