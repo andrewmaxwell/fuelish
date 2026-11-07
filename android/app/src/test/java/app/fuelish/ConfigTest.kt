@@ -44,6 +44,17 @@ class ConfigTest {
     }
 
     @Test
+    fun mobileDataUploadsAreOnAndTheOldOffSettingIsDropped() {
+        assertEquals(true, Config.parse(null).upload.getBoolean("mobileData"))
+        // Every phone that saved settings before has the old key stored as false.
+        val c = Config.parse("""{"upload":{"enabled":true,"allowCellular":false,"deleteAfterUpload":true}}""")
+        assertEquals(true, c.upload.getBoolean("mobileData"))
+        assertEquals(false, c.upload.has("allowCellular"))
+        // Turning it off in Settings stays off.
+        assertEquals(false, Config.parse("""{"upload":{"mobileData":false}}""").upload.getBoolean("mobileData"))
+    }
+
+    @Test
     fun editedSensorRatesStay() {
         val c = Config.parse("""{"sensors":{"gyro":100},"location":{"gnssMeasurements":true}}""")
         assertEquals(100.0, c.sensors["gyro"])

@@ -367,7 +367,7 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
                     ready.signInNeeded -> "$what will upload after you sign in again"
                     !serverOk -> "$what will upload once the server is set up"
                     up.running -> "Uploading $what…"
-                    onWifi || cfg.upload.optBoolean("allowCellular") -> "$what waiting to upload"
+                    onWifi || cfg.upload.optBoolean("mobileData", true) -> "$what waiting to upload"
                     else -> "$what waiting for Wi-Fi"
                 },
                 style = MaterialTheme.typography.bodyLarge,
@@ -393,7 +393,7 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
             if (waiting && ready.signedIn && uploadsOn) {
                 Spacer(Modifier.height(4.dp))
                 OutlinedButton(onClick = { UploadWorker.enqueue(ctx, cellular = true) }) {
-                    Text(if (onWifi) "Upload now" else "Upload now over mobile data")
+                    Text(if (onWifi || cfg.upload.optBoolean("mobileData", true)) "Upload now" else "Upload now over mobile data")
                 }
             }
         }

@@ -22,8 +22,9 @@ brand/     generate.py draws the logo, favicon and Android icons; preview.html s
 2. Every source writes timestamped NDJSON records to one writer thread. Every 60 s (configurable) the chunk is
    gzipped, hashed, and written next to a stats sidecar. A crash loses at most about 1 s. Leftover chunks are
    finished on the next launch and the recording is marked `interrupted`.
-3. WorkManager uploads finished chunks once the phone is on Wi-Fi (any unmetered network), retrying with backoff.
-   **Upload now** on the main screen sends them over mobile data too; `upload.allowCellular` makes that automatic.
+3. WorkManager uploads each finished chunk over any network as you drive (about 13 MB per hour of driving),
+   retrying with backoff. Settings → **Upload over mobile data** off makes uploads wait for Wi-Fi (any unmetered
+   network); **Upload now over mobile data** on the recorder screen then sends them anyway.
    Uploads are idempotent: the server keys chunks by `(recording, seq)`, checks the sha256, and treats re-sends as
    duplicates. A chunk is marked uploaded only after the server acknowledges it (sha256 verified, stored in R2); its
    data is then deleted from the phone, and a finished recording's folder is removed once the server has all of it
@@ -236,7 +237,7 @@ After a drive with the car's Bluetooth connected, the recorder offers **Record e
 that car (a car stereo or hands-free kit; never headphones or the adapter). Yes turns on auto-record and asks
 for "Allow all the time" location; No never asks about that device again.
 
-Settings has the vehicle, adapter and auto-record. The server, device token and raw JSON are under Advanced.
+Settings has the vehicle, adapter, auto-record and mobile-data uploads. The server, device token and raw JSON are under Advanced.
 
 ### Auto-record with the car's Bluetooth
 
@@ -265,7 +266,7 @@ adb shell am broadcast -n app.fuelish/.auto.DebugCarReceiver --es address AA:BB:
 ```
 
 Everything else (sensor rates in Hz, GNSS raw measurements, chunk length, PID tiers and intervals, forced
-multi-PID batch size, uploading over mobile data) is in the JSON box in Settings. Each recording embeds the
+multi-PID batch size) is in the JSON box in Settings. Each recording embeds the
 exact config it ran with (token redacted).
 
 ## Run locally
@@ -317,7 +318,7 @@ python3 tools/fuelish.py export recording.ndjson.gz out/
   signing in again after a session ends; share links, prefs, app updates, deleting; input checks on metadata and
   chunk tracks, trip summaries and route outlines; VIN lookups.
 - **Web** (39 tests, `node --test web/test/*.test.mjs`): the analysis math (route distance, fuel, costs, repeated trips).
-- **Android JVM tests** (68, `./gradlew testDebugUnitTest`): JSON escaping; chunk rotation with every record
+- **Android JVM tests** (69, `./gradlew testDebugUnitTest`): JSON escaping; chunk rotation with every record
   accounted for; crash recovery; ELM/CAN parsing (single + ISO-TP multi-frame); multi-PID splitting and SAE decoding;
   the read-only allowlist; scheduler fairness; auto-stop rules (disconnect grace period, brief drops, engine-off,
   adapter trouble never stops); uploader resume after errors, lost-ack duplicates, bad token, live recordings. The OBD

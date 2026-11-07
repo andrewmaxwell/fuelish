@@ -63,17 +63,21 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params)
     }
 
     companion object {
-        // Uploads wait for Wi-Fi (any unmetered network) unless the user taps "Upload now"
-        // or sets upload.allowCellular. Recordings are ~100 MB/hour, too much for mobile data by default.
+        // Uploads use any network: a drive is ~13 MB an hour. With upload.mobileData off (Settings) they
+        // wait for Wi-Fi (any unmetered network) unless the user taps "Upload now over mobile data".
         private fun constraints(c: Context, cellular: Boolean = false): Constraints {
-            val anyNetwork = cellular || Prefs.config(c).upload.optBoolean("allowCellular", false)
+            val anyNetwork = cellular || Prefs.config(c).upload.optBoolean("mobileData", true)
             return Constraints.Builder()
                 .setRequiredNetworkType(if (anyNetwork) NetworkType.CONNECTED else NetworkType.UNMETERED)
                 .build()
         }
 
-        /** Queues an upload. [cellular] = the user asked for it now, so any network will do. */
-        fun enqueue(c: Context, cellular: Boolean = false) {
+        /**
+         * Queues an upload. [cellular] = the user asked for it now, so any network will do. [replace] swaps
+         * out a queued job, so one still waiting under the old network rule (after the mobile-data setting
+         * changed, or an app update changed its default) doesn't hold every later upload back.
+         */
+        fun enqueue(c: Context, cellular: Boolean = false, replace: Boolean = cellular) {
             val req = OneTimeWorkRequestBuilder<UploadWorker>()
                 .setConstraints(constraints(c, cellular))
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
@@ -81,7 +85,7 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params)
             // A manual request replaces one still waiting for Wi-Fi. Uploads are idempotent, a
             // replaced job stops at its next safe point, and Uploader lets only one run at a time
             // (this queue and the periodic one are separate WorkManager names).
-            WorkManager.getInstance(c).enqueueUniqueWork("upload", if (cellular) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP, req)
+            WorkManager.getInstance(c).enqueueUniqueWork("upload", if (replace) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP, req)
         }
 
         fun schedulePeriodic(c: Context) {

@@ -152,6 +152,23 @@ fun SettingsScreen(close: () -> Unit) {
             }
         }
 
+        Section("Uploads") {
+            val mobileData = cfg.getJSONObject("upload").optBoolean("mobileData", true)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Upload over mobile data", style = MaterialTheme.typography.bodyLarge)
+                    Muted(
+                        if (mobileData) "Trips upload as you drive, about 13 MB per hour of driving."
+                        else "Trips wait for Wi-Fi. The recorder screen can still send them now over mobile data.",
+                    )
+                }
+                Switch(checked = mobileData, onCheckedChange = { v ->
+                    update { getJSONObject("upload").put("mobileData", v) }
+                    UploadWorker.enqueue(ctx, replace = true)
+                })
+            }
+        }
+
         AdvancedSection(cfg, advancedOpen, { advancedOpen = it }) { json ->
             Prefs.saveConfig(ctx, json)
             cfg = JSONObject(Prefs.config(ctx).json.toString())

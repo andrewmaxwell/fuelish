@@ -88,7 +88,7 @@ class Config(val json: JSONObject) {
           },
           "upload": {
             "enabled": true,
-            "allowCellular": false,
+            "mobileData": true,
             "deleteAfterUpload": true
           },
           "auto": {
@@ -217,6 +217,9 @@ class Config(val json: JSONObject) {
 
         fun upgrade(user: JSONObject): JSONObject {
             user.optJSONObject("sensors")?.let { if (sameJson(it, JSONObject(OLD_SENSORS_DEFAULT))) user.remove("sensors") }
+            // upload.allowCellular (default off, only settable in the JSON) became upload.mobileData (default on,
+            // a switch in Settings). Saved settings hold the old key as false, so it's dropped, not carried over.
+            user.optJSONObject("upload")?.remove("allowCellular")
             user.optJSONObject("location")?.let { if (sameJson(it, JSONObject(OLD_LOCATION_DEFAULT))) user.remove("location") }
             // Old stop waits (2 min after Bluetooth, 5 min after engine off) recorded the walk away from the car.
             user.optJSONObject("auto")?.let { a ->
