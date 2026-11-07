@@ -189,7 +189,6 @@ const Account = (() => {
     await fetch("/api/v1/auth/logout", { method: "POST", headers: { "X-Fuelish": "1" } }).catch(() => {});
     try { localStorage.removeItem(TOKEN_KEY); } catch {}
     forget();
-    window.FuelishApp?.signedOut?.();
     location.hash = "#/";
     route();
   }
@@ -392,7 +391,6 @@ const Account = (() => {
       return act(delMe, async () => {
         await api("/me", { method: "DELETE" });
         try { localStorage.clear(); } catch {}
-        window.FuelishApp?.signedOut?.();
         location.hash = "#/";
         location.reload();
       });

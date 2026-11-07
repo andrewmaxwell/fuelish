@@ -275,18 +275,6 @@ class RecordingStore(val root: File) {
         }
     }
 
-    /** Deletes local copies of recordings the server has fully acknowledged. */
-    fun deleteUploaded(activeId: String?): Int {
-        var n = 0
-        for (id in ids()) {
-            if (id != activeId && fullyUploaded(id)) {
-                dir(id).deleteRecursively()
-                n++
-            }
-        }
-        return n
-    }
-
     companion object {
         const val META = "recording.json"
         const val META_UPLOADED = "meta.uploaded"

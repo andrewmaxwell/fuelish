@@ -77,10 +77,6 @@ class TripsWeb(ctx: Context, private val onSignIn: (invite: String, legacyToken:
             val car = app.fuelish.Prefs.config(c).auto.optString("carName")
             return org.json.JSONObject().put("mode", app.fuelish.Prefs.recordMode(c)).put("car", car).toString()
         }
-
-        /** The page signed out. The phone keeps its upload key: recording isn't tied to the page's sign-in. */
-        @JavascriptInterface
-        fun signedOut() {}
     }
 
     /** Tells the page how the native sign-in went. */

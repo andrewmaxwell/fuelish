@@ -66,16 +66,6 @@ class JsonLine(kind: String, capacity: Int = 160) {
         return this
     }
 
-    fun doubles(k: String, v: DoubleArray): JsonLine {
-        key(k).sb.append('[')
-        v.forEachIndexed { i, x ->
-            if (i > 0) sb.append(',')
-            num(x)
-        }
-        sb.append(']')
-        return this
-    }
-
     /** Nested object: `obj("x") { n("a", 1) }`. */
     inline fun obj(k: String, body: JsonLine.() -> Unit): JsonLine {
         beginObj(k)
