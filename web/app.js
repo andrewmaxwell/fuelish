@@ -543,10 +543,10 @@ async function showList() {
 // ---------- scores on the cards ----------
 
 // Each card's score and gas cost are worked out from its engine data once the card scrolls into view
-// (a few at a time), then remembered in this browser, keyed by the recordings, their last update, the cruising
-// speed and SCORE_VERSION (bump it when the score's method changes). Cards without enough engine
+// (a few at a time), then remembered in this browser, keyed by the recordings, their last update, what the
+// driver's time is worth and SCORE_VERSION (bump it when the score's method changes). Cards without enough engine
 // data show no ring and no cost.
-const SCORE_VERSION = 3;
+const SCORE_VERSION = 4;
 const scoreJobs = new Map(); // slot key -> recordings
 function scoreSlot(recs) {
   recs = recs.filter((r) => r.trip || r.routeGaps > 0); // what its page draws and scores
@@ -572,7 +572,7 @@ function showTotals() {
     el.title = missing ? `${plural(missing, "trip")} without engine data ${missing === 1 ? "isn't" : "aren't"} counted` : "";
   });
 }
-const scoreKey = (key) => `fuelish.score.v${SCORE_VERSION}:${coachTarget()}:${key}`;
+const scoreKey = (key) => `fuelish.score.v${SCORE_VERSION}:${timeFor(scoreJobs.get(key)?.[0])}:${key}`;
 function readScore(key) {
   try { const v = localStorage.getItem(scoreKey(key)); return v == null ? undefined : JSON.parse(v); } catch { return undefined; }
 }
@@ -606,7 +606,8 @@ function scoreCards(live) {
       running++;
       driveFigures(recs).then((n) => {
         // Still recording or uploading: show it, but work it out again next time.
-        if (recs.every((r) => r.complete && r.status !== "recording")) { try { localStorage.setItem(scoreKey(key), JSON.stringify(n)); } catch {} }
+        // Without the gas price (it timed out) the score is for gas alone: work it out again next time too.
+        if (recs.every((r) => r.complete && r.status !== "recording") && (n == null || n.price != null)) { try { localStorage.setItem(scoreKey(key), JSON.stringify(n)); } catch {} }
         if (live()) showScore(el, n);
       }).catch(() => {}).finally(() => { running--; if (live()) pump(); });
     }
@@ -883,7 +884,7 @@ const sidePanel = (middle = "") => `
   <section class="side-sec about-sec" id="about" hidden>
     <details class="fold">
       <summary><h2>About these numbers</h2></summary>
-      <div class="fold-body">${["fuel", "score", "coach", "waste", "cost"].map((k) => `<div data-about="${k}"></div>`).join("")}</div>
+      <div class="fold-body">${["fuel", "score", "waste", "cost"].map((k) => `<div data-about="${k}"></div>`).join("")}</div>
     </details>
   </section>`;
 
@@ -900,68 +901,56 @@ function sideRoute(sm, { engine = false, trips = 0 } = {}) {
   document.getElementById("sub-line").textContent = ""; // the map labels top speed and the hardest brake
 }
 
-// The score and what to change, as one list: the score ring, then one line per habit that cost gas
-// (name, amount, a bar on one scale), largest first. A line opens to say what happened and how to
-// change it; braking stops are buttons that show the stop on the map. The lines add up to the score.
-function coachCard(el, { pts, rows, e, vehicle, towing = false, price, focus }) {
+// The driving score's ideal drive (ideal.js) for a drive's fixes with engine rows attached, or null
+// without enough engine data. Grades are left out, so the trip list (which doesn't load elevation)
+// and the trip page always agree; the drive and its ideal take the same hills, so they mostly cancel.
+function idealFor(pts, { e, vehicle = "", towing = false, price = null, timePerHour = 0 }) {
+  if (!(e?.coverage >= 0.9)) return null;
+  const flat = pts.map((p) => (p.grade == null ? p : { ...p, grade: null }));
+  const fit = Ribbon.decompose(flat, { vehicle, towing }).fit;
+  return Ideal.plan(flat, fit, { vehicle, towing, richGal: e.fuelUse?.rich ?? 0, price, timePerHour });
+}
+
+// The score and what to change, as one list: the score ring (the cheapest way to drive this trip ÷
+// what it took, ideal.js), then one line per difference (name, amount, a bar on one scale). The lines
+// add up exactly to the gap. A line opens to say what happened and how to change it; the sharpest
+// stops are buttons that show the stop on the map.
+function coachCard(el, { pts, e, vehicle, towing = false, price, timePerHour = 0, focus }) {
   if (!el) return;
-  let target = coachTarget();
+  const r = idealFor(pts, { e, vehicle, towing, price, timePerHour });
+  if (!r) { el.hidden = true; return; }
+  el.hidden = false;
   const amount = (gal) => (price != null ? money(gal * price) : `${gallons(gal)} gal`);
-  const mins = (m) => (m < 1 ? `${Math.max(1, Math.round(m * 60))} s` : `${m.toFixed(m < 10 ? 1 : 0)} min`);
-  const opened = new Set();
-  const render = () => {
-    el.querySelectorAll("details[data-k]").forEach((d) => (d.open ? opened.add(d.dataset.k) : opened.delete(d.dataset.k)));
-    const list = Coach.items({ pts, rows, e, vehicle, towing, price, targetMph: target });
-    const sc = Coach.score({ pts, rows, e, vehicle, towing, targetMph: target });
-    el.hidden = false;
-    const max = Math.max(...list.map((it) => it.gal), 1e-9);
-    const body = (it) => {
-      if (it.key === "braking") {
-        return `<p>${plural(it.count, "stop")} sharper than a gentle coast-down threw away about ${amount(it.gal)} of gas. Lifting off sooner lets the car coast with the fuel cut off instead.${it.total - it.gal >= 0.0005 ? ` (Slowing down cost ${amount(it.total)} in all; gentle slow-downs aren't counted, since some are unavoidable.)` : ""} The sharpest:</p>
-          <div class="coach-stops">${it.events.map((s) => `<button type="button" data-i="${s.peakI}">${Math.round(s.fromMph)}→${Math.round(s.toMph)} mph<small>${s.avgG.toFixed(2)} g · ${amount(s.abruptGalEq)}</small></button>`).join("")}</div>`;
-      }
-      if (it.key === "speed") {
-        const perHour = price != null && it.minutes > 0.05 ? (it.gal * price) / (it.minutes / 60) : null;
-        const options = [60, 65, 70].filter((v) => v < it.topMph);
-        const saved = price != null ? it.gal * price >= 0.005 : it.gal >= 0.001;
-        return `<p>${!it.aboveMin ? `You never went above ${it.targetMph} mph (top ${Math.round(it.topMph)}).`
-          : `You drove ${mins(it.aboveMin)} above ${it.targetMph} mph (top ${Math.round(it.topMph)}). Holding ${it.targetMph} would have ${saved ? `used ${amount(it.gal)} less gas and taken ${mins(it.minutes)} longer${perHour != null ? `: like being paid ${money(perHour)} an hour for the extra time` : ""}` : `saved almost nothing and taken ${mins(it.minutes)} longer`}.`} Speed limits and traffic come first.</p>
-          ${options.length > 1 ? `<div class="seg coach-target" role="group" aria-label="Cruising speed">${options.map((v) => `<button type="button" data-v="${v}" aria-pressed="${v === it.targetMph}">${v} mph</button>`).join("")}</div>` : ""}`;
-      }
-      if (it.key === "rich") return `<p>Pressing hard makes the engine run rich, spending fuel beyond what the air needs. A firm but not floored pedal keeps it lean.</p>`;
-      return `<p>The engine idled ${fmtDur(it.idleMs)} in ${plural(it.stops, "standstill")} of a minute or more. For waits like that (not traffic lights), switching off saves more than the restart uses.</p>`;
-    };
-    const title = (it) => ({ braking: "Abrupt stops", speed: `Above ${it.targetMph} mph`, rich: "Pressing hard", idle: "Long idles" })[it.key];
-    const line = (it) => `<li><details data-k="${it.key}"${opened.has(it.key) ? " open" : ""}>
-        <summary><span class="coach-name">${title(it)}</span><i class="coach-bar"><i style="width:${Math.max(2, (it.gal / max) * 100)}%"></i></i><b>${amount(it.gal)}</b></summary>
-        <div class="coach-body">${body(it)}</div></details></li>`;
-    const pct = sc ? Math.round((100 * sc.waste) / sc.gal) : 0;
-    const head = sc
-      ? `<div class="drive-score ${scoreTone(sc.score)}">
-          <div class="drive-score-num"><b>${sc.score}</b><small>driving score</small></div>
-          <p>${pct < 1 ? "Almost all of the gas went to getting there." : `${pct}% of the gas (${amount(sc.waste)}) went to things you could change${list.length ? ":" : "."}`}</p>
-        </div>`
-      : `<h2>Where you could save</h2>`;
-    // What the score counted but was too small for a line of its own, so the lines add up to it.
-    const rest = sc ? sc.waste - list.reduce((n, it) => n + it.gal, 0) : 0;
-    const restLine = (price != null ? rest * price >= 0.005 : rest >= 0.0005)
-      ? `<li class="coach-rest"><span>Smaller things</span><b>${amount(rest)}</b></li>` : "";
-    el.innerHTML = head + (list.length || restLine ? `<ul class="coach-list">${list.map(line).join("")}${restLine}</ul>`
-      : `<p class="hint">Nothing stood out on this drive: no abrupt stops, long idles or fast cruising worth changing.</p>`);
-    const sp = list.find((it) => it.key === "speed");
-    if (sc) about("score", "The driving score", `<p>100 means every drop went to covering the distance; each point below is 1% of this drive's gas spent on something you could have changed. Where you drove doesn't count against you: only stops sharper than a gentle coast-down (counted in full from about 0.2 g average), cruising above ${target} mph, pressing hard, and standstills over a minute.</p>`);
-    about("coach", "What you could change", `<p>Braking is the energy lost beyond what air and tires would have taken anyway (${Math.round(Engine.physics.massKg(vehicle, towing))} kg${towing ? " with a trailer" : ""}, 25% engine efficiency), from GPS speed. It isn't measured fuel: it assumes a level road (going downhill reads as braking), and it can't tell the brakes from engine braking. Speed compares each second above the cruising speed with the same miles at that speed, using how fuel per mile grows with speed${sp ? (sp.source === "drive" ? ", measured from your own steady driving on this drive" : ", from air drag (this drive had too little steady cruising to measure it)") : ""}. Pressing hard and idling are measured from the engine.</p>`);
-  };
-  render();
+  const dur = (s) => (Math.abs(s) < 60 ? `${Math.max(1, Math.round(Math.abs(s)))} s` : `${(Math.abs(s) / 60).toFixed(Math.abs(s) < 600 ? 1 : 0)} min`);
+  const worth = (l) => (price != null ? Math.abs(l.gal) * price >= 0.005 : Math.abs(l.gal) >= 0.0015);
+  const lines = r.lines.filter(worth).sort((a, b) => b.gal - a.gal);
+  const rest = r.lines.filter((l) => !worth(l)).reduce((s, l) => s + l.gal, 0);
+  const max = Math.max(...lines.map((l) => Math.abs(l.gal)), 1e-9);
+  const stops = Coach.braking(pts, vehicle, towing).events.filter((s) => s.avgG > Ideal.DECEL / 9.80665).slice(0, 3);
+  const later = (l) => (l.secs <= -1 ? ` The cheaper way takes ${dur(l.secs)} longer${price != null && timePerHour > 0 ? ` (${money((-l.secs / 3600) * timePerHour)} of your time at ${money(timePerHour)}/h)` : ""}.` : "");
+  const body = (l) => ({
+    rich: `<p>Pressing hard makes the engine run rich, spending fuel beyond what the air needs. A firm but not floored pedal keeps it lean.</p>`,
+    idle: `<p>The engine idled ${fmtDur(r.idleSecs * 1000)} in ${plural(r.idleCount, "standstill")} of a minute or more. For waits like that (not traffic lights), switching off after 10 s saves more than the restart uses.</p>`,
+    speed: `<p>You drove ${dur(r.aboveMin * 60)} above ${r.cruiseMph} mph (top ${Math.round(r.topMph)}). Holding ${r.cruiseMph} would have used ${amount(l.gal)} less gas.${later(l)} Speed limits and traffic come first.</p>`,
+    smooth: `<p>Slowing down late and hard throws away speed the engine paid for. Lifting off sooner lets the car coast most of the way with the fuel cut off; slowing no harder than ${(Ideal.DECEL / 9.80665).toFixed(2)} g would have used ${amount(l.gal)} less gas.${later(l)}${stops.length ? " The sharpest:" : ""}</p>
+      ${stops.length ? `<div class="coach-stops">${stops.map((s) => `<button type="button" data-i="${s.peakI}">${Math.round(s.fromMph)}→${Math.round(s.toMph)} mph<small>${s.avgG.toFixed(2)} g</small></button>`).join("")}</div>` : ""}`,
+  })[l.key];
+  const title = { rich: "Pressing hard", idle: "Long idles", speed: `Above ${r.cruiseMph} mph`, smooth: "Late, hard slowing" };
+  const opened = new Set([...el.querySelectorAll("details[data-k]")].filter((d) => d.open).map((d) => d.dataset.k));
+  const more = Math.round((r.ratio - 1) * 100);
+  el.innerHTML = `<div class="drive-score ${scoreTone(r.score)}">
+      <div class="drive-score-num"><b>${r.score}</b><small>driving score</small></div>
+      <p>${more < 1 ? `About as little gas as this trip could take: ${amount(r.actual.gal)}.` : `This drive used ${more}% more gas than the cheapest way to drive it: ${amount(r.actual.gal)} against ${amount(r.ideal.gal)}${lines.length ? ". The difference:" : "."}`}</p>
+    </div>
+    ${lines.length ? `<ul class="coach-list">${lines.map((l) => `<li><details data-k="${l.key}"${opened.has(l.key) ? " open" : ""}>
+        <summary><span class="coach-name">${title[l.key]}</span><i class="coach-bar"><i style="width:${Math.max(2, (Math.abs(l.gal) / max) * 100)}%"></i></i><b>${l.gal < 0 ? "−" : ""}${amount(Math.abs(l.gal))}</b></summary>
+        <div class="coach-body">${body(l)}</div></details></li>`).join("")}
+      ${Math.abs(rest) >= 0.0001 && (price == null || Math.abs(rest) * price >= 0.005) ? `<li class="coach-rest"><span>Smaller things</span><b>${amount(rest)}</b></li>` : ""}</ul>`
+      : `<p class="hint">Nothing stood out on this drive: no hard slowing, long idles or fast cruising worth changing.</p>`}`;
+  about("score", "The driving score", `<p>The score is the gas the cheapest way to drive this trip would take, divided by the gas it took: 100 means it couldn't have been done on less. The cheapest way drives the same roads with the same stops and is never faster than you were at any point, so traffic, lights and limits you kept to hold it back too. It differs only in what you control: no fuel beyond what the air needed, the engine off after 10 s of standstills over a minute, cruising no faster than ${r.cruiseMph} mph (${r.cheapestMph > r.cruiseMph ? `counting your time, faster would be cheaper still, up to ${r.cheapestMph} mph, but the ideal keeps to 70` : r.cheapestMph < r.cruiseMph ? `the least gas would be at ${r.cheapestMph} mph, but the ideal keeps to 55 or more` : "the cheapest steady speed counting your time"}), and slowing early and gently (${(Ideal.DECEL / 9.80665).toFixed(2)} g at most). Its gas comes from this drive's own fit of fuel against the power to roll, push the air and speed up, scaled to the fuel the engine reported, so errors in the fit mostly cancel. Time it loses before a short stop comes off the wait there: a red light waits either way. The lines are worked out in order, each on top of the one before, so they add up to the difference. The route itself isn't judged.</p>`);
   el.onclick = (ev) => {
     const stop = ev.target.closest("[data-i]");
-    if (stop) { focus(Number(stop.dataset.i)); return; }
-    const b = ev.target.closest(".coach-target button");
-    if (b) {
-      target = Number(b.dataset.v);
-      try { localStorage.setItem(COACH_KEY, String(target)); } catch {}
-      render();
-    }
+    if (stop) focus(Number(stop.dataset.i));
   };
 }
 
@@ -989,7 +978,7 @@ function about(key, title, html) {
 function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle = trip?.meta?.vehicle ?? "", towing = !!trip?.towing, coach = null } = {}) {
   const figs = document.getElementById("figs");
   if (!figs) return;
-  if (coach) coachCard(document.getElementById("coach"), { ...coach, e, vehicle, towing, price: gas?.price ?? null });
+  if (coach) coachCard(document.getElementById("coach"), { ...coach, e, vehicle, towing, price: gas?.price ?? null, timePerHour: gas ? timeFor(trip) : 0 });
   const cost = (g) => (gas ? money(g * gas.price) : null);
   const mi = sm.miles.toFixed(sm.miles < 10 ? 1 : 0);
   // With fuel readings over less of the drive, mpg is only for the part they cover, and gas for the
@@ -1789,11 +1778,8 @@ async function showStops() {
   });
 }
 
-// The cruising speed the score and the savings lines use (chosen on the savings card).
-const COACH_KEY = "fuelish.coachTarget";
-function coachTarget() {
-  try { return Number(localStorage.getItem(COACH_KEY)) || 65; } catch { return 65; }
-}
+// What an hour of the driver's time is worth ($), from the Costs page: it sets the ideal's cruising speed.
+const timeFor = (r) => (r && typeof Costs !== "undefined" ? Costs.forTrip(r).timePerHour : 0);
 
 // The driving score and gas cost of recordings taken as one drive, worked out the same way as on
 // their page: { score, gal, mpg, price, cost, approx } (approx: fuel readings don't cover all of it), or
@@ -1803,9 +1789,10 @@ async function driveFigures(recs) {
   if (!d.rows.length || d.pts.length < 2) return null;
   const vehicle = recs[0].meta.vehicle ?? "", towing = recs.some((r) => r.towing);
   const e = Engine.summary(d.rows, { vehicle, towing, tripMiles: Route.summary(d.pts).miles, tripMs: d.drivingMs });
-  const score = Coach.score({ pts: d.pts, rows: d.rows, e, vehicle, towing, targetMph: coachTarget() })?.score ?? null;
   const gal = e.galTrip ?? e.gal, start = recs.find((r) => r.trip?.path?.length)?.trip.path[0];
   const gas = gal != null ? await withTimeout(Gas.forTrip(start?.[0], start?.[1], recs[0].startedWallMs), 8000) : null;
+  Engine.attach(d.pts, d.rows);
+  const score = idealFor(d.pts, { e, vehicle, towing, price: gas?.price ?? null, timePerHour: gas ? timeFor(recs[0]) : 0 })?.score ?? null;
   return {
     score, gal, mpg: e.mpg ?? null, price: gas?.price ?? null,
     cost: gas ? gal * gas.price : null,
@@ -2085,7 +2072,7 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
     // Coverage is against the whole drive: its GPS miles, and for one trip its door-to-door time.
     const scope = { tripMiles: sm.miles, tripMs: trip ? endOf(trip) - trip.startedWallMs : null };
     // Coaching and the score need `trip`: one recording, or several taken as one drive.
-    const coach = trip ? { pts, rows, focus: (i) => { view.map.setView([pts[i].lat, pts[i].lon], Math.max(view.map.getZoom(), 16)); pick(i); } } : null;
+    const coach = trip ? { pts, focus: (i) => { view.map.setView([pts[i].lat, pts[i].lon], Math.max(view.map.getZoom(), 16)); pick(i); } } : null;
     sideEngine(sm, Engine.summary(rows, { vehicle, towing, ...scope }), { gas, partial, trip, vehicle, towing, coach });
   }
 

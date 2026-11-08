@@ -59,8 +59,12 @@ Small ticks cross the route every minute or, with engine data, every 5–100¢ o
 moments are labeled too (hardest brake and acceleration, sharpest turn, top speed, longest stop, thirstiest minute).
 Below the map is a speed timeline; beside it the headline numbers (miles, moving time, mpg, cost), highway vs. town
 economy, wasted fuel, a one-line car health summary and a friction circle. Hovering the map or the timeline shows that
-moment's readout. **Where you could save** ranks what the driver controls by what it cost: braking, cruising above
-60/65/70 mph, idling and running rich at full throttle.
+moment's readout. The **driving score** (also on each trip in the list) is the gas the cheapest way to drive the
+trip would take ÷ the gas it took (`web/ideal.js`). The cheapest way keeps the same roads and stops and is never faster
+than you were anywhere, so traffic and lights hold it back too. It changes only what the driver controls: no running
+rich, the engine off in long standstills, cruising no faster than the cheapest steady speed counting your time (kept to
+55–70 mph), and slowing early and gently. Its fuel comes from the drive's own fit, scaled to the measured fuel. Lines
+under the score say what each difference cost and add up to the gap.
 
 **Share this trip** makes a link anyone can open without signing in: just that trip (route, charts, engine data), with
 no phone settings, Bluetooth addresses or raw data. **Stop sharing** turns the link off.
@@ -317,7 +321,7 @@ python3 tools/fuelish.py export recording.ndjson.gz out/
   signed-link download = exact concatenation, device-id ownership; Google sign-in, invites, people and phones,
   signing in again after a session ends; share links, prefs, app updates, deleting; input checks on metadata and
   chunk tracks, trip summaries and route outlines; VIN lookups.
-- **Web** (39 tests, `node --test web/test/*.test.mjs`): the analysis math (route distance, fuel, costs, repeated trips).
+- **Web** (43 tests, `node --test web/test/*.test.mjs`): the analysis math (route distance, fuel, costs, repeated trips).
 - **Android JVM tests** (69, `./gradlew testDebugUnitTest`): JSON escaping; chunk rotation with every record
   accounted for; crash recovery; ELM/CAN parsing (single + ISO-TP multi-frame); multi-PID splitting and SAE decoding;
   the read-only allowlist; scheduler fairness; auto-stop rules (disconnect grace period, brief drops, engine-off,
@@ -341,4 +345,4 @@ python3 tools/fuelish.py export recording.ndjson.gz out/
 
 ## Deliberately deferred
 
-Activity-recognition trip detection (for cars without Bluetooth) and driving scores.
+Activity-recognition trip detection (for cars without Bluetooth), and judging route choice in the driving score.

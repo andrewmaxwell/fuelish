@@ -10,7 +10,7 @@ export function load(...files) {
   const ctx = vm.createContext({ console, fetch: async () => ({ ok: false }), setTimeout, Promise, Map, Set, Math, Date, JSON });
   for (const f of files) vm.runInContext(readFileSync(new URL(f, dir), "utf8") + "\n;globalThis.__last = 1;", ctx, { filename: f });
   // Top-level const declarations aren't properties of the context; expose them.
-  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}), ...(typeof Ribbon !== 'undefined' ? { Ribbon } : {}), ...(typeof Terrain !== 'undefined' ? { Terrain } : {}), ...(typeof Stops !== 'undefined' ? { Stops } : {}) })", ctx);
+  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}), ...(typeof Ribbon !== 'undefined' ? { Ribbon } : {}), ...(typeof Terrain !== 'undefined' ? { Terrain } : {}), ...(typeof Stops !== 'undefined' ? { Stops } : {}), ...(typeof Ideal !== 'undefined' ? { Ideal } : {}) })", ctx);
 }
 const { Engine, Route, extent } = load("route.js", "engine.js");
 
@@ -249,7 +249,7 @@ test("a half-turn bearing flip at walking pace isn't a corner", () => {
   assert.ok(pts.every((p) => p.side == null), JSON.stringify(pts.map((p) => p.side)));
 });
 
-test("coach: a hard stop from speed is the biggest braking event, and slower cruising saves gas but costs time", () => {
+test("braking: a hard stop from speed is one event, worth the energy the brakes threw away", () => {
   const { Coach } = load("route.js", "engine.js", "coach.js");
   // 60 s at 25 m/s, a stop at 4 m/s² to 0, then 30 s stopped.
   const pts = [];
@@ -262,46 +262,6 @@ test("coach: a hard stop from speed is the biggest braking event, and slower cru
   assert.ok(br.events[0].fromMph > 50 && br.events[0].toMph < 1);
   // ½mv² = 425 kJ; / (118 MJ/gal × 25%) = 0.0144 gal, less a little for drag and rolling.
   assert.ok(br.galEq > 0.012 && br.galEq < 0.0145, String(br.galEq));
-
-  const rows = Array.from({ length: 600 }, (_, i) => ({ t: i * 1000, speed: 120, fuelGs: 2 }));
-  const sp = Coach.slowerCruise(rows, 65);
-  assert.equal(sp.source, "physics"); // one steady speed can't show how fuel grows with speed
-  assert.ok(sp.gal > 0 && sp.minutes > 0);
-  assert.ok(Math.abs(sp.aboveMin - 599 / 60) < 0.01);
-  assert.equal(Coach.slowerCruise(rows, 80), null);
-});
-
-test("driving score: gentle stops cost nothing, abrupt ones and long idles count, thin data gets no score", () => {
-  const { Coach, Engine } = load("route.js", "engine.js", "coach.js");
-  const civic = "2016 Honda Civic LX 2.0L";
-  // 120 s at 20 m/s (45 mph), a stop slowing `decel` m/s², then `idleS` seconds stopped engine running.
-  const drive = (decel, idleS) => {
-    const pts = [], rows = [];
-    let v = 20, t = 0;
-    const add = () => { t += 1000; pts.push({ t, v }); rows.push({ t, speed: v * 3.6, rpm: 750, fuelGs: v > 0 ? 1.5 : 0.25 }); };
-    for (let i = 0; i < 120; i++) add();
-    while (v > 0) { v = Math.max(0, v - decel); add(); }
-    for (let i = 0; i < idleS; i++) add();
-    return { pts, rows, e: Engine.summary(rows, { vehicle: civic }) };
-  };
-  const gentle = Coach.score({ ...drive(0.6, 20), vehicle: civic }); // ~0.06 g
-  const abrupt = Coach.score({ ...drive(3.5, 20), vehicle: civic }); // ~0.36 g
-  assert.equal(gentle.parts.braking, 0);
-  assert.ok(abrupt.parts.braking > 0.005, String(abrupt.parts.braking));
-  assert.ok(abrupt.score < gentle.score, `${abrupt.score} vs ${gentle.score}`);
-  assert.equal(gentle.parts.idle, 0); // a 20 s light isn't a long idle
-  const idler = Coach.score({ ...drive(0.6, 180), vehicle: civic });
-  // 170 s past the first 10 at 0.25 g/s.
-  assert.ok(Math.abs(idler.parts.idle - Engine.galOf(0.25 * 170)) < 0.001, String(idler.parts.idle));
-  assert.ok(idler.score < gentle.score && idler.score >= 0 && idler.score <= 100);
-  const d = drive(0.6, 20);
-  assert.equal(Coach.score({ ...d, e: { ...d.e, coverage: 0.5 } }), null);
-  // The card's lines are the score's parts: what the card shows adds up to what the score counts.
-  const both = drive(3.5, 180);
-  const sc = Coach.score({ ...both, vehicle: civic });
-  const lines = Coach.items({ ...both, vehicle: civic });
-  for (const it of lines) assert.ok(Math.abs(it.gal - sc.parts[it.key]) < 1e-9, it.key);
-  assert.equal(lines.map((it) => it.key).sort().join(), "braking,idle");
 });
 
 test("minute marks count on through several trips in order", () => {
@@ -550,4 +510,78 @@ test("a second without a fuel reading doesn't break the band; a long dropout doe
   const d = Ribbon.decompose(pts, { vehicle: "2016 Honda Civic 2.0L" });
   assert.ok(d.lanes[20] && Math.abs(d.perMile[20] - d.perMile[15]) / d.perMile[15] < 0.05, "filled from its neighbors");
   assert.equal(d.lanes[42], null); // nothing within ±4 s: no width
+});
+
+// ---------- the driving score (the ideal drive) ----------
+
+// A drive from speeds (m/s, one a second) with fuel from the same physics the ideal uses, 10% thirstier.
+function idealDrive(speeds, fit) {
+  const m = 1360, cda = 0.68;
+  const pts = speeds.map((v, i) => ({ t: i * 1000, trip: 0, v, eng: {} }));
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i].v, b = pts[i + 1].v, vb = (a + b) / 2, acc = b - a;
+    const P = (acc > 0 ? 1.05 : 1) * m * acc * vb + 0.012 * m * 9.80665 * vb + 0.5 * 1.2 * cda * vb ** 3;
+    pts[i].eng.fuelGs = vb < 2 ? 0.2 : P > 0 ? (fit.b + fit.k * P) * 1.1 : 0;
+  }
+  return pts;
+}
+function idealSpeeds({ cruiseMph = 75, brakeG = 0.35, waitS = 40 } = {}) {
+  const sp = [], mps = 0.44704;
+  const ramp = (from, to, g) => { const st = Math.sign(to - from) * g * 9.80665; for (let x = from; (to - x) * Math.sign(st) > 0;) { x = st > 0 ? Math.min(to, x + st) : Math.max(to, x + st); sp.push(x); } };
+  const hold = (x, s) => { for (let i = 0; i < s; i++) sp.push(x); };
+  hold(0, 5); ramp(0, cruiseMph * mps, 0.2); hold(cruiseMph * mps, 300); ramp(cruiseMph * mps, 0, brakeG); hold(0, waitS);
+  ramp(0, 35 * mps, 0.15); hold(35 * mps, 60); ramp(35 * mps, 0, brakeG); hold(0, 3);
+  return sp;
+}
+const FIT = { b: 0.25, k: 1 / (0.25 * 42000), idleGs: 0.2 };
+
+test("driving score: the lines add up to actual minus ideal, and it never outruns the driver", () => {
+  const { Ideal } = load("route.js", "engine.js", "ideal.js");
+  const pts = idealDrive(idealSpeeds(), FIT);
+  const r = Ideal.plan(pts, FIT, { vehicle: "Honda Civic", richGal: 0.002, price: 3.2, timePerHour: 20 });
+  const sum = r.lines.reduce((s, l) => s + l.gal, 0);
+  assert.ok(Math.abs(r.actual.gal - r.ideal.gal - sum) < 1e-9);
+  assert.ok(r.ratio > 1.05, `${r.ratio}`);
+  assert.equal(r.cruiseMph, 70); // time at $20/h makes faster cheaper; the ideal keeps to 70
+  assert.ok(r.lines.find((l) => l.key === "speed").gal > 0.01);
+  assert.ok(r.lines.find((l) => l.key === "smooth").gal > 0.002);
+  assert.ok(Math.abs(r.lines.find((l) => l.key === "rich").gal - 0.002) < 1e-9);
+  pts.forEach((p, i) => assert.ok(r.speedProfile[i] <= p.v + 1e-9));
+  assert.ok(Math.abs(r.fitScale - 1.1) < 0.01); // the fit is scaled to the measured fuel
+});
+
+test("a gentle drive under the cruising speed is close to its ideal; a hard one isn't", () => {
+  const { Ideal } = load("route.js", "engine.js", "ideal.js");
+  const gentle = Ideal.plan(idealDrive(idealSpeeds({ cruiseMph: 60, brakeG: 0.07 }), FIT), FIT, { vehicle: "Honda Civic", price: 3.2, timePerHour: 20 });
+  const hard = Ideal.plan(idealDrive(idealSpeeds({ cruiseMph: 80, brakeG: 0.4 }), FIT), FIT, { vehicle: "Honda Civic", price: 3.2, timePerHour: 20 });
+  assert.ok(gentle.ratio < 1.01, `${gentle.ratio}`);
+  assert.ok(hard.ratio > gentle.ratio + 0.05, `${hard.ratio} vs ${gentle.ratio}`);
+});
+
+test("lost time comes off a short wait, but not off a long one or the arrival", () => {
+  const { Ideal } = load("route.js", "engine.js", "ideal.js");
+  const short = Ideal.plan(idealDrive(idealSpeeds({ waitS: 60 }), FIT), FIT, { vehicle: "Honda Civic", price: 3.2, timePerHour: 20 });
+  const long = Ideal.plan(idealDrive(idealSpeeds({ waitS: 240 }), FIT), FIT, { vehicle: "Honda Civic", price: 3.2, timePerHour: 20 });
+  assert.ok(Math.abs(short.lines.find((l) => l.key === "speed").secs) < 1); // 75 → 70 absorbed by the light
+  assert.ok(long.lines.find((l) => l.key === "speed").secs < -10);
+  // The long wait idles past a minute: the ideal switches off.
+  assert.ok(long.lines.find((l) => l.key === "idle").gal > short.lines.find((l) => l.key === "idle").gal);
+});
+
+test("the ideal drive needs fuel readings over most of the drive", () => {
+  const { Ideal } = load("route.js", "engine.js", "ideal.js");
+  const pts = idealDrive(idealSpeeds(), FIT);
+  pts.slice(0, 300).forEach((p) => { delete p.eng.fuelGs; });
+  assert.equal(Ideal.plan(pts, FIT, { vehicle: "Honda Civic" }), null);
+});
+
+test("a wait with the engine off isn't idling the ideal could save", () => {
+  const { Ideal } = load("route.js", "engine.js", "ideal.js");
+  const pts = idealDrive([...idealSpeeds(), ...Array(300).fill(0)], FIT);
+  const on = Ideal.plan(pts, FIT, { vehicle: "Honda Civic" });
+  pts.slice(-290).forEach((p) => { delete p.eng.fuelGs; }); // engine off after arriving
+  const off = Ideal.plan(pts, FIT, { vehicle: "Honda Civic" });
+  assert.ok(on.lines.find((l) => l.key === "idle").gal > 0.01);
+  assert.ok(off.lines.find((l) => l.key === "idle").gal < 0.002, `${off.lines.find((l) => l.key === "idle").gal}`);
+  assert.ok(Math.abs(off.actual.gal - off.ideal.gal - off.lines.reduce((s, l) => s + l.gal, 0)) < 1e-9);
 });
