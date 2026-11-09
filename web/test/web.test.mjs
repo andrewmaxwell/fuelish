@@ -10,7 +10,7 @@ export function load(...files) {
   const ctx = vm.createContext({ console, fetch: async () => ({ ok: false }), setTimeout, Promise, Map, Set, Math, Date, JSON });
   for (const f of files) vm.runInContext(readFileSync(new URL(f, dir), "utf8") + "\n;globalThis.__last = 1;", ctx, { filename: f });
   // Top-level const declarations aren't properties of the context; expose them.
-  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}), ...(typeof Ribbon !== 'undefined' ? { Ribbon } : {}), ...(typeof Terrain !== 'undefined' ? { Terrain } : {}), ...(typeof Stops !== 'undefined' ? { Stops } : {}), ...(typeof Ideal !== 'undefined' ? { Ideal } : {}) })", ctx);
+  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}), ...(typeof Ribbon !== 'undefined' ? { Ribbon } : {}), ...(typeof Terrain !== 'undefined' ? { Terrain } : {}), ...(typeof Stops !== 'undefined' ? { Stops } : {}), ...(typeof Ideal !== 'undefined' ? { Ideal } : {}), ...(typeof Outings !== 'undefined' ? { Outings } : {}) })", ctx);
 }
 const { Engine, Route, extent } = load("route.js", "engine.js");
 
@@ -585,3 +585,66 @@ test("a wait with the engine off isn't idling the ideal could save", () => {
   assert.ok(off.lines.find((l) => l.key === "idle").gal < 0.002, `${off.lines.find((l) => l.key === "idle").gal}`);
   assert.ok(Math.abs(off.actual.gal - off.ideal.gal - off.lines.reduce((s, l) => s + l.gal, 0)) < 1e-9);
 });
+
+// ---------- outings ----------
+
+{
+  const { Outings } = load("route.js", "engine.js", "outings.js");
+  const HOME = [38.79, -90.35], SHOP = [38.80, -90.33], AUNT = [38.95, -90.6], PARK = [38.75, -90.4];
+  const at = (h, m = 0) => +new Date(2026, 10, 4, h, m);
+  let n = 0;
+  // A trip from one place to another (2 km+ apart), starting at hour h and taking 10 minutes.
+  const trip = (from, to, h, m = 0, extra = {}) => ({
+    id: `t${n++}`, deviceId: "phone", status: "stopped", startedWallMs: at(h, m), endedWallMs: at(h, m + 10),
+    trip: { meters: 3000, path: [from, [(from[0] + to[0]) / 2 + 0.01, (from[1] + to[1]) / 2], to] }, ...extra,
+  });
+  const ids = (os) => Array.from(os, (o) => o.map((r) => r.id).join("+"));
+
+  test("out and back the same day is one outing, however long you stayed", () => {
+    const a = trip(HOME, AUNT, 10), b = trip(AUNT, HOME, 17);
+    assert.deepEqual(ids(Outings.group([b, a])), [`${a.id}+${b.id}`]);
+    assert.equal(Outings.parkedMs([a, b]), at(17) - at(10, 10));
+  });
+
+  test("two errands from home stay two outings", () => {
+    const os = Outings.group([trip(HOME, SHOP, 9), trip(SHOP, HOME, 11), trip(HOME, PARK, 16), trip(PARK, HOME, 19)]);
+    assert.equal(os.length, 2);
+    assert.ok(os.every((o) => o.length === 2));
+  });
+
+  test("a chain of stops that ends back home is one outing", () => {
+    const os = Outings.group([trip(HOME, SHOP, 9), trip(SHOP, PARK, 11), trip(PARK, HOME, 14)]);
+    assert.equal(os.length, 1);
+  });
+
+  test("not back the same day, not one outing", () => {
+    const a = trip(HOME, AUNT, 18), b = { ...trip(AUNT, HOME, 9), startedWallMs: at(9) + 86400000, endedWallMs: at(9, 10) + 86400000 };
+    assert.equal(Outings.group([a, b]).length, 2);
+  });
+
+  test("a trip that doesn't start where the last one ended breaks the round trip", () => {
+    assert.equal(Outings.group([trip(HOME, AUNT, 9), trip(SHOP, HOME, 15)]).length, 2);
+  });
+
+  test("a loop from home doesn't swallow the next round trip", () => {
+    const os = Outings.group([trip(HOME, HOME, 8), trip(HOME, SHOP, 12), trip(SHOP, HOME, 15)]);
+    assert.deepEqual(Array.from(os, (o) => o.length), [1, 2]);
+  });
+
+  test("a recording that never moved doesn't break a round trip", () => {
+    const blip = { ...trip(AUNT, AUNT, 13), trip: { meters: 0, path: [AUNT] } };
+    assert.equal(Outings.group([trip(HOME, AUNT, 9), blip, trip(AUNT, HOME, 16)]).length, 1);
+  });
+
+  test("different phones never share an outing", () => {
+    assert.equal(Outings.group([trip(HOME, AUNT, 9), trip(AUNT, HOME, 15, 0, { deviceId: "other" })]).length, 2);
+  });
+
+  test("a trip still recording isn't joined to", () => {
+    assert.equal(Outings.group([trip(HOME, AUNT, 9, 0, { status: "recording" }), trip(AUNT, HOME, 15)]).length, 2);
+  });
+
+  test("back-to-back trips still join without coming home", () => {
+    assert.equal(Outings.group([trip(HOME, SHOP, 9), trip(SHOP, PARK, 9, 20)]).length, 1);
+  });
+}

@@ -16,10 +16,6 @@ const cleanups = [];
 const onLeave = (fn) => cleanups.push(fn);
 const current = () => { const g = navGen; return () => g === navGen; };
 
-// Trips are one outing when the next starts within this long of the last one ending, near where it ended.
-const OUTING_GAP_MS = 30 * 60000;
-const OUTING_NEAR_M = 500;
-
 function token() {
   try { return cleanToken(localStorage.getItem(TOKEN_KEY) || ""); } catch { return ""; }
 }
@@ -323,32 +319,8 @@ const Places = (() => {
   return { nameAt, visits, visitsOfPoints, label, labelOf, rename };
 })();
 
-function haversine([la1, lo1], [la2, lo2]) {
-  const k = Math.PI / 180, dLa = (la2 - la1) * k, dLo = (lo2 - lo1) * k;
-  const a = Math.sin(dLa / 2) ** 2 + Math.cos(la1 * k) * Math.cos(la2 * k) * Math.sin(dLo / 2) ** 2;
-  return 2 * 6371000 * Math.asin(Math.sqrt(a));
-}
-
-// Groups recordings into outings: runs of trips by the same phone where each starts soon after
-// the previous one ended, close to where it ended (errands, a fuel stop). Oldest first within each.
-function outings(recordings) {
-  const asc = [...recordings].sort((a, b) => a.startedWallMs - b.startedWallMs);
-  const open = new Map(); // device -> its latest outing
-  const out = [];
-  for (const r of asc) {
-    const cur = open.get(r.deviceId), prev = cur?.at(-1);
-    if (prev && linked(prev, r)) cur.push(r);
-    else { const o = [r]; out.push(o); open.set(r.deviceId, o); }
-  }
-  return out;
-}
-function linked(a, b) {
-  if (a.status === "recording") return false;
-  const gap = b.startedWallMs - endOf(a);
-  if (gap > OUTING_GAP_MS) return false;
-  const end = a.trip?.path?.at(-1), start = b.trip?.path?.[0];
-  return !end || !start || haversine(end, start) <= OUTING_NEAR_M;
-}
+// Trips taken as one (back to back, or out and back the same day): outings.js.
+const outings = Outings.group;
 // `b` carries on the drive `a` was recording when an app update ended it: the phone says so
 // (meta.resumes, from 0.1.44), or, before that, `a` was cut off and `b` started within a minute.
 function continues(a, b) {
@@ -657,10 +629,11 @@ function tripCard(r) {
     </a>`;
 }
 
-// Several linked trips in one card: a combined outline (stops between them dotted) and totals. Its
-// page lists each trip.
+// Several linked trips in one card: a combined outline (stops between them dotted) and totals, with
+// the time spent between them, so an out-and-back visit doesn't read as hours of driving. Its page
+// lists each trip.
 function outingCard(o) {
-  const t = totals(o), first = o[0], last = o.at(-1);
+  const t = totals(o), first = o[0], last = o.at(-1), parked = Outings.parkedMs(o);
   const pill = o.map(statusPill).find(Boolean) ?? "";
   return `
     <a class="card trip-card outing-card" href="#/outing/${esc(first.id)}">
@@ -671,6 +644,7 @@ function outingCard(o) {
         ${t.trips ? `<div class="trip-card-stats">
           <span><b>${miles(t.meters)}</b></span>
           <span><b>${fmtDur(t.movingMs)}</b> moving</span>
+          ${parked >= 60000 ? `<span><b>${fmtDur(parked)}</b> parked</span>` : ""}
           <span class="card-mpg" hidden></span>
           <span class="card-cost" hidden></span>
           ${o.some((x) => x.routeGaps) ? `<span class="muted" title="Part of this outing's route isn't summarized for the list; each trip's page has all of it">partial</span>` : ""}
@@ -1101,7 +1075,7 @@ function momentsFor(pts, sm) {
   // Moments within about 300 m of each other share one label.
   const merged = [];
   for (const m of out) {
-    const near = merged.find((x) => haversine([pts[x.i].lat, pts[x.i].lon], [pts[m.i].lat, pts[m.i].lon]) < 300);
+    const near = merged.find((x) => Route.haversine(pts[x.i].lat, pts[x.i].lon, pts[m.i].lat, pts[m.i].lon) < 300);
     if (near) near.text += "<br>" + m.text; else merged.push({ ...m });
   }
   return merged;
@@ -1818,7 +1792,8 @@ async function showMany(kind, key) {
     if (legsOf(recs).length <= 1) { location.replace(`#/r/${(legsOf(recs)[0] ?? recs[0]).id}`); return; }
     const day = new Date(recs[0].startedWallMs).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
     title = Places.label(recs) ?? outingName(recs[0].startedWallMs);
-    sub = `${day} · ${clock(recs[0].startedWallMs)} – ${clock(endOf(recs.at(-1)))}`;
+    const parked = Outings.parkedMs(recs);
+    sub = `${day} · ${clock(recs[0].startedWallMs)} – ${clock(endOf(recs.at(-1)))}${parked >= 60000 ? ` · ${fmtDur(parked)} parked` : ""}`;
   } else {
     const from = kind === "day" ? parseYmd(key) : weekStart(+parseYmd(key));
     const to = addDays(from, kind === "day" ? 1 : 7);

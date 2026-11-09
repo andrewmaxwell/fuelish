@@ -42,7 +42,8 @@ fetched and cached by the Worker: no key or input needed).
 
 **Trip list.** Trips by day (route outline, distance, moving time, top speed), the last five weeks first. Trips that
 start within 30 min of the last one ending, near where it ended (errands, a fuel stop), are linked into one
-**outing**. A day, a week or an outing can be opened as one map of all its trips. An automatic stop waits a couple of
+**outing**, and so are trips out and back to the same place on the same day however long you stayed (Home → X → Home;
+the card shows the time parked). A day, a week or an outing can be opened as one map of all its trips. An automatic stop waits a couple of
 minutes after the car goes away; that wait (usually you walking off) isn't counted or drawn.
 
 **A trip.** A full-size map with five views over it:
@@ -321,7 +322,7 @@ python3 tools/fuelish.py export recording.ndjson.gz out/
   signed-link download = exact concatenation, device-id ownership; Google sign-in, invites, people and phones,
   signing in again after a session ends; share links, prefs, app updates, deleting; input checks on metadata and
   chunk tracks, trip summaries and route outlines; VIN lookups.
-- **Web** (43 tests, `node --test web/test/*.test.mjs`): the analysis math (route distance, fuel, costs, repeated trips).
+- **Web** (53 tests, `node --test web/test/*.test.mjs`): the analysis math (route distance, fuel, costs, repeated trips).
 - **Android JVM tests** (69, `./gradlew testDebugUnitTest`): JSON escaping; chunk rotation with every record
   accounted for; crash recovery; ELM/CAN parsing (single + ISO-TP multi-frame); multi-PID splitting and SAE decoding;
   the read-only allowlist; scheduler fairness; auto-stop rules (disconnect grace period, brief drops, engine-off,
