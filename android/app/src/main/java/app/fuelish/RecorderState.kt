@@ -81,6 +81,8 @@ object Prefs {
     fun saveConfig(c: Context, json: String) {
         Config.parseChecked(json)
         sp(c).edit().putString("config", json).apply()
+        // Auto-record or the adapter may have changed: drive detection follows.
+        runCatching { app.fuelish.auto.DriveDetect.sync(c) }
     }
 
     fun deviceId(c: Context): String {
@@ -189,6 +191,12 @@ object Prefs {
     /** A VIN read on a drive whose name lookup failed (no signal): looked up again once online. */
     fun pendingVin(c: Context) = sp(c).getString("pendingVin", "").orEmpty()
     fun setPendingVin(c: Context, vin: String) = sp(c).edit().putString("pendingVin", vin).apply()
+    /** The check-engine light as last read on a drive, so a light that stays on isn't announced every drive. */
+    fun milOn(c: Context) = sp(c).getBoolean("milOn", false)
+    fun setMilOn(c: Context, on: Boolean) = sp(c).edit().putBoolean("milOn", on).apply()
+    /** Latest regional gas prices for the spoken summary: {"fetchedMs", "prices": {region: $/gal}} (see GasPrice). */
+    fun gasPrices(c: Context): String? = sp(c).getString("gasPrices", null)
+    fun setGasPrices(c: Context, json: String) = sp(c).edit().putString("gasPrices", json).apply()
     /** The VIN the adapter read most recently: the car the phone is in, or was in last. */
     fun lastVin(c: Context) = sp(c).getString("lastVin", "").orEmpty()
     fun setLastVin(c: Context, vin: String) = sp(c).edit().putString("lastVin", vin).apply()

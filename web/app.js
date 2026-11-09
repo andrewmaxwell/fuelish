@@ -442,7 +442,9 @@ async function showList() {
     let rec = {};
     try { rec = JSON.parse(window.FuelishApp?.recordMode?.() || "{}"); } catch {}
     const how = rec.mode === "auto"
-      ? `Get in and drive: recording starts by itself when your phone connects to ${esc(rec.car || "the car")}, and stops shortly after you park.`
+      ? rec.car
+        ? `Get in and drive: recording starts by itself when your phone connects to ${esc(rec.car)}, and stops shortly after you park.`
+        : `Get in and drive: recording starts by itself a minute or two in, once your phone notices you're driving, and stops shortly after you park.`
       : rec.mode === "manual"
         ? `Before you set off, tap the bar at the bottom, then Start recording. When you get there, tap Stop recording.`
         : `First finish setting up the recorder: tap the bar at the bottom.`;

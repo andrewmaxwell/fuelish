@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.PowerManager
 import app.fuelish.Prefs
 import app.fuelish.auto.CarBluetooth
+import app.fuelish.auto.DriveDetect
 
 /**
  * Where setup stands, in one place, so the setup list, the screen the app opens on, and the strip
@@ -28,6 +29,10 @@ data class Readiness(
     val auto: Boolean,
     /** "Allow all the time" location, needed only for auto-record. */
     val background: Boolean,
+    /** Auto-record starts on a detected drive (there's an adapter), which needs [activity]. */
+    val detects: Boolean,
+    /** The physical activity permission (drive detection). */
+    val activity: Boolean,
 ) {
     val location get() = Manifest.permission.ACCESS_FINE_LOCATION !in missingPermissions
 
@@ -42,6 +47,7 @@ data class Readiness(
             !vehicle -> "name the vehicle"
             !modeChosen -> "choose how recording starts"
             auto && !background -> "allow location all the time"
+            detects && !activity -> "allow physical activity"
             else -> null
         }
 
@@ -50,7 +56,7 @@ data class Readiness(
             val cfg = Prefs.config(c)
             val missing = PERMISSIONS.filter { c.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
             val obdAddr = cfg.obd.optString("deviceAddress")
-            val auto = cfg.auto.optBoolean("enabled") && cfg.auto.optString("carAddress").isNotBlank()
+            val auto = DriveDetect.autoOn(cfg)
             val signInNeeded = Prefs.signInNeeded(c)
             val skipped = Prefs.skippedAdapter(c)
             return Readiness(
@@ -68,6 +74,8 @@ data class Readiness(
                 modeChosen = Prefs.recordMode(c).isNotEmpty(),
                 auto = auto,
                 background = CarBluetooth.canStartInBackground(c),
+                detects = DriveDetect.detects(cfg),
+                activity = DriveDetect.permitted(c),
             )
         }
     }

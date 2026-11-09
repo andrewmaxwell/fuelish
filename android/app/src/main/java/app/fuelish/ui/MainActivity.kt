@@ -307,7 +307,7 @@ private fun RecorderStrip(refreshKey: Any, open: () -> Unit) {
     val locationOk = ready.location
     val gap = ready.gap
     val auto = cfg.auto
-    val autoOn = auto.optBoolean("enabled") && auto.optString("carAddress").isNotBlank()
+    val autoOn = app.fuelish.auto.DriveDetect.autoOn(cfg)
     val err = MaterialTheme.colorScheme.error
 
     val (dot, title) = when {
@@ -323,7 +323,8 @@ private fun RecorderStrip(refreshKey: Any, open: () -> Unit) {
         up.running -> "uploading…"
         up.pending > 0 -> "${up.pending} part${if (up.pending == 1) "" else "s"} to upload"
         gap != null -> "tap to $gap"
-        autoOn -> "starts with ${auto.optString("carName")}"
+        autoOn -> auto.optString("carName").takeIf { it.isNotBlank() && auto.optString("carAddress").isNotBlank() }
+            ?.let { "starts with $it" } ?: "starts when you drive"
         Prefs.autoSuggestion(ctx) != null -> "tap to record every drive by itself"
         else -> "tap to start"
     }

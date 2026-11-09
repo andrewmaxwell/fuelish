@@ -11,6 +11,8 @@ class FuelishApp : Application() {
         RecorderService.createChannel(this)
         CarBluetooth.createChannel(this)
         app.fuelish.upload.TripReady.createChannel(this)
+        // Registration doesn't outlive the process being replaced (an update) or force-stopped.
+        runCatching { app.fuelish.auto.DriveDetect.sync(this) }
         Executors.newSingleThreadExecutor().execute {
             // A fresh process has no active recording, so anything still marked "recording"
             // was cut short by a crash or kill: finish it and queue it for upload.

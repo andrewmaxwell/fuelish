@@ -74,7 +74,9 @@ class TripsWeb(ctx: Context, private val onSignIn: (invite: String, legacyToken:
         @JavascriptInterface
         fun recordMode(): String {
             val c = view.context
-            val car = app.fuelish.Prefs.config(c).auto.optString("carName")
+            // No car: auto-record starts when Android notices a drive (see DriveDetect).
+            val auto = app.fuelish.Prefs.config(c).auto
+            val car = if (auto.optString("carAddress").isBlank()) "" else auto.optString("carName")
             return org.json.JSONObject().put("mode", app.fuelish.Prefs.recordMode(c)).put("car", car).toString()
         }
     }

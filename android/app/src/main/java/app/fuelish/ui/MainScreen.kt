@@ -101,12 +101,20 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresh++ }
     var askedBg by remember { mutableStateOf(false) }
     val bgLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { askedBg = true; refresh++ }
+    var askedActivity by remember { mutableStateOf(false) }
+    val activityLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        askedActivity = true
+        app.fuelish.auto.DriveDetect.sync(ctx)
+        refresh++
+    }
 
     val locationOk = ready.location
     // Has an upload key; [ready.signedIn] also needs the server to still accept it.
     val serverOk = cfg.serverUrl.isNotBlank() && cfg.deviceToken.isNotBlank()
     val auto = cfg.auto
-    val autoOn = auto.optBoolean("enabled") && auto.optString("carAddress").isNotBlank()
+    val autoOn = app.fuelish.auto.DriveDetect.autoOn(cfg)
+    // With an adapter, auto-record starts when Android notices a drive; the car's Bluetooth is optional.
+    val detects = app.fuelish.auto.DriveDetect.detects(cfg)
     val obdChosen = cfg.obd.optString("deviceAddress").isNotBlank()
     var signingIn by remember { mutableStateOf(false) }
     var signInError by remember { mutableStateOf("") }
@@ -137,7 +145,8 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
             refresh++
         }
         var askedPerms by remember { mutableStateOf(false) }
-        val carName = auto.optString("carName")
+        val carName = if (auto.optString("carAddress").isBlank()) "" else auto.optString("carName")
+        val startsWhen = if (carName.isNotBlank()) "when the phone connects to $carName" else "when you drive"
         fun save(change: org.json.JSONObject.() -> Unit) {
             runCatching { Prefs.saveConfig(ctx, org.json.JSONObject(Prefs.config(ctx).json.toString()).apply(change).toString()) }
             refresh++
@@ -272,11 +281,19 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
             }
             add(Step(
                 ready.modeChosen, "How recording starts",
-                if (autoOn) "By itself, when the phone connects to $carName" else "You tap Start and Stop",
-                if (!pickingCar) "Fuelish can start recording by itself when your phone connects to the car's Bluetooth (for music or calls), and stop after you park. " +
-                    "Or you can start and stop each drive yourself."
-                else "Which one is your car? Pick what your phone connects to in the car.",
-                if (pickingCar) null else "Automatically", { pickingCar = true },
+                if (autoOn) "By itself, $startsWhen" else "You tap Start and Stop",
+                if (pickingCar) "Which one is your car? Pick what your phone connects to in the car."
+                else if (obdChosen) "Fuelish can notice when you start driving, record from the adapter, and stop after you park. " +
+                    "It takes a minute or two to notice. Or you can start and stop each drive yourself."
+                else "Fuelish can start recording by itself when your phone connects to the car's Bluetooth (for music or calls), and stop after you park. " +
+                    "Or you can start and stop each drive yourself.",
+                if (pickingCar) null else "Automatically",
+                {
+                    if (obdChosen) {
+                        save { getJSONObject("auto").put("enabled", true) }
+                        Prefs.setRecordMode(ctx, "auto")
+                    } else pickingCar = true
+                },
                 skip = if (pickingCar) "Back" to { pickingCar = false } else "I'll start and stop it myself" to { Prefs.setRecordMode(ctx, "manual"); refresh++ },
                 extra = if (!pickingCar) null else {
                     {
@@ -296,12 +313,27 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
             if (autoOn) {
                 add(Step(
                     bgLocationOk, "Location all the time", "Allowed",
-                    "Choose \"Allow all the time\" so recording can start by itself when your phone connects to $carName.",
+                    "Choose \"Allow all the time\" so recording can start by itself while the phone is in your pocket.",
                     "Allow", { bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) },
                     // Android stops showing the request after it's been turned down; settings always works.
                     extra = if (askedBg && !bgLocationOk) {
                         {
                             Muted("In Fuelish's settings, tap Permissions › Location › Allow all the time.", Modifier.padding(top = 8.dp))
+                            TextButton(onClick = {
+                                ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName)))
+                            }) { Text("Open Fuelish's settings") }
+                        }
+                    } else null,
+                ))
+            }
+            if (detects) {
+                add(Step(
+                    ready.activity, "Physical activity", "Allowed",
+                    "Lets Fuelish notice when you start driving, so recording starts without a tap.",
+                    "Allow", { activityLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION) },
+                    extra = if (askedActivity && !ready.activity) {
+                        {
+                            Muted("In Fuelish's settings, tap Permissions › Physical activity › Allow.", Modifier.padding(top = 8.dp))
                             TextButton(onClick = {
                                 ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName)))
                             }) { Text("Open Fuelish's settings") }
@@ -329,10 +361,12 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
             }
         }
         // After a drive with the car's Bluetooth connected: one tap to record every drive by itself.
-        if (suggestion != null && !autoOn && !st.recording) {
-            Section("Record every drive automatically?") {
+        if (suggestion != null && carName.isBlank() && !st.recording) {
+            Section(if (autoOn) "Start recording sooner?" else "Record every drive automatically?") {
                 Text(
-                    "Your phone was connected to ${suggestion.first} on that drive. Fuelish can start recording whenever it connects, and stop after you park.",
+                    if (autoOn) "Your phone was connected to ${suggestion.first} on that drive. Fuelish can start recording as soon as it connects, " +
+                        "instead of a minute or two into the drive."
+                    else "Your phone was connected to ${suggestion.first} on that drive. Fuelish can start recording whenever it connects, and stop after you park.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(8.dp))
@@ -342,7 +376,7 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
                         Prefs.answerAutoSuggestion(ctx, true)
                         Prefs.setRecordMode(ctx, "auto")
                         if (!bgLocationOk) bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                    }) { Text("Yes, record automatically") }
+                    }) { Text(if (autoOn) "Yes, start sooner" else "Yes, record automatically") }
                     TextButton(onClick = { Prefs.answerAutoSuggestion(ctx, false); refresh++ }) { Text("No thanks") }
                 }
             }
@@ -464,7 +498,8 @@ private fun IdleCard(locationOk: Boolean, autoOn: Boolean, carName: String, stop
         Muted(
             when {
                 !locationOk -> "Grant permissions above to start recording."
-                autoOn -> "The next recording starts by itself when your phone connects to $carName, and stops shortly after you park."
+                autoOn && carName.isNotBlank() -> "The next recording starts by itself when your phone connects to $carName, and stops shortly after you park."
+                autoOn -> "The next recording starts by itself a minute or two into your next drive, and stops shortly after you park."
                 else -> "Tap Start recording when you set off, and Stop recording when you get there. Or let Fuelish start by itself whenever you get in the car."
             },
         )

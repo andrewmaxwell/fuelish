@@ -238,36 +238,64 @@ sentence on why it's needed:
 5. **Vehicle**, only without an adapter. With one, the first drive reads the VIN and the server names the car
    with NHTSA's decoder (`GET /api/v1/vehicles/vin/:vin`). A name typed in Settings is never replaced.
 
-After a drive with the car's Bluetooth connected, the recorder offers **Record every drive automatically?** for
-that car (a car stereo or hands-free kit; never headphones or the adapter). Yes turns on auto-record and asks
-for "Allow all the time" location; No never asks about that device again.
+Then **How recording starts**: automatically or by hand. With an adapter, automatic needs no car to pick (see
+below); it asks for "Allow all the time" location and physical activity. Without one, it asks which Bluetooth
+entry is the car.
 
-Settings has the vehicle, adapter, auto-record and mobile-data uploads. The server, device token and raw JSON are under Advanced.
+After a drive with the car's Bluetooth connected, the recorder offers to use that car (a car stereo or hands-free
+kit; never headphones or the adapter): **Record every drive automatically?**, or with auto-record already on,
+**Start recording sooner?** No never asks about that device again.
 
-### Auto-record with the car's Bluetooth
+Settings has the vehicle, adapter, auto-record, what's said during a drive, and mobile-data uploads. The server, device token and raw JSON are under Advanced.
 
-Settings → **Auto-record**: turn it on, pick the car's Bluetooth entry (not the OBD adapter), and tap
-**Allow all the time** for location. After that:
+### Auto-record
 
-- **Start:** when the phone connects to the car's Bluetooth, recording starts in the background (no tap needed)
-  and connects to the OBD adapter as usual. Android permits this because a Bluetooth connection broadcast lets an app start
-  a foreground service from the background. The battery-optimisation exemption is a second, independent allowance.
-  Location in a service started that way needs "Allow all the time".
-- **If Android refuses anyway** (e.g. the permission was revoked), you get a "Car connected: tap to record"
-  notification; one tap opens Fuelish and starts recording.
-- **Stop:** 10 s after the car's Bluetooth disconnects, once the engine has stopped answering OBD (if it still
-  answers, the car is running and it was a Bluetooth glitch, so the drive goes on), or after the adapter reports the car
-  not answering for 60 s with Bluetooth still on. An adapter link failure alone never stops a recording. Trips split by a
-  stop are joined into one outing on the web. Both delays are `auto.stopAfterCarDisconnectS` /
-  `auto.stopAfterEngineOffS` in the JSON (0 disables).
+Settings → **Auto-record**: turn it on and tap **Allow** for location all the time (and physical activity, with an
+adapter). After that:
+
+- **Start, with an adapter:** Android's activity recognition says when the phone starts riding in a vehicle,
+  usually a minute or two into the drive, and recording starts in the background and tries the adapter. Its
+  uploads wait until the engine answers through the adapter. If it doesn't within 2 minutes
+  (`auto.adapterWaitS`), it wasn't a car with the adapter in it (someone else's car, a bus): the recording is
+  deleted, never uploaded. So moving the adapter to another car just works. Android allows a background start on
+  an activity-transition event; the registration is renewed at app start, after a reboot and after an update.
+- **Start, with the car's Bluetooth** (optional with an adapter, required without one): pick the car's entry
+  (not the OBD adapter) and recording starts as soon as the phone connects, so the start of the drive isn't
+  missed. A Bluetooth connection broadcast lets an app start a foreground service from the background. If
+  Android refuses anyway, you get a "Car connected: tap to record" notification.
+- **Stop:** 10 s after the car's Bluetooth disconnects or Android says you left the vehicle (walking), once the
+  engine has stopped answering OBD (if it still answers, the car is running and it was a glitch, so the drive goes
+  on); or after the adapter reports the car not answering for 60 s. An adapter link failure alone never stops a
+  recording. Trips split by a stop are joined into one outing on the web. The delays are
+  `auto.stopAfterCarDisconnectS` / `auto.stopAfterEngineOffS` in the JSON (0 disables).
 - Recordings you start by hand are never stopped automatically. Every recording stores `trigger`
-  (`manual`, `car_bluetooth`, `car_bluetooth_notification`) and `stopReason` (`manual`, `car_disconnected`, `engine_off`,
-  `service_destroyed`). The car connect/disconnect events are in the data too.
+  (`manual`, `car_bluetooth`, `car_bluetooth_notification`, `driving_detected`) and `stopReason` (`manual`,
+  `car_disconnected`, `left_vehicle`, `engine_off`, `service_destroyed`). The connect/disconnect and
+  `left_vehicle` events are in the data too.
 
-Debug builds can simulate the car's Bluetooth from adb (the real broadcast can't be sent from adb):
+### During a drive
+
+Spoken like navigation prompts (through the car's speakers when the phone plays there, lowering music instead of
+pausing it), so nothing needs a glance. Settings → **During a drive** has a switch for each:
+
+- **Recording sounds:** a chime when recording starts (for a detected drive, once the adapter confirms the car),
+  and a spoken alert if the adapter never connects 90 s into a moving drive, or drops for 20 s while moving
+  (and again when it's back). A drop after the car stopped answering is the car switching off, not a problem.
+- **Summary when a drive ends:** miles, time, gallons, mpg and the gas cost at the latest regional average price.
+- **Car warnings:** the check-engine light coming on (not every drive while it stays on), coolant at 113 °C
+  (235 °F) or more for 30 s, under 12.0 V for a minute with the engine running.
+
+What was said is in the data as `feedback` events.
+
+Debug builds can simulate the car's Bluetooth, or Android detecting a drive, from adb (the real broadcasts can't
+be sent from adb):
 
 ```bash
 adb shell am broadcast -n app.fuelish/.auto.DebugCarReceiver --es address AA:BB:CC:DD:EE:FF --ez connected true
+```
+
+```bash
+adb shell am broadcast -n app.fuelish/.auto.DebugCarReceiver --ez driving true
 ```
 
 Everything else (sensor rates in Hz, GNSS raw measurements, chunk length, PID tiers and intervals, forced
@@ -323,16 +351,19 @@ python3 tools/fuelish.py export recording.ndjson.gz out/
   signing in again after a session ends; share links, prefs, app updates, deleting; input checks on metadata and
   chunk tracks, trip summaries and route outlines; VIN lookups.
 - **Web** (53 tests, `node --test web/test/*.test.mjs`): the analysis math (route distance, fuel, costs, repeated trips).
-- **Android JVM tests** (69, `./gradlew testDebugUnitTest`): JSON escaping; chunk rotation with every record
+- **Android JVM tests** (90, `./gradlew testDebugUnitTest`): JSON escaping; chunk rotation with every record
   accounted for; crash recovery; ELM/CAN parsing (single + ISO-TP multi-frame); multi-PID splitting and SAE decoding;
   the read-only allowlist; scheduler fairness; auto-stop rules (disconnect grace period, brief drops, engine-off,
-  adapter trouble never stops); uploader resume after errors, lost-ack duplicates, bad token, live recordings. The OBD
+  adapter trouble never stops, a detected drive without the adapter, leaving the vehicle); what's said during a
+  drive and the end-of-drive summary; naming trips by VIN; uploader resume after errors, lost-ack duplicates, bad token, live recordings. The OBD
   recorder also runs end to end against a fake ELM327/STN adapter: discovery, VIN, benchmark finding the multi-PID
   limit, ignition-off wait then recovery, reconnect after a dropped link.
 - **Emulator (Pixel 9 Pro profile, Android 16)** against local `wrangler dev`: recording with the screen locked,
   simulated GPS movement, uploads with retry, force-killing the app mid-recording (recovered as `interrupted` and
   uploaded complete), and auto-record through the debug receiver (background start, a 4 s Bluetooth drop that didn't
-  split the recording, auto-stop with `stopReason`, and the tap-to-record fallback).
+  split the recording, auto-stop with `stopReason`, and the tap-to-record fallback). A detected drive with no
+  adapter was held from upload and deleted after the wait; text-to-speech spoke the adapter warning 90 s into a
+  simulated drive and the summary after parking.
 - **Real drives** in the Civic with an OBDLink MX+ and a Pixel 9 Pro on a windshield mount.
 
 ## Still worth checking on a real drive
@@ -341,9 +372,12 @@ python3 tools/fuelish.py export recording.ndjson.gz out/
 - [ ] **Offline drive**: airplane mode for a whole trip, then confirm everything uploads later and the recording shows complete.
 - [ ] **Ignition off/on mid-recording** (should show `waiting_vehicle` then resume), and walking away until the adapter's
   Bluetooth drops (should reconnect with backoff).
+- [ ] **Drive detection**: how far into a drive recording starts, that riding in another car without the adapter
+  leaves nothing behind, and that walking away ends a drive whose adapter dropped.
+- [ ] **Spoken prompts** over the car's speakers with Maps and music playing: loud enough, ducking not pausing.
 - [ ] **Other cars**: the first drive in a new car (a truck towing a camper, a turbo engine) — check its
   `obd_discovery` and `obd_bench` and whether fuel and Spend look sensible.
 
 ## Deliberately deferred
 
-Activity-recognition trip detection (for cars without Bluetooth), and judging route choice in the driving score.
+Judging route choice in the driving score, and coaching while driving (hard stops, highway speed).

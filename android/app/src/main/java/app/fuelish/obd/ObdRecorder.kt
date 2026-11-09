@@ -19,6 +19,8 @@ data class ObdStatus(
     val meanLatencyMs: Double = 0.0,
     val adapterVolts: String = "",
     val values: Map<String, String> = emptyMap(),
+    /** The engine ECU's latest value per field, as numbers (for the drive's spoken warnings and summary). */
+    val numbers: Map<String, Double> = emptyMap(),
 )
 
 /**
@@ -381,6 +383,7 @@ class ObdRecorder(
         var errors = 0
         statWindowStart = nanoTime()
         val values = HashMap<String, String>()
+        val numbers = HashMap<String, Double>()
         var lastUi = 0L
 
         while (running) {
@@ -416,7 +419,7 @@ class ObdRecorder(
                 for (v in Mode01.split(m.payload, pids)) {
                     if (v.pid !in pids) continue
                     answered += v.pid
-                    emitValue(r, m.ecu, v, values)
+                    emitValue(r, m.ecu, v, values, numbers)
                 }
             }
             if (answered.isEmpty() && r.status != ElmStatus.TIMEOUT) {
@@ -438,13 +441,13 @@ class ObdRecorder(
             statLatencyNs += r.latencyNs
             if (r.doneNs - lastUi >= 1_000_000_000L) {
                 lastUi = r.doneNs
-                status = status.copy(values = HashMap(values))
+                status = status.copy(values = HashMap(values), numbers = HashMap(numbers))
             }
             if (r.doneNs - statWindowStart >= 10_000_000_000L) flushStats(sched, r.doneNs, values)
         }
     }
 
-    private fun emitValue(r: ElmResponse, ecu: String, v: PidValue, values: HashMap<String, String>) {
+    private fun emitValue(r: ElmResponse, ecu: String, v: PidValue, values: HashMap<String, String>, numbers: HashMap<String, Double>) {
         pidCounts.merge(v.pid, 1L, Long::plus)
         val dataHex = v.data.joinToString("") { "%02X".format(it) }
         val def = v.def
@@ -465,6 +468,7 @@ class ObdRecorder(
                 summary,
             )
             values[f.name] = if (value.isFinite()) "%.4g %s".format(value, f.unit) else "–"
+            if (ecu == mainEcu && value.isFinite()) numbers[f.name] = value
         }
     }
 

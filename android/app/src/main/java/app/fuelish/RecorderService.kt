@@ -20,6 +20,11 @@ import android.os.SystemClock
 import androidx.core.app.ServiceCompat
 import app.fuelish.auto.AutoStopPolicy
 import app.fuelish.auto.CarBluetooth
+import app.fuelish.auto.DriveDetect
+import app.fuelish.feedback.DriveTally
+import app.fuelish.feedback.DriveVoice
+import app.fuelish.feedback.DriveWatch
+import app.fuelish.feedback.GasPrice
 import app.fuelish.obd.BluetoothSppTransport
 import app.fuelish.obd.ObdRecorder
 import app.fuelish.record.JsonLine
@@ -57,6 +62,7 @@ class RecorderService : Service() {
             ACTION_CAR_CONNECTED, ACTION_CAR_DISCONNECTED -> control.execute {
                 session?.carEvent(intent.action == ACTION_CAR_CONNECTED) ?: stopSelf()
             }
+            ACTION_LEFT_VEHICLE -> control.execute { session?.leftVehicle() ?: stopSelf() }
             else -> control.execute { if (session == null) stopSelf() }
         }
         // If the process is killed the recording is finished as "interrupted" on next launch;
@@ -131,11 +137,25 @@ class RecorderService : Service() {
         private var vinSeen = false
         private var adapterProven = false
         @Volatile private var ended = false
+        /** Started by Android detecting a drive: kept only if the engine answers through the adapter. */
+        private val detected = trigger == DriveDetect.TRIGGER
         /** Only recordings that started automatically also stop automatically. */
         private val autoStop = if (trigger == TRIGGER_MANUAL) null else AutoStopPolicy(
             cfg.auto.optLong("stopAfterCarDisconnectS", 10) * 1_000_000_000,
             cfg.auto.optLong("stopAfterEngineOffS", 60) * 1_000_000_000,
+            if (detected) cfg.auto.optLong("adapterWaitS", 120) * 1_000_000_000 else 0,
         )
+        private val sounds = cfg.feedback.optBoolean("sounds", true)
+        private val spokenSummary = cfg.feedback.optBoolean("summary", true)
+        private val warnings = cfg.feedback.optBoolean("warnings", true)
+        // A detected drive in a car without the adapter is thrown away, so it never warns about the adapter.
+        private val watch = DriveWatch(
+            expectAdapter = !detected && cfg.obd.optBoolean("enabled") && cfg.obd.optString("deviceAddress").isNotBlank(),
+            milWasOn = Prefs.milOn(ctx),
+        )
+        private val tally = DriveTally()
+        private var lastGpsNs = 0L
+        private var lastTickNs = 0L
         @Volatile private var stopRequested = false
         private var ticks = 0L
 
@@ -150,6 +170,8 @@ class RecorderService : Service() {
                 .put("app", appInfo()).put("device", deviceInfo())
                 .put("config", cfg.redacted())
             if (resumes != null) meta.put("resumes", resumes)
+            // Its uploads wait until the engine answers through the adapter (see DriveDetect).
+            if (detected) meta.put("awaitingAdapter", true)
             store.writeMeta(id, meta)
             // Uploads as whoever is signed in now, even if someone else signs in before it's sent.
             store.setTarget(id, Prefs.uploadTarget(ctx))
@@ -179,6 +201,11 @@ class RecorderService : Service() {
             tick = Handler(tickThread.looper)
             tick.post(::onTick)
             event("start", trigger)
+
+            if (sounds || spokenSummary || warnings) DriveVoice.open(ctx)
+            // A detected drive chimes once the adapter proves it's this car (see onTick).
+            if (sounds && !detected) DriveVoice.chime(ctx)
+            if (spokenSummary) Thread({ GasPrice.refresh(ctx) }, "fuelish-gas").apply { isDaemon = true }.start()
         }
 
         private fun startObd() {
@@ -210,6 +237,11 @@ class RecorderService : Service() {
                 JsonLine("clock").n("rx", now).n("wall", System.currentTimeMillis()).n("uptimeMs", SystemClock.uptimeMillis())
                     .n("utcOffsetMin", TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60_000).build(),
             )
+        }
+
+        fun leftVehicle() {
+            event("left_vehicle")
+            autoStop?.leftVehicle(SystemClock.elapsedRealtimeNanos())
         }
 
         fun carEvent(connected: Boolean) {
@@ -263,13 +295,47 @@ class RecorderService : Service() {
             if (!adapterProven && obd?.status?.state == "polling") {
                 adapterProven = true
                 Prefs.config(ctx).obd.optString("deviceAddress").takeIf { it.isNotBlank() }?.let { Prefs.setAdapterChecked(ctx, it) }
+                if (detected) {
+                    // It's a car with the adapter: keep the recording, and let it upload.
+                    synchronized(meta) {
+                        meta.remove("awaitingAdapter")
+                        store.writeMeta(id, meta)
+                    }
+                    event("adapter_proven")
+                    if (sounds) DriveVoice.chime(ctx)
+                    UploadWorker.enqueue(ctx)
+                }
             }
+            feedback(gps)
             val vin = obd?.status?.vin.orEmpty()
             if (!vinSeen && vin.isNotEmpty()) {
                 vinSeen = true
                 nameFromVin(vin)
             }
             tick.postDelayed(::onTick, 1000)
+        }
+
+        /** Keeps the drive's running totals and says whatever [DriveWatch] finds worth saying. */
+        private fun feedback(gps: android.location.Location?) {
+            val now = SystemClock.elapsedRealtimeNanos()
+            val st = obd?.status
+            val state = st?.state ?: "off"
+            val numbers = st?.numbers ?: emptyMap()
+            if (gps != null && gps.elapsedRealtimeNanos != lastGpsNs) {
+                lastGpsNs = gps.elapsedRealtimeNanos
+                tally.gps(gps.latitude, gps.longitude, gps.accuracy.toDouble(), gps.speed.toDouble())
+            }
+            val dtS = if (lastTickNs == 0L) 0.0 else ((now - lastTickNs) / 1e9).coerceAtMost(3.0)
+            lastTickNs = now
+            if (state == "polling") tally.engine(dtS, numbers)
+            val moving = gps != null && gps.speed >= 3f && now - gps.elapsedRealtimeNanos < 5_000_000_000L
+            val milBefore = watch.milOn
+            for (cue in watch.tick(now, state, numbers, st?.adapterVolts?.let(DriveWatch::parseVolts), moving)) {
+                val say = if (cue.kind in ADAPTER_CUES) sounds else warnings
+                event("feedback", "${cue.kind.name.lowercase()}${if (say) "" else " (muted)"}")
+                if (say) DriveVoice.say(ctx, DriveWatch.words(cue))
+            }
+            if (watch.milOn != milBefore) Prefs.setMilOn(ctx, watch.milOn)
         }
 
         /** Names the vehicle from the VIN the adapter just read (see [VehicleNaming]); labels this trip too. */
@@ -341,6 +407,21 @@ class RecorderService : Service() {
                 if (waiting.isNotBlank() && meta.optString("vehicle").isBlank()) Prefs.setPendingVin(ctx, waiting)
             }
             RecorderService.activeId = null
+            // A detected drive the adapter never confirmed wasn't in its car (timed out, or ended first, like a
+            // short ride in someone else's car): nothing was uploaded, and it goes. Unless you stopped it yourself.
+            val discard = detected && !adapterProven && reason != "manual"
+            if (detected && !adapterProven && !discard) synchronized(meta) {
+                meta.remove("awaitingAdapter")
+                store.writeMeta(id, meta)
+            }
+            if (discard) {
+                store.dir(id).deleteRecursively()
+            } else if (spokenSummary) {
+                val driveEnd = autoStop?.driveEndNs(reason) ?: endedNs
+                DriveTally.summary(tally.miles, (driveEnd - startedNs) / 60e9, tally.gallons, GasPrice.forPlace(ctx, tally.startLat, tally.startLon))
+                    ?.let { DriveVoice.say(ctx, it) }
+            }
+            DriveVoice.close()
             if (wakeLock.isHeld) wakeLock.release()
             RecorderState.status.value = RecorderStatus(obd = RecorderState.status.value.obd.copy(state = "off"))
             UploadWorker.enqueue(ctx)
@@ -362,6 +443,8 @@ class RecorderService : Service() {
         const val ACTION_STOP = "app.fuelish.STOP"
         const val ACTION_CAR_CONNECTED = "app.fuelish.CAR_CONNECTED"
         const val ACTION_CAR_DISCONNECTED = "app.fuelish.CAR_DISCONNECTED"
+        const val ACTION_LEFT_VEHICLE = "app.fuelish.LEFT_VEHICLE"
+        private val ADAPTER_CUES = setOf(DriveWatch.Kind.ADAPTER_NOT_CONNECTING, DriveWatch.Kind.ADAPTER_LOST, DriveWatch.Kind.ADAPTER_BACK)
         const val EXTRA_NOTE = "note"
         const val EXTRA_TRIGGER = "trigger"
         const val EXTRA_RESUMES = "resumes"

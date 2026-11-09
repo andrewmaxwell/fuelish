@@ -88,6 +88,11 @@ fun SettingsScreen(close: () -> Unit) {
     }
     val bgLocationOk = remember(refresh) { CarBluetooth.canStartInBackground(ctx) }
     val bgLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { refresh++ }
+    val activityOk = remember(refresh) { app.fuelish.auto.DriveDetect.permitted(ctx) }
+    val activityLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        app.fuelish.auto.DriveDetect.sync(ctx)
+        refresh++
+    }
 
     val obd = cfg.getJSONObject("obd")
     val auto = cfg.getJSONObject("auto")
@@ -130,25 +135,52 @@ fun SettingsScreen(close: () -> Unit) {
 
         Section("Auto-record") {
             val on = auto.optBoolean("enabled")
+            // With an adapter, a detected drive starts recording; the car's Bluetooth only makes it sooner.
+            val hasAdapter = obd.optString("deviceAddress").isNotBlank()
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Record automatically", style = MaterialTheme.typography.bodyLarge)
-                    Muted("Starts when your phone connects to the car's Bluetooth and stops about 10 seconds after you park.")
+                    Muted(
+                        if (hasAdapter) "Starts when your phone notices you're driving (a minute or two in) and the adapter answers, " +
+                            "and stops shortly after you park. Works in any car the adapter is plugged into."
+                        else "Starts when your phone connects to the car's Bluetooth and stops about 10 seconds after you park.",
+                    )
                 }
                 Switch(checked = on, onCheckedChange = { v -> update { getJSONObject("auto").put("enabled", v) } })
             }
             if (on) {
                 Spacer(Modifier.height(8.dp))
-                Text("Your car's Bluetooth", style = MaterialTheme.typography.titleSmall)
+                Text(if (hasAdapter) "Start sooner with your car's Bluetooth (optional)" else "Your car's Bluetooth", style = MaterialTheme.typography.titleSmall)
+                if (hasAdapter) Muted("Recording then starts as soon as the phone connects to it, in that car.")
                 DeviceList(
                     btOk, bonded.filter { it.second != obd.optString("deviceAddress") },
-                    selected = auto.optString("carAddress"), noneLabel = null,
+                    selected = auto.optString("carAddress"), noneLabel = if (hasAdapter) "None" else null,
                 ) { name, addr -> update { getJSONObject("auto").put("carAddress", addr).put("carName", name) } }
                 Spacer(Modifier.height(8.dp))
                 SetupRow(
                     bgLocationOk, "Location all the time",
                     "Needed so recording can start while the phone is in your pocket", "Allow",
                 ) { bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) }
+                if (hasAdapter) {
+                    SetupRow(
+                        activityOk, "Physical activity",
+                        "Needed to notice when you start driving", "Allow",
+                    ) { activityLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION) }
+                }
+            }
+        }
+
+        Section("During a drive") {
+            Muted("Spoken through the car like navigation prompts, briefly lowering music. Nothing to look at.")
+            val fb = cfg.getJSONObject("feedback")
+            FeedbackSwitch("Recording sounds", "A chime when recording starts, and a spoken alert if the adapter disconnects or never connects.", fb.optBoolean("sounds", true)) { v ->
+                update { getJSONObject("feedback").put("sounds", v) }
+            }
+            FeedbackSwitch("Summary when a drive ends", "Miles, time, gallons, mpg and what the gas cost.", fb.optBoolean("summary", true)) { v ->
+                update { getJSONObject("feedback").put("summary", v) }
+            }
+            FeedbackSwitch("Car warnings", "The check engine light coming on, the engine running hot, or the battery not charging.", fb.optBoolean("warnings", true)) { v ->
+                update { getJSONObject("feedback").put("warnings", v) }
             }
         }
 
@@ -260,6 +292,17 @@ private fun DeviceList(
     if (noneLabel != null) RadioRow(selected.isBlank(), noneLabel, null) { onSelect("", "") }
     devices.forEach { (name, addr) ->
         RadioRow(addr.equals(selected, ignoreCase = true), name, addr) { onSelect(name, addr) }
+    }
+}
+
+@Composable
+private fun FeedbackSwitch(title: String, detail: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Muted(detail)
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 

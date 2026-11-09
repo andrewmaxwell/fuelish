@@ -31,6 +31,8 @@ class Config(val json: JSONObject) {
     val obd get() = json.getJSONObject("obd")
     val upload get() = json.getJSONObject("upload")
     val auto get() = json.getJSONObject("auto")
+    /** What the phone says or plays during a drive: `sounds` (recording started, adapter trouble), `summary`, `warnings`. */
+    val feedback get() = json.getJSONObject("feedback")
     val batteryIntervalS get() = json.optInt("batteryIntervalS", 10)
 
     fun redacted(): JSONObject = JSONObject(json.toString()).apply { if (has("deviceToken")) put("deviceToken", "<redacted>") }
@@ -96,7 +98,13 @@ class Config(val json: JSONObject) {
             "carAddress": "",
             "carName": "",
             "stopAfterCarDisconnectS": 10,
-            "stopAfterEngineOffS": 60
+            "stopAfterEngineOffS": 60,
+            "adapterWaitS": 120
+          },
+          "feedback": {
+            "sounds": true,
+            "summary": true,
+            "warnings": true
           }
         }
         """.trimIndent()
@@ -192,6 +200,7 @@ class Config(val json: JSONObject) {
             if (carAddr.isNotEmpty() && !BT_ADDRESS.matches(carAddr)) out += "auto.carAddress isn't a Bluetooth address"
             num(auto, "stopAfterCarDisconnectS", "auto.", 0.0, 3600.0)
             num(auto, "stopAfterEngineOffS", "auto.", 0.0, 3600.0)
+            num(auto, "adapterWaitS", "auto.", 0.0, 3600.0)
             return out
         }
 

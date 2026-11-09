@@ -77,6 +77,13 @@ class Uploader(
                     if (deleteAfterUpload) store.dir(id).deleteRecursively()
                     continue
                 }
+                // A detected drive the adapter hasn't confirmed yet (see DriveDetect): wait while it records;
+                // one that ended unconfirmed (the app was killed first) wasn't in the adapter's car.
+                val waitMeta = runCatching { store.readMeta(id) }.getOrNull()
+                if (waitMeta?.optBoolean("awaitingAdapter") == true) {
+                    if (waitMeta.optString("status") != "recording") store.dir(id).deleteRecursively()
+                    continue
+                }
                 if (!mayUpload(id, now)) {
                     held += id
                     continue

@@ -75,4 +75,38 @@ class AutoStopPolicyTest {
         p.check(0, "waiting_vehicle")
         assertNull(p.check(100_000 * s, "waiting_vehicle"))
     }
+
+    @Test
+    fun aDetectedDriveWithoutTheAdapterStopsAfterTheWait() {
+        val p = AutoStopPolicy(10 * s, 60 * s, adapterWaitNs = 120 * s)
+        assertNull(p.check(5 * s, "connecting"))
+        assertNull(p.check(124 * s, "disconnected"))
+        assertEquals("no_adapter", p.check(125 * s, "connecting"))
+        assertNull(p.driveEndNs("no_adapter"))
+    }
+
+    @Test
+    fun onceTheEngineAnsweredTheAdapterWaitNeverStops() {
+        val p = AutoStopPolicy(10 * s, 60 * s, adapterWaitNs = 120 * s)
+        assertNull(p.check(30 * s, "polling"))
+        assertNull(p.check(500 * s, "connecting")) // the adapter dropped mid-drive
+    }
+
+    @Test
+    fun leavingTheVehicleStopsOnceTheEngineIsQuiet() {
+        val p = policy()
+        p.check(0, "polling")
+        p.leftVehicle(100 * s)
+        assertNull(p.check(105 * s, "disconnected"))
+        assertEquals("left_vehicle", p.check(110 * s, "disconnected"))
+        assertEquals(100 * s, p.driveEndNs("left_vehicle"))
+    }
+
+    @Test
+    fun theEngineAnsweringCancelsLeavingTheVehicle() {
+        val p = policy()
+        p.leftVehicle(100 * s)
+        assertNull(p.check(101 * s, "polling"))
+        assertNull(p.check(500 * s, "connecting"))
+    }
 }
