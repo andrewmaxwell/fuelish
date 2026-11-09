@@ -274,7 +274,13 @@ class RecorderService : Service() {
 
         /** Names the vehicle from the VIN the adapter just read (see [VehicleNaming]); labels this trip too. */
         private fun nameFromVin(vin: String) {
+            Prefs.setLastVin(ctx, vin)
             if (!VehicleNaming.wanted(ctx, vin)) return
+            // Another car: until its name is known this trip has none, rather than the last car's.
+            synchronized(meta) {
+                meta.put("vehicle", "").put("vehicleVin", vin)
+                store.writeMeta(id, meta)
+            }
             Thread({
                 val named = VehicleNaming.lookUp(ctx, vin) ?: return@Thread
                 synchronized(meta) {
@@ -329,6 +335,10 @@ class RecorderService : Service() {
                     meta.put("driveEndElapsedNs", ns).put("driveEndWallMs", endedWall - (endedNs - ns) / 1_000_000)
                 }
                 store.writeMeta(id, meta)
+                // Still unnamed (no signal, or the lookup finished for other trips while this one was
+                // recording): the upload worker names it once it can.
+                val waiting = meta.optString("vehicleVin")
+                if (waiting.isNotBlank() && meta.optString("vehicle").isBlank()) Prefs.setPendingVin(ctx, waiting)
             }
             RecorderService.activeId = null
             if (wakeLock.isHeld) wakeLock.release()

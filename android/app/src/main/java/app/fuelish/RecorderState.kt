@@ -189,6 +189,9 @@ object Prefs {
     /** A VIN read on a drive whose name lookup failed (no signal): looked up again once online. */
     fun pendingVin(c: Context) = sp(c).getString("pendingVin", "").orEmpty()
     fun setPendingVin(c: Context, vin: String) = sp(c).edit().putString("pendingVin", vin).apply()
+    /** The VIN the adapter read most recently: the car the phone is in, or was in last. */
+    fun lastVin(c: Context) = sp(c).getString("lastVin", "").orEmpty()
+    fun setLastVin(c: Context, vin: String) = sp(c).edit().putString("lastVin", vin).apply()
 
     fun store(c: Context): RecordingStore {
         val base = c.getExternalFilesDir(null) ?: c.filesDir
