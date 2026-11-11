@@ -12,6 +12,7 @@ on:
     branches: [main]
     paths:
       - "android/**"
+      - "shared/**"
       - "tools/publish-apk.sh"
       - ".github/workflows/android.yml"
   workflow_dispatch:

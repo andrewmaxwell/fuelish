@@ -21,6 +21,31 @@ class DriveWatchTest {
         assertEquals(emptyList<Kind>(), kinds(w, 200, "connecting"))
     }
 
+    @Test fun aLongIdleIsMentionedOnceWithWhatItBurned() {
+        val w = DriveWatch(expectAdapter = true, milWasOn = false)
+        val idling = mapOf("speed" to 0.0, "rpm" to 700.0, "fuel_rate" to 1.0) // 1 L/h
+        for (t in 0L until 180) assertEquals(emptyList<Kind>(), kinds(w, t, "polling", idling, moving = false))
+        val cue = w.tick(180 * s, "polling", idling, null, false).single()
+        assertEquals(Kind.LONG_IDLE, cue.kind)
+        assertEquals(0.05 / 3.78541, cue.value!!, 1e-4) // 3 min at 1 L/h
+        assertEquals(
+            "The engine has idled for 3 minutes, about 4 cents of gas so far. Switching off saves gas on a longer wait.",
+            DriveWatch.words(cue, 3.0),
+        )
+        assertEquals("The engine has idled for 3 minutes. Switching off saves gas on a longer wait.", DriveWatch.words(cue))
+        // Not again on this drive, however long the next wait.
+        kinds(w, 200, "polling", mapOf("speed" to 40.0, "rpm" to 1800.0))
+        for (t in 300L..700) assertEquals(emptyList<Kind>(), kinds(w, t, "polling", idling, moving = false))
+    }
+
+    @Test fun aRedLightIsNotALongIdle() {
+        val w = DriveWatch(expectAdapter = true, milWasOn = false)
+        val idling = mapOf("speed" to 0.0, "rpm" to 700.0)
+        for (t in 0L..120) kinds(w, t, "polling", idling, moving = false)
+        kinds(w, 121, "polling", mapOf("speed" to 30.0, "rpm" to 1500.0))
+        for (t in 122L..250) assertEquals(emptyList<Kind>(), kinds(w, t, "polling", idling, moving = false))
+    }
+
     @Test fun noAdapterExpectedMeansNoWarning() {
         val w = DriveWatch(expectAdapter = false, milWasOn = false)
         kinds(w, 0, "connecting")

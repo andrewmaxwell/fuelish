@@ -16,6 +16,11 @@ package app.fuelish.auto
  *   came back, which the engine-off rule can't see. The engine answering again cancels it.
  * - [adapterWaitNs] after the first check the engine still hasn't answered once: the recording was
  *   started by detecting a drive, and this isn't a car with the adapter in it (a friend's car, a bus).
+ *   Unless there's other evidence it's your car ([ownCarEvidence]): the adapter's Bluetooth link came
+ *   up (it's plugged into your car, and in range), or the phone is on a car stereo it's paired with.
+ *   Then the adapter is just being slow or the car isn't answering it, and the drive goes on, recorded
+ *   from the phone ([keptWithoutEngine]). Such a drive has no engine to go quiet, so the engine-off
+ *   rule waits for the engine to have answered; leaving the vehicle ends it.
  *
  * A zero threshold disables that rule.
  */
@@ -32,6 +37,18 @@ class AutoStopPolicy(
     /** The engine has answered at least once in this recording. */
     var engineAnswered = false
         private set
+    private var adapterReached = false
+    private var pairedCar = false
+    /** Signs this is the driver's own car even though the engine hasn't answered. */
+    val ownCarEvidence get() = adapterReached || pairedCar
+    /** The adapter wait ran out without the engine answering, and the drive was kept on [ownCarEvidence]. */
+    var keptWithoutEngine = false
+        private set
+
+    /** The phone is connected to a car stereo it's paired with. */
+    fun onPairedCar() {
+        pairedCar = true
+    }
 
     fun carEvent(connected: Boolean, nowNs: Long) {
         if (connected) carConnected = true
@@ -72,16 +89,27 @@ class AutoStopPolicy(
             // connecting/disconnected/...: leave the timer as is. The MX+ goes to sleep after
             // the car is switched off, so the engine-off clock keeps running through that.
         }
-        if (adapterWaitNs > 0 && !engineAnswered && nowNs - firstCheckNs >= adapterWaitNs) return "no_adapter"
+        if (obdState in LINK_UP) adapterReached = true
+        if (adapterWaitNs > 0 && !engineAnswered && nowNs - firstCheckNs >= adapterWaitNs) {
+            if (!ownCarEvidence) return "no_adapter"
+            keptWithoutEngine = true
+        }
         if (!carConnected && !engineAnswering && stopAfterDisconnectNs > 0 && nowNs - disconnectedAtNs >= stopAfterDisconnectNs) {
             return "car_disconnected"
         }
         if (leftVehicleAtNs != 0L && !engineAnswering && stopAfterDisconnectNs > 0 && nowNs - leftVehicleAtNs >= stopAfterDisconnectNs) {
             return "left_vehicle"
         }
-        if (engineOffSinceNs != 0L && stopAfterEngineOffNs > 0 && nowNs - engineOffSinceNs >= stopAfterEngineOffNs) {
+        // A detected drive whose engine never answered has no engine-off to see (see the class comment).
+        val engineSeen = adapterWaitNs == 0L || engineAnswered
+        if (engineSeen && engineOffSinceNs != 0L && stopAfterEngineOffNs > 0 && nowNs - engineOffSinceNs >= stopAfterEngineOffNs) {
             return "engine_off"
         }
         return null
+    }
+
+    private companion object {
+        /** Adapter states that mean its Bluetooth link is up. */
+        val LINK_UP = setOf("initializing", "discovering", "waiting_vehicle", "benchmarking", "polling")
     }
 }

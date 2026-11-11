@@ -31,7 +31,7 @@ class Config(val json: JSONObject) {
     val obd get() = json.getJSONObject("obd")
     val upload get() = json.getJSONObject("upload")
     val auto get() = json.getJSONObject("auto")
-    /** What the phone says or plays during a drive: `sounds` (recording started, adapter trouble), `summary`, `warnings`. */
+    /** What the phone says or plays during a drive: `sounds` (recording started, adapter trouble), `summary`, `warnings`, `tips` (a long idle). */
     val feedback get() = json.getJSONObject("feedback")
     val batteryIntervalS get() = json.optInt("batteryIntervalS", 10)
 
@@ -104,7 +104,8 @@ class Config(val json: JSONObject) {
           "feedback": {
             "sounds": true,
             "summary": true,
-            "warnings": true
+            "warnings": true,
+            "tips": true
           }
         }
         """.trimIndent()

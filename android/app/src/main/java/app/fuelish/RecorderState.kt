@@ -27,6 +27,9 @@ data class RecorderStatus(
     val battery: String = "",
     val problems: List<String> = emptyList(),
     val writerError: String = "",
+    /** The drive so far, as the end-of-drive summary counts it: GPS miles and, with engine readings, gallons. */
+    val miles: Double = 0.0,
+    val gallons: Double? = null,
 )
 
 /**

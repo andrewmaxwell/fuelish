@@ -25,6 +25,7 @@ import app.fuelish.feedback.DriveTally
 import app.fuelish.feedback.DriveVoice
 import app.fuelish.feedback.DriveWatch
 import app.fuelish.feedback.GasPrice
+import app.fuelish.feedback.SummaryTiming
 import app.fuelish.obd.BluetoothSppTransport
 import app.fuelish.obd.ObdRecorder
 import app.fuelish.record.JsonLine
@@ -148,6 +149,10 @@ class RecorderService : Service() {
         private val sounds = cfg.feedback.optBoolean("sounds", true)
         private val spokenSummary = cfg.feedback.optBoolean("summary", true)
         private val warnings = cfg.feedback.optBoolean("warnings", true)
+        private val tips = cfg.feedback.optBoolean("tips", true)
+        private val summaryTiming = SummaryTiming()
+        private var carConnected = true
+        private var keptSaid = false
         // A detected drive in a car without the adapter is thrown away, so it never warns about the adapter.
         private val watch = DriveWatch(
             expectAdapter = !detected && cfg.obd.optBoolean("enabled") && cfg.obd.optString("deviceAddress").isNotBlank(),
@@ -202,7 +207,7 @@ class RecorderService : Service() {
             tick.post(::onTick)
             event("start", trigger)
 
-            if (sounds || spokenSummary || warnings) DriveVoice.open(ctx)
+            if (sounds || spokenSummary || warnings || tips) DriveVoice.open(ctx)
             // A detected drive chimes once the adapter proves it's this car (see onTick).
             if (sounds && !detected) DriveVoice.chime(ctx)
             if (spokenSummary) Thread({ GasPrice.refresh(ctx) }, "fuelish-gas").apply { isDaemon = true }.start()
@@ -246,12 +251,16 @@ class RecorderService : Service() {
 
         fun carEvent(connected: Boolean) {
             event(if (connected) "car_bt_connected" else "car_bt_disconnected")
+            carConnected = connected
             autoStop?.carEvent(connected, SystemClock.elapsedRealtimeNanos())
         }
 
         private fun onTick() {
             ticks++
+            // A detected drive the engine hasn't confirmed yet: a paired car stereo says it's your car too.
+            if (detected && !adapterProven && ticks % 10 == 1L && CarBluetooth.onPairedCar(ctx)) autoStop?.onPairedCar()
             val reason = autoStop?.check(SystemClock.elapsedRealtimeNanos(), obd?.status?.state ?: "off")
+            if (detected && !adapterProven && !keptSaid && autoStop?.keptWithoutEngine == true) keepWithoutEngine()
             if (reason != null && !stopRequested) {
                 stopRequested = true
                 control.execute { if (session === this) stopSession(reason) }
@@ -284,12 +293,17 @@ class RecorderService : Service() {
                 battery = if (b == null) "" else "%d%% · %s · %.1f°C · %d mA".format(b.pct, if (b.plugged != 0) "plugged" else "on battery", b.tempC, b.currentUa / 1000),
                 problems = problems + sensors.problems,
                 writerError = writer.error?.toString().orEmpty(),
+                miles = tally.miles, gallons = tally.gallons,
             )
             if (ticks % 5 == 0L) {
-                getSystemService(NotificationManager::class.java).notify(
-                    NOTIFICATION_ID,
-                    notification("${writer.written.get()} records · GPS ${if (gps != null) "ok" else "waiting"} · OBD ${obd?.status?.state ?: "off"}"),
-                )
+                val minutes = (SystemClock.elapsedRealtimeNanos() - startedNs) / 60_000_000_000
+                val text = listOfNotNull(
+                    "$minutes min", DriveTally.soFar(tally.miles, tally.gallons),
+                    if (gps == null) "waiting for GPS" else null,
+                    // Only worth a word when there's an adapter and it isn't reading the car.
+                    obd?.status?.state?.takeIf { it != "polling" && it != "benchmarking" }?.let { "adapter ${it.replace('_', ' ')}" },
+                ).joinToString(" · ")
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text))
             }
             // Reading the car on a drive proves the adapter works, as the setup test would.
             if (!adapterProven && obd?.status?.state == "polling") {
@@ -331,11 +345,41 @@ class RecorderService : Service() {
             val moving = gps != null && gps.speed >= 3f && now - gps.elapsedRealtimeNanos < 5_000_000_000L
             val milBefore = watch.milOn
             for (cue in watch.tick(now, state, numbers, st?.adapterVolts?.let(DriveWatch::parseVolts), moving)) {
-                val say = if (cue.kind in ADAPTER_CUES) sounds else warnings
+                val say = when (cue.kind) {
+                    in ADAPTER_CUES -> sounds
+                    DriveWatch.Kind.LONG_IDLE -> tips
+                    else -> warnings
+                }
                 event("feedback", "${cue.kind.name.lowercase()}${if (say) "" else " (muted)"}")
-                if (say) DriveVoice.say(ctx, DriveWatch.words(cue))
+                if (say) DriveVoice.say(ctx, DriveWatch.words(cue, GasPrice.forPlace(ctx, tally.startLat, tally.startLon)))
             }
             if (watch.milOn != milBefore) Prefs.setMilOn(ctx, watch.milOn)
+            // The summary, while the driver is still in the seat: see SummaryTiming. A recording you stop
+            // yourself says it then.
+            if (spokenSummary && autoStop != null && summaryTiming.tick(now, state, carConnected, moving, tally.miles)) {
+                saySummary(summaryTiming.quietSince ?: now, "early")
+            }
+        }
+
+        private fun saySummary(driveEndNs: Long, whenSaid: String) {
+            val words = DriveTally.summary(tally.miles, (driveEndNs - startedNs) / 60e9, tally.gallons, GasPrice.forPlace(ctx, tally.startLat, tally.startLon)) ?: return
+            event("feedback", "summary ($whenSaid)")
+            DriveVoice.say(ctx, words)
+        }
+
+        /**
+         * The adapter wait ran out without the engine answering, but this is the driver's car (see
+         * [AutoStopPolicy]): the recording is kept and uploads, from the phone alone, and says so once.
+         */
+        private fun keepWithoutEngine() {
+            keptSaid = true
+            synchronized(meta) {
+                meta.remove("awaitingAdapter")
+                store.writeMeta(id, meta)
+            }
+            event("kept_without_engine")
+            if (sounds) DriveVoice.say(ctx, DriveWatch.words(DriveWatch.Cue(DriveWatch.Kind.ADAPTER_NOT_CONNECTING)))
+            UploadWorker.enqueue(ctx)
         }
 
         /** Names the vehicle from the VIN the adapter just read (see [VehicleNaming]); labels this trip too. */
@@ -409,22 +453,44 @@ class RecorderService : Service() {
             RecorderService.activeId = null
             // A detected drive the adapter never confirmed wasn't in its car (timed out, or ended first, like a
             // short ride in someone else's car): nothing was uploaded, and it goes. Unless you stopped it yourself.
-            val discard = detected && !adapterProven && reason != "manual"
+            // Nor does a drive with other signs of being in your own car (the adapter's link came up, or a
+            // paired car stereo), once it actually went somewhere.
+            val ownCar = autoStop?.ownCarEvidence == true && tally.miles >= 0.3
+            val discard = detected && !adapterProven && reason != "manual" && !ownCar
             if (detected && !adapterProven && !discard) synchronized(meta) {
                 meta.remove("awaitingAdapter")
                 store.writeMeta(id, meta)
             }
             if (discard) {
                 store.dir(id).deleteRecursively()
-            } else if (spokenSummary) {
-                val driveEnd = autoStop?.driveEndNs(reason) ?: endedNs
-                DriveTally.summary(tally.miles, (driveEnd - startedNs) / 60e9, tally.gallons, GasPrice.forPlace(ctx, tally.startLat, tally.startLon))
-                    ?.let { DriveVoice.say(ctx, it) }
+                // Not silently, if the phone did drive somewhere: it may have been your car with the adapter out.
+                if (tally.miles >= 0.3) notifyNotKept()
+            } else if (spokenSummary && summaryTiming.atStop(tally.miles)) {
+                saySummary(autoStop?.driveEndNs(reason) ?: endedNs, "at stop")
             }
             DriveVoice.close()
             if (wakeLock.isHeld) wakeLock.release()
             RecorderState.status.value = RecorderStatus(obd = RecorderState.status.value.obd.copy(state = "off"))
             UploadWorker.enqueue(ctx)
+        }
+
+        /** A quiet note that a detected drive wasn't kept, and why; a later one replaces it. */
+        private fun notifyNotKept() {
+            val why = "The OBD adapter didn't answer, so Fuelish took it for someone else's car. If it was yours, check the adapter is plugged in."
+            val open = PendingIntent.getActivity(ctx, 4, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+            runCatching {
+                getSystemService(NotificationManager::class.java).notify(
+                    NOT_KEPT_NOTIFICATION_ID,
+                    Notification.Builder(ctx, CHANNEL)
+                        .setSmallIcon(R.drawable.ic_notification)
+                        .setContentTitle("A drive wasn't kept")
+                        .setContentText(why)
+                        .setStyle(Notification.BigTextStyle().bigText(why))
+                        .setContentIntent(open)
+                        .setAutoCancel(true)
+                        .build(),
+                )
+            }
         }
 
         private fun appInfo(): JSONObject {
@@ -451,6 +517,7 @@ class RecorderService : Service() {
         const val TRIGGER_MANUAL = "manual"
         const val CHANNEL = "recording"
         private const val NOTIFICATION_ID = 1
+        private const val NOT_KEPT_NOTIFICATION_ID = 5
 
         @Volatile var activeId: String? = null
 

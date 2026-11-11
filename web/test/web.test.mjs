@@ -10,7 +10,7 @@ export function load(...files) {
   const ctx = vm.createContext({ console, fetch: async () => ({ ok: false }), setTimeout, Promise, Map, Set, Math, Date, JSON });
   for (const f of files) vm.runInContext(readFileSync(new URL(f, dir), "utf8") + "\n;globalThis.__last = 1;", ctx, { filename: f });
   // Top-level const declarations aren't properties of the context; expose them.
-  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}), ...(typeof Ribbon !== 'undefined' ? { Ribbon } : {}), ...(typeof Terrain !== 'undefined' ? { Terrain } : {}), ...(typeof Stops !== 'undefined' ? { Stops } : {}), ...(typeof Ideal !== 'undefined' ? { Ideal } : {}), ...(typeof Outings !== 'undefined' ? { Outings } : {}) })", ctx);
+  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}), ...(typeof Ribbon !== 'undefined' ? { Ribbon } : {}), ...(typeof Terrain !== 'undefined' ? { Terrain } : {}), ...(typeof Stops !== 'undefined' ? { Stops } : {}), ...(typeof Ideal !== 'undefined' ? { Ideal } : {}), ...(typeof Outings !== 'undefined' ? { Outings } : {}), ...(typeof Insights !== 'undefined' ? { Insights } : {}), ...(typeof Gas !== 'undefined' ? { Gas } : {}) })", ctx);
 }
 const { Engine, Route, extent } = load("route.js", "engine.js");
 
@@ -478,6 +478,28 @@ test("a stop costs its wait, the gas to get going again, and the time lost again
   assert.equal(places[0].trips.size, 2);
 });
 
+test("a pause just after setting off (backing out, the garage door) isn't a stop", () => {
+  const { Ribbon, Stops } = load("route.js", "engine.js", "ribbon.js", "stops.js");
+  // Idle 10 s, roll 5 s at 4 m/s (20 m), wait 15 s, then drive off and park 800 m on.
+  const plan = [[10, 0], [5, 4], [15, 0], [10, 1.5], [50, 15], [5, -3], [10, 0]];
+  const pts = [];
+  let lat = 38.6, v = 0, t = 0;
+  for (const [n, x] of plan) {
+    for (let k = 0; k < n; k++) {
+      const a = Math.abs(x) < 4 ? x : 0;
+      if (Math.abs(x) >= 4) v = x;
+      if (x === 0) v = 0;
+      pts.push({ t: t * 1000, lat, lon: -90.3, v, a, eng: { fuelGs: a > 0 ? 2.5 : v > 0 ? 1 : 0.15, rpm: 900, cut: false } });
+      v = Math.max(0, v + a);
+      lat += v / 111195;
+      t++;
+    }
+  }
+  const d = Ribbon.decompose(pts, { vehicle: "2016 Honda Civic 2.0L" });
+  assert.ok(d.stops.some((s) => s.i0 > 5 && s.ms >= 10000), "the pause is seen as a standstill");
+  assert.equal(Stops.events(pts, d).length, 0);
+});
+
 test("barometer heights follow the road, drop cabin pressure jumps, and take their drift from the ground", () => {
   const { Terrain } = load("route.js", "engine.js", "terrain.js");
   // 2 km north at 20 m/s, one fix a second: the road climbs 30 m over the middle kilometer. The
@@ -648,3 +670,36 @@ test("a wait with the engine off isn't idling the ideal could save", () => {
     assert.equal(Outings.group([trip(HOME, SHOP, 9), trip(SHOP, PARK, 9, 20)]).length, 1);
   });
 }
+
+test("trends add trips up by week and month, and a week's score weighs trips by their gas", () => {
+  const { Insights } = load("route.js", "engine.js", "insights.js");
+  const at = (y, m, d) => +new Date(y, m - 1, d, 9);
+  const trip = (id, ms, miles, gal, price = 3) => ({ r: { id, startedWallMs: ms }, e: { miles, fuelMiles: miles, gal, galTrip: gal, mpg: miles / gal, coverage: 1 }, gas: price ? { price } : null });
+  // 2026-11-02 is a Monday and 11-04 the Wednesday after; 10-20 is two weeks before.
+  const tr = Insights.trend([trip("a", at(2026, 10, 20), 30, 1), trip("b", at(2026, 11, 2), 20, 0.5), trip("c", at(2026, 11, 4), 20, 1), trip("d", at(2026, 11, 4), 1, 0.1, null)]);
+  assert.equal(tr.weeks.length, 3); // the empty week between is there too
+  assert.equal(tr.weeks.map((w) => w.trips).join(), "1,0,3");
+  assert.equal(tr.weeks[1].mpg, null);
+  assert.ok(Math.abs(tr.weeks[2].mpg - 41 / 1.6) < 1e-9); // miles over gallons, not an average of mpgs
+  assert.equal(tr.weeks[2].cost, null); // one trip has no gas price
+  assert.equal(tr.weeks[0].cost, 3);
+  assert.equal(tr.months.map((m) => m.trips).join(), "1,3");
+  assert.equal(tr.ranked.map((x) => x.r.id).join(), "b,a,c"); // the 1-mile hop isn't ranked
+  const figures = new Map([["b", { score: 100, gal: 0.5 }], ["c", { score: 70, gal: 1 }], ["d", null]]);
+  assert.equal(Insights.weekScore(tr.weeks[2].ids, figures), 80);
+  assert.equal(Insights.weekScore(tr.weeks[0].ids, figures), null);
+});
+
+// The same cases are checked by the server's and the phone's tests: a rule changed in one copy only fails here or there.
+test("the rules the phone and the server have copies of give the shared answers", () => {
+  const cases = JSON.parse(readFileSync(new URL("../../shared/cases.json", import.meta.url), "utf8"));
+  const { Gas } = load("route.js", "engine.js");
+  for (const [lat, lon, region] of cases.gasRegion) assert.equal(Gas.region(lat, lon), region, `${lat}, ${lon}`);
+  for (const [a, b, c, d, m] of cases.haversine) assert.ok(Math.abs(Route.haversine(a, b, c, d) - m) < 0.01, `${a}, ${b}`);
+  for (const c of cases.segmentMeters) assert.equal(Route.segmentMeters(...c.slice(0, 6)), c[6], JSON.stringify(c));
+  for (const [v, gs] of cases.fuelGs) {
+    const row = { t: 0, ...(v.fuel_rate != null ? { fuelRateLph: v.fuel_rate } : {}), ...(v.maf != null ? { maf: v.maf } : {}), ...(v.commanded_lambda != null ? { lambda: v.commanded_lambda } : {}) };
+    const got = Engine.derive([row])[0].fuelGs;
+    if (gs == null) assert.equal(got, null); else assert.ok(Math.abs(got - gs) < 1e-6, JSON.stringify(v));
+  }
+});

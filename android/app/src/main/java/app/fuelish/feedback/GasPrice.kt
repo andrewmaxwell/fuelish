@@ -54,13 +54,15 @@ object GasPrice {
         return out
     }
 
-    /** EIA's five regions, roughly by where a drive starts; outside the lower 48, the U.S. average. Same as the web app's. */
+    /** EIA's five regions, roughly by where a drive starts; outside the lower 48, the U.S. average. Same as the web app's (shared/cases.json holds both to the same answers). */
     fun region(lat: Double, lon: Double): String = when {
         lat.isNaN() || lon.isNaN() || lat < 24 || lat > 50 || lon < -125 || lon > -66 -> "us"
         lon < -114 || (lon < -109 && lat < 37) -> "west"
         lon < -102 && lat >= 37 -> "rockies"
+        lat < 37 && lon < -103 -> "gulf"
         lat < 33.5 && lon < -85 && lon > -107 -> "gulf"
         lat < 36.5 && lon < -89.5 && lon > -94.5 -> "gulf"
+        lat < 35 && lon < -85 && lon >= -89.5 -> "gulf"
         lon > -80.5 || (lon > -85 && lat < 34.5) -> "east"
         else -> "midwest"
     }

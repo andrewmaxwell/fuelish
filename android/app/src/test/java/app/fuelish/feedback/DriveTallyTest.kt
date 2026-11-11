@@ -53,4 +53,10 @@ class DriveTallyTest {
         assertEquals(3.25, latest.getDouble("rockies"), 0.0)
         assertEquals(false, latest.has("us"))
     }
+
+    @Test fun soFarShowsMpgOnceThereIsEnoughDrive() {
+        assertEquals("0.2 mi", DriveTally.soFar(0.2, 0.01))
+        assertEquals("4.2 mi", DriveTally.soFar(4.2, null))
+        assertEquals("4.2 mi · 38 mpg", DriveTally.soFar(4.2, 4.2 / 38))
+    }
 }

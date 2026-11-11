@@ -466,6 +466,32 @@ button.ghost.danger { color: var(--bad); border: 1px solid var(--border); }
 .ins-sec h3 { font-size: 14px; font-weight: 650; margin: 30px 0 6px; }
 .ins-sec h3 span { color: var(--text-2); font-weight: 500; margin-left: 6px; }
 .lede { color: var(--text-2); font-size: 14px; margin: 6px 0 16px; max-width: 66ch; }
+/* Week by week: a column per week (mpg bar, score ring, date, gas). */
+.trend { display: grid; grid-template-columns: repeat(var(--n, 12), minmax(0, 60px)); gap: 4px; }
+.trend-col { display: grid; grid-template-rows: 18px 110px 30px auto auto; justify-items: center; align-items: end; color: inherit; text-decoration: none; border-radius: 8px; padding: 4px 0; }
+.trend-col:hover, .trend-col:focus-visible { background: var(--accent-soft); }
+.trend-col b { font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.trend-col i { display: block; width: min(70%, 34px); border-radius: 5px 5px 0 0; background: var(--accent); }
+.trend-col.empty i { height: 2px !important; background: var(--border); }
+.trend-col small { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.trend-col .trend-cost { color: var(--text-2); min-height: 15px; }
+.trend-score { align-self: center; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.trend-score.good { border-color: var(--good); }
+.trend-score.ok { border-color: var(--warn); }
+.trend-score.low { border-color: var(--bad); }
+.trend-table-wrap { overflow-x: auto; }
+.trend-table { border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+.trend-table th, .trend-table td { padding: 6px 14px 6px 0; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
+.trend-table th:first-child { text-align: left; }
+.trend-table thead th { font-size: 12px; font-weight: 550; color: var(--muted); }
+.trend-table tbody th { font-weight: 600; }
+.trend-rank { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 32px; max-width: 720px; }
+@media (max-width: 560px) {
+  .trend { gap: 1px; }
+  .trend-col small { font-size: 9.5px; }
+  .trend-col b { font-size: 11.5px; }
+  .trend-score { width: 22px; height: 22px; font-size: 10px; }
+}
 .ins-chart { display: block; }
 .curve { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
 .curve-thin { stroke-dasharray: 3 5; stroke-opacity: 0.75; }
@@ -593,13 +619,17 @@ button.ghost.danger { color: var(--bad); border: 1px solid var(--border); }
 
 /* ---------- phones and narrow windows: map on top, details below ---------- */
 @media (max-width: 860px) {
-  .trip {
-    display: block; height: auto;
-  }
-  .trip-head { padding: 14px 16px 12px; }
+  /* The headline numbers and the score come before the map, and the map is under half the screen:
+     there's always page to put a thumb on, so scrolling never gets caught panning the map. */
+  .trip { display: flex; flex-direction: column; height: auto; }
+  .trip-head { padding: 14px 16px 4px; }
   .trip-head h1 { font-size: 21px; margin-top: 6px; }
-  .trip-map { height: 62dvh; border-left: 0; border-top: 1px solid var(--border); }
-  .trip-side { overflow: visible; padding: 14px 16px 32px; }
+  .trip-side { display: contents; }
+  .trip-side > * { order: 3; margin: 0 16px; }
+  .trip-side > .above-map { order: 1; }
+  .trip-side > .above-map:first-child { padding-bottom: 14px; }
+  .trip-side > :last-child { margin-bottom: 32px; }
+  .trip-map { order: 2; height: 46dvh; min-height: 260px; flex: none; border-left: 0; border-top: 1px solid var(--border); }
   .readout { top: auto; bottom: 74px; right: 8px; min-width: 150px; padding: 8px 10px; }
   .map-controls { top: 8px; left: 8px; right: 8px; max-width: none; padding: 6px; }
   .map-legend { left: 8px; bottom: 8px; }
@@ -609,6 +639,18 @@ button.ghost.danger { color: var(--bad); border: 1px solid var(--border); }
   .week { gap: 20px; }
   .week b { font-size: 19px; }
   .cards { grid-template-columns: 1fr; }
+}
+/* Phones: a trip is a row (outline beside the text), so three or four fit on a screen. */
+@media (max-width: 560px) {
+  .cards { gap: 10px; }
+  .trip-card { display: grid; grid-template-columns: 96px minmax(0, 1fr); position: relative; }
+  .trip-card .thumb { position: static; height: auto; min-height: 92px; border-bottom: 0; border-right: 1px solid var(--border); font-size: 12px; text-align: center; }
+  .trip-card-body { padding: 10px 12px 11px; align-content: center; }
+  .trip-card-title { font-size: 15px; }
+  .trip-card-stats { margin-top: 4px; gap: 0 12px; padding-right: 46px; }
+  .card-score { top: auto; bottom: 9px; right: 10px; width: 40px; height: 40px; box-shadow: none; }
+  .card-score b { font-size: 15px; }
+  .card-score small { font-size: 8px; }
 }
 @media (max-width: 600px) {
   .brand { font-size: 0; gap: 0; }
@@ -672,6 +714,8 @@ button.ghost.danger { color: var(--bad); border: 1px solid var(--border); }
 .fold > summary h2::before { content: "▸"; display: inline-block; width: 1.1em; color: var(--muted); transition: transform 0.15s; }
 .fold[open] > summary h2::before { transform: rotate(90deg); }
 .fold > summary span { font-size: 14px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* Phones: a long summary wraps under itself rather than being cut off ("85% driving · 14% i…"). */
+@media (max-width: 560px) { .fold > summary span { white-space: normal; } }
 .fold-body { padding: 0 0 16px; }
 .fold-body > :first-child { margin-top: 0; }
 .sub-line:empty { display: none; }

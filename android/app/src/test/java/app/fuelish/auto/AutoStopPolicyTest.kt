@@ -1,6 +1,8 @@
 package app.fuelish.auto
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -83,6 +85,27 @@ class AutoStopPolicyTest {
         assertNull(p.check(124 * s, "disconnected"))
         assertEquals("no_adapter", p.check(125 * s, "connecting"))
         assertNull(p.driveEndNs("no_adapter"))
+    }
+
+    @Test
+    fun aDetectedDriveInYourOwnCarIsKeptWhenTheAdapterIsSlow() {
+        // The adapter's link came up, but the car never answered it.
+        val linked = AutoStopPolicy(10 * s, 60 * s, adapterWaitNs = 120 * s)
+        assertNull(linked.check(5 * s, "connecting"))
+        assertNull(linked.check(20 * s, "waiting_vehicle"))
+        assertNull(linked.check(100 * s, "waiting_vehicle")) // no engine seen yet, so no engine-off
+        assertFalse(linked.keptWithoutEngine)
+        assertNull(linked.check(125 * s, "disconnected"))
+        assertTrue(linked.keptWithoutEngine)
+        linked.leftVehicle(900 * s)
+        assertEquals("left_vehicle", linked.check(910 * s, "disconnected"))
+
+        // The adapter never linked, but the phone is on a car stereo it's paired with.
+        val paired = AutoStopPolicy(10 * s, 60 * s, adapterWaitNs = 120 * s)
+        paired.check(0, "connecting")
+        paired.onPairedCar()
+        assertNull(paired.check(125 * s, "connecting"))
+        assertTrue(paired.keptWithoutEngine)
     }
 
     @Test

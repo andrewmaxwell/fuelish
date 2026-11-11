@@ -4,8 +4,8 @@
 // A stop's gas is what burned standing still plus the gas spent speeding back up afterwards (the
 // cost ribbon's "speeding up" lane, ribbon.js, until the car is back to the speed it had before).
 // Its time is what it lost against carrying on at that speed: slowing down, waiting, and pulling
-// away again. A trip's start and end aren't stops, and neither is anything over 5 minutes (an
-// errand or dropping someone off, not traffic).
+// away again. A trip's start and end aren't stops, nor a pause within 100 m of either, and neither is
+// anything over 5 minutes (an errand or dropping someone off, not traffic).
 
 const Stops = (() => {
   const LOOK_BACK_MS = 30000; // the speed you had: the fastest in the 30 s before stopping
@@ -13,6 +13,7 @@ const Stops = (() => {
   const BACK = 0.9; // "back up to speed": 90% of it
   const MAX_STOP_MS = 5 * 60000;
   const SAME_M = 35; // stops this close are the same place (both sides of a light, a few car lengths)
+  const PARK_M = 100; // this close to where the drive started or ended it's leaving or parking (as Places has it)
 
   /**
    * The stops of one drive, from its fixes and the ribbon's split (Ribbon.decompose):
@@ -24,8 +25,10 @@ const Stops = (() => {
     const rangeOf = (i) => ranges.find(([a, b]) => i >= a && i <= b);
     for (const s of d.stops) {
       const [a, b] = rangeOf(s.i0) ?? [0, pts.length - 1];
-      // Starting off and parking aren't stops.
+      // Starting off and parking aren't stops, and neither is a pause on the way out or in (backing
+      // out and waiting for the garage door, shuffling into a space).
       if (s.i0 <= a + 1 || s.i1 >= b - 1 || s.ms > MAX_STOP_MS) continue;
+      if ([pts[a], pts[b]].some((p) => Route.haversine(p.lat, p.lon, s.lat, s.lon) <= PARK_M)) continue;
       const t0 = pts[s.i0].t;
       let vBefore = 0, i = s.i0;
       for (let j = s.i0 - 1; j >= a && pts[j].t >= t0 - LOOK_BACK_MS; j--) vBefore = Math.max(vBefore, pts[j].v ?? 0);

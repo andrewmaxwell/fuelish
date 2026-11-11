@@ -176,11 +176,14 @@ fun SettingsScreen(close: () -> Unit) {
             FeedbackSwitch("Recording sounds", "A chime when recording starts, and a spoken alert if the adapter disconnects or never connects.", fb.optBoolean("sounds", true)) { v ->
                 update { getJSONObject("feedback").put("sounds", v) }
             }
-            FeedbackSwitch("Summary when a drive ends", "Miles, time, gallons, mpg and what the gas cost.", fb.optBoolean("summary", true)) { v ->
+            FeedbackSwitch("Summary when a drive ends", "Miles, time, gallons, mpg and what the gas cost, said when you switch the car off.", fb.optBoolean("summary", true)) { v ->
                 update { getJSONObject("feedback").put("summary", v) }
             }
             FeedbackSwitch("Car warnings", "The check engine light coming on, the engine running hot, or the battery not charging.", fb.optBoolean("warnings", true)) { v ->
                 update { getJSONObject("feedback").put("warnings", v) }
+            }
+            FeedbackSwitch("Idling tip", "At most once a drive: after three minutes idling at a standstill, what the wait has cost so far.", fb.optBoolean("tips", true)) { v ->
+                update { getJSONObject("feedback").put("tips", v) }
             }
         }
 

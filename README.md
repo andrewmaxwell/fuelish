@@ -7,7 +7,10 @@ Several people can use one server, each signed in with Google and seeing whose t
 ```
 android/   Android recorder (Kotlin, Compose). Foreground service, chunked local storage, WorkManager uploads
 server/    Cloudflare Worker: API (/api/v1/*) + serves web/ as static assets; D1 metadata, R2 chunks
-web/       Static web page: trips, maps, insights, repeated trips, costs, transmission (tests: web/test/)
+web/       Static web page: trips, maps, insights, repeated trips, costs, transmission (tests: web/test/).
+           app.js is what the pages share and the router; list.js, trip.js, many.js, pages.js and map.js are the pages
+shared/    cases.json: inputs and answers for rules that exist in more than one of web/, server/ and android/ (gas
+           region, distance, fuel from airflow). Each suite checks its copy against it; make-cases.mjs rewrites it
 tools/     dev.sh (local server), pull-prod.sh (copy production data down), publish-apk.sh (ship the app),
            fuelish.py (summarise / export a downloaded recording to CSV, stdlib only)
 docs/      data-format.md: every record type, clock and file
@@ -71,10 +74,12 @@ under the score say what each difference cost and add up to the gap.
 no phone settings, Bluetooth addresses or raw data. **Stop sharing** turns the link off.
 
 **Other pages:**
-- **Insights** (`#/insights`): every drive with engine data. Totals, fuel economy by speed and by engine temperature,
+- **Insights** (`#/insights`): every drive with engine data. Totals; the last 12 weeks side by side (mpg, gas spent and
+  the week's driving score: its trips' scores weighted by their gas), a month-by-month table, and the best and
+  thirstiest trips; fuel economy by speed and by engine temperature,
   and a grid of how the engine signals correlate, with a scatter for any pair and links to where they disagree most.
 - **Stops** (`#/stops`): every stop along every drive with engine data (lights, stop signs, traffic; not a trip's
-  start or end, nor anything over 5 minutes): the gas burned waiting plus the gas to get back up to speed, and the
+  start or end or a pause within 100 m of either, nor anything over 5 minutes): the gas burned waiting plus the gas to get back up to speed, and the
   time lost. Stops within ~35 m are one place; the map sizes each place by what it cost and colors it by the usual wait.
 - **Repeated trips** (`#/routes`): drives between the same two places (named once, for everyone) as leaderboards:
   least gas, quickest, cheapest all in, best mpg, with cold starts and thin fuel data marked. A journey driven more
@@ -257,7 +262,11 @@ adapter). After that:
   usually a minute or two into the drive, and recording starts in the background and tries the adapter. Its
   uploads wait until the engine answers through the adapter. If it doesn't within 2 minutes
   (`auto.adapterWaitS`), it wasn't a car with the adapter in it (someone else's car, a bus): the recording is
-  deleted, never uploaded. So moving the adapter to another car just works. Android allows a background start on
+  deleted, never uploaded, and a quiet notification says so if the phone drove anywhere. So moving the adapter
+  to another car just works. Two things keep the drive anyway, recorded from the phone alone, with a spoken
+  "can't reach the adapter": the adapter's Bluetooth link came up (it's in this car; the car just isn't
+  answering it), or the phone is connected to a car stereo it's paired with (so it's your car, and the adapter is
+  the problem). Android allows a background start on
   an activity-transition event; the registration is renewed at app start, after a reboot and after an update.
 - **Start, with the car's Bluetooth** (optional with an adapter, required without one): pick the car's entry
   (not the OBD adapter) and recording starts as soon as the phone connects, so the start of the drive isn't
@@ -282,8 +291,13 @@ pausing it), so nothing needs a glance. Settings → **During a drive** has a sw
   and a spoken alert if the adapter never connects 90 s into a moving drive, or drops for 20 s while moving
   (and again when it's back). A drop after the car stopped answering is the car switching off, not a problem.
 - **Summary when a drive ends:** miles, time, gallons, mpg and the gas cost at the latest regional average price.
+  Said when the car is switched off (the engine stops answering the adapter and the phone is standing still, or
+  the car's Bluetooth goes), not when the recording stops a while later, so you're still in the seat. A recording
+  you stop yourself, or one without an adapter, says it when it stops.
 - **Car warnings:** the check-engine light coming on (not every drive while it stays on), coolant at 113 °C
   (235 °F) or more for 30 s, under 12.0 V for a minute with the engine running.
+- **Idling tip:** at most once a drive, after three minutes idling at a standstill in one go: how long, and
+  what the wait has cost so far. Nothing is said about how you drive while the car is moving.
 
 What was said is in the data as `feedback` events.
 
@@ -345,17 +359,17 @@ python3 tools/fuelish.py export recording.ndjson.gz out/
 
 ## What has been tested
 
-- **Worker** (57 tests in the Workers runtime, `cd server && npm test`): token scopes, metadata-before-chunks,
+- **Worker** (59 tests in the Workers runtime, `cd server && npm test`): token scopes, metadata-before-chunks,
   idempotent re-upload, sha mismatch and conflicting content rejected, missing-chunk detection, completeness,
   signed-link download = exact concatenation, device-id ownership; Google sign-in, invites, people and phones,
   signing in again after a session ends; share links, prefs, app updates, deleting; input checks on metadata and
   chunk tracks, trip summaries and route outlines; VIN lookups.
-- **Web** (53 tests, `node --test web/test/*.test.mjs`): the analysis math (route distance, fuel, costs, repeated trips).
-- **Android JVM tests** (90, `./gradlew testDebugUnitTest`): JSON escaping; chunk rotation with every record
+- **Web** (56 tests, `node --test web/test/*.test.mjs`): the analysis math (route distance, fuel, costs, repeated trips).
+- **Android JVM tests** (102, `./gradlew testDebugUnitTest`): JSON escaping; chunk rotation with every record
   accounted for; crash recovery; ELM/CAN parsing (single + ISO-TP multi-frame); multi-PID splitting and SAE decoding;
   the read-only allowlist; scheduler fairness; auto-stop rules (disconnect grace period, brief drops, engine-off,
-  adapter trouble never stops, a detected drive without the adapter, leaving the vehicle); what's said during a
-  drive and the end-of-drive summary; naming trips by VIN; uploader resume after errors, lost-ack duplicates, bad token, live recordings. The OBD
+  adapter trouble never stops, a detected drive without the adapter or with a slow one, leaving the vehicle); what's said during a
+  drive, the end-of-drive summary and when it's said; naming trips by VIN; uploader resume after errors, lost-ack duplicates, bad token, live recordings. The OBD
   recorder also runs end to end against a fake ELM327/STN adapter: discovery, VIN, benchmark finding the multi-PID
   limit, ignition-off wait then recovery, reconnect after a dropped link.
 - **Emulator (Pixel 9 Pro profile, Android 16)** against local `wrangler dev`: recording with the screen locked,

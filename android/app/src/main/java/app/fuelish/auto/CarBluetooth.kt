@@ -117,6 +117,21 @@ object CarBluetooth {
         Prefs.setAutoSuggestion(c, car.name ?: "your car", car.address)
     }
 
+    /**
+     * The phone is connected to a car stereo right now. A phone only connects to things it's paired
+     * with, so that's a car of the driver's own, not a friend's or a bus.
+     */
+    @SuppressLint("MissingPermission")
+    fun onPairedCar(c: Context): Boolean {
+        if (c.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return false
+        val adapter = c.getSystemService(BluetoothManager::class.java)?.adapter ?: return false
+        val obd = Prefs.config(c).obd.optString("deviceAddress")
+        return Prefs.btConnected(c).any { addr ->
+            !addr.equals(obd, ignoreCase = true) &&
+                runCatching { looksLikeCar(adapter.getRemoteDevice(addr.uppercase())) }.getOrDefault(false)
+        }
+    }
+
     /** Location in a service started from the background needs "Allow all the time". */
     fun canStartInBackground(c: Context) =
         listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_BACKGROUND_LOCATION)

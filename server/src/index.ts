@@ -647,7 +647,7 @@ export function segmentMeters(dtMs: number, d: number, v0?: number | null, v1?: 
   return d > Math.max(acc0 ?? 0, acc1 ?? 0, 10) ? d : 0;
 }
 
-function haversine(la1: number, lo1: number, la2: number, lo2: number): number {
+export function haversine(la1: number, lo1: number, la2: number, lo2: number): number {
   const r = Math.PI / 180, dLa = (la2 - la1) * r, dLo = (lo2 - lo1) * r;
   const a = Math.sin(dLa / 2) ** 2 + Math.cos(la1 * r) * Math.cos(la2 * r) * Math.sin(dLo / 2) ** 2;
   return 2 * 6_371_000 * Math.asin(Math.sqrt(a));

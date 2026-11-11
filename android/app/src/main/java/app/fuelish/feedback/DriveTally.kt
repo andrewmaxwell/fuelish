@@ -55,8 +55,8 @@ class DriveTally {
     companion object {
         private const val MAX_ACCURACY_M = 30.0
         private const val M_PER_MILE = 1609.344
-        private const val FUEL_G_PER_L = 745.0
-        private const val L_PER_GAL = 3.78541
+        const val FUEL_G_PER_L = 745.0
+        const val L_PER_GAL = 3.78541
         private const val AFR = 14.08
 
         fun fuelGs(v: Map<String, Double>): Double? {
@@ -89,6 +89,12 @@ class DriveTally {
                 parts += "$s."
             }
             return parts.joinToString(" ")
+        }
+
+        /** The drive so far in a few words for the screen: "4.2 mi · 38 mpg" (mpg once there's enough to say). */
+        fun soFar(miles: Double, gallons: Double?): String {
+            val mpg = if (gallons != null && gallons > 0 && miles >= 0.5) " · ${(miles / gallons).roundToInt()} mpg" else ""
+            return "${fmt1(miles)} mi$mpg"
         }
 
         private fun fmt1(x: Double) = String.format(Locale.US, "%.1f", x)

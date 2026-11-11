@@ -440,12 +440,15 @@ const Gas = (() => {
   const load = () => (data ||= fetch("/api/v1/gas-prices").then((r) => (r.ok ? r.json() : null)).catch(() => null));
 
   // EIA's five regions (PADDs), roughly by where a trip starts. Outside the lower 48: the U.S. average.
+  // The phone has its own copy (GasPrice.kt); shared/cases.json holds both to the same answers.
   function region(lat, lon) {
     if (lat == null || lon == null || lat < 24 || lat > 50 || lon < -125 || lon > -66) return "us";
     if (lon < -114 || (lon < -109 && lat < 37)) return "west";
     if (lon < -102 && lat >= 37) return "rockies";
+    if (lat < 37 && lon < -103) return "gulf"; // New Mexico, El Paso
     if (lat < 33.5 && lon < -85 && lon > -107) return "gulf";
     if (lat < 36.5 && lon < -89.5 && lon > -94.5) return "gulf"; // Arkansas, Louisiana, Mississippi
+    if (lat < 35 && lon < -85 && lon >= -89.5) return "gulf"; // Alabama, eastern Mississippi
     if (lon > -80.5 || (lon > -85 && lat < 34.5)) return "east";
     return "midwest";
   }

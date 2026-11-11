@@ -189,158 +189,59 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
             }
         }
 
+        // One function per step, below (serverStep … activityStep).
         val steps = buildList {
-            if (cfg.serverUrl.isBlank()) {
-                add(Step(false, "Upload server", "", "Where recordings are sent.", "Set up", openSettings))
-            } else {
-                add(Step(
-                    ready.signedIn, if (ready.signInNeeded) "Sign in again" else "Sign in", Prefs.uploadTarget(ctx).accountName ?: "Signed in",
-                    signInError.ifEmpty {
-                        if (ready.signInNeeded) "The server stopped accepting this phone's uploads (it was signed out or removed on the Account page). " +
-                            "Sign in again to resume. Recordings on this phone are kept and upload afterward."
-                        else "Use the Google account you were invited with. Your drives upload as yours and show up on the Trips page."
-                    },
-                    if (signingIn) null else "Sign in with Google",
-                    {
-                        signingIn = true
-                        signInError = ""
-                        signIn { err ->
-                            signingIn = false
-                            signInError = err.orEmpty()
-                            refresh++
-                        }
-                    },
-                ))
-            }
-            add(Step(
-                missing.isEmpty(), "Permissions", "Location, nearby devices and notifications",
-                "Location maps each drive. Nearby devices lets Fuelish talk to the OBD adapter. Notifications show while a drive is recording." +
-                    if (askedPerms && missing.isNotEmpty()) " Still needed: ${missing.map(::permissionLabel).distinct().joinToString(", ")}." else "",
-                "Allow", { askedPerms = true; permLauncher.launch(PERMISSIONS) },
-                extra = if (askedPerms && missing.isNotEmpty()) {
-                    {
-                        TextButton(onClick = {
-                            ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName)))
-                        }) { Text("Android stopped asking? Open Fuelish's settings") }
+            add(
+                if (cfg.serverUrl.isBlank()) serverStep(openSettings)
+                else signInStep(ready, Prefs.uploadTarget(ctx).accountName, signingIn, signInError) {
+                    signingIn = true
+                    signInError = ""
+                    signIn { err ->
+                        signingIn = false
+                        signInError = err.orEmpty()
+                        refresh++
                     }
-                } else null,
-            ))
-            if (!obdChosen) {
-                add(Step(
-                    skippedAdapter, "OBD adapter", "None: phone sensors only",
-                    pairProblem.ifEmpty {
-                        "Plug the adapter into the port under the steering wheel, turn the car on, and press the adapter's button. " +
-                            "It reads the engine, for real fuel numbers."
-                    },
-                    "Find adapter", { pairProblem = ""; pair() },
-                    skip = "I don't have one" to { Prefs.setSkippedAdapter(ctx, true); refresh++ },
-                ))
-            } else {
-                // Choosing it isn't proof it works: a parked test confirms the adapter and the car answer.
-                val name = cfg.obd.optString("deviceName").ifBlank { "the adapter" }
-                val tested = Prefs.adapterChecked(ctx).equals(obdAddr, ignoreCase = true)
-                add(Step(
-                    ready.adapterDone, "OBD adapter", if (tested) "$name · tested" else "$name · not tested yet",
-                    "With the car on (engine running is best), test $name: Fuelish checks that the adapter and the car answer and which fuel readings the car gives.",
-                    if (testing) null else if (test == null) "Test connection" else "Test again", ::runTest,
-                    skip = if (testing) null else "Test on my first drive" to { Prefs.setAdapterTestSkipped(ctx, obdAddr); refresh++ },
-                    extra = {
-                        if (testing) Muted("Testing… this takes up to 20 seconds.", Modifier.padding(top = 8.dp))
-                        test?.let { AdapterResult(it) }
-                        if (!testing && test?.ok != true) {
-                            TextButton(onClick = { pairProblem = ""; test = null; pair() }) { Text("Choose a different adapter") }
-                            if (pairProblem.isNotEmpty()) Muted(pairProblem)
-                        }
-                    },
-                ))
-            }
-            add(Step(
-                batteryOk, "Battery", "Unrestricted",
-                "So Android doesn't stop a recording or an upload while the screen is off.",
-                "Allow",
-                {
-                    @SuppressLint("BatteryLife")
-                    val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))
-                    ctx.startActivity(i)
                 },
-            ))
-            if (!obdChosen) {
-                add(Step(
-                    cfg.vehicle.isNotBlank(), "Vehicle", cfg.vehicle,
-                    "Year, make and model. It sets the weight and the fuel rating your drives are compared with.",
-                    null, {},
-                    extra = {
-                        var typed by remember { mutableStateOf("") }
-                        OutlinedTextField(
-                            typed, { typed = it }, Modifier.fillMaxWidth().padding(top = 8.dp), singleLine = true,
-                            label = { Text("Like \"2019 Ram 1500\"") },
-                        )
-                        Button(onClick = { save { put("vehicle", typed.trim()).put("vehicleVin", "") } }, enabled = typed.isNotBlank()) { Text("Save") }
-                    },
-                ))
-            }
-            add(Step(
-                ready.modeChosen, "How recording starts",
-                if (autoOn) "By itself, $startsWhen" else "You tap Start and Stop",
-                if (pickingCar) "Which one is your car? Pick what your phone connects to in the car."
-                else if (obdChosen) "Fuelish can notice when you start driving, record from the adapter, and stop after you park. " +
-                    "It takes a minute or two to notice. Or you can start and stop each drive yourself."
-                else "Fuelish can start recording by itself when your phone connects to the car's Bluetooth (for music or calls), and stop after you park. " +
-                    "Or you can start and stop each drive yourself.",
-                if (pickingCar) null else "Automatically",
-                {
+            )
+            add(permissionsStep(missing, askedPerms) { askedPerms = true; permLauncher.launch(PERMISSIONS) })
+            add(
+                if (!obdChosen) findAdapterStep(
+                    skippedAdapter, pairProblem,
+                    find = { pairProblem = ""; pair() },
+                    skip = { Prefs.setSkippedAdapter(ctx, true); refresh++ },
+                ) else testAdapterStep(
+                    ready.adapterDone, cfg.obd.optString("deviceName").ifBlank { "the adapter" },
+                    tested = Prefs.adapterChecked(ctx).equals(obdAddr, ignoreCase = true),
+                    testing = testing, result = test, pairProblem = pairProblem,
+                    runTest = ::runTest,
+                    testLater = { Prefs.setAdapterTestSkipped(ctx, obdAddr); refresh++ },
+                    chooseOther = { pairProblem = ""; test = null; pair() },
+                ),
+            )
+            add(batteryStep(batteryOk) {
+                @SuppressLint("BatteryLife")
+                val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))
+                ctx.startActivity(i)
+            })
+            if (!obdChosen) add(vehicleStep(cfg.vehicle) { name -> save { put("vehicle", name).put("vehicleVin", "") } })
+            add(startModeStep(
+                ready.modeChosen, autoOn, startsWhen, obdChosen, pickingCar, bonded,
+                automatic = {
                     if (obdChosen) {
                         save { getJSONObject("auto").put("enabled", true) }
                         Prefs.setRecordMode(ctx, "auto")
                     } else pickingCar = true
                 },
-                skip = if (pickingCar) "Back" to { pickingCar = false } else "I'll start and stop it myself" to { Prefs.setRecordMode(ctx, "manual"); refresh++ },
-                extra = if (!pickingCar) null else {
-                    {
-                        bonded.forEach { (name, addr) ->
-                            RadioRow(false, name, null) {
-                                save { getJSONObject("auto").put("enabled", true).put("carAddress", addr).put("carName", name) }
-                                Prefs.setRecordMode(ctx, "auto")
-                                pickingCar = false
-                            }
-                        }
-                        Muted(if (bonded.isEmpty()) "Your phone isn't paired with anything yet. " else "Not listed? " +
-                            "Pair the phone with the car in Bluetooth settings (the car's screen walks you through it), then come back.")
-                        TextButton(onClick = { ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }) { Text("Bluetooth settings") }
-                    }
+                pickCar = { name, addr ->
+                    save { getJSONObject("auto").put("enabled", true).put("carAddress", addr).put("carName", name) }
+                    Prefs.setRecordMode(ctx, "auto")
+                    pickingCar = false
                 },
+                back = { pickingCar = false },
+                manual = { Prefs.setRecordMode(ctx, "manual"); refresh++ },
             ))
-            if (autoOn) {
-                add(Step(
-                    bgLocationOk, "Location all the time", "Allowed",
-                    "Choose \"Allow all the time\" so recording can start by itself while the phone is in your pocket.",
-                    "Allow", { bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) },
-                    // Android stops showing the request after it's been turned down; settings always works.
-                    extra = if (askedBg && !bgLocationOk) {
-                        {
-                            Muted("In Fuelish's settings, tap Permissions › Location › Allow all the time.", Modifier.padding(top = 8.dp))
-                            TextButton(onClick = {
-                                ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName)))
-                            }) { Text("Open Fuelish's settings") }
-                        }
-                    } else null,
-                ))
-            }
-            if (detects) {
-                add(Step(
-                    ready.activity, "Physical activity", "Allowed",
-                    "Lets Fuelish notice when you start driving, so recording starts without a tap.",
-                    "Allow", { activityLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION) },
-                    extra = if (askedActivity && !ready.activity) {
-                        {
-                            Muted("In Fuelish's settings, tap Permissions › Physical activity › Allow.", Modifier.padding(top = 8.dp))
-                            TextButton(onClick = {
-                                ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName)))
-                            }) { Text("Open Fuelish's settings") }
-                        }
-                    } else null,
-                ))
-            }
+            if (autoOn) add(backgroundLocationStep(bgLocationOk, askedBg) { bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) })
+            if (detects) add(activityStep(ready.activity, askedActivity) { activityLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION) })
         }
         val current = steps.indexOfFirst { !it.done }
         val setupDone = current < 0
@@ -362,78 +263,234 @@ fun MainScreen(openSettings: () -> Unit, showTrips: () -> Unit, signIn: (done: (
         }
         // After a drive with the car's Bluetooth connected: one tap to record every drive by itself.
         if (suggestion != null && carName.isBlank() && !st.recording) {
-            Section(if (autoOn) "Start recording sooner?" else "Record every drive automatically?") {
-                Text(
-                    if (autoOn) "Your phone was connected to ${suggestion.first} on that drive. Fuelish can start recording as soon as it connects, " +
-                        "instead of a minute or two into the drive."
-                    else "Your phone was connected to ${suggestion.first} on that drive. Fuelish can start recording whenever it connects, and stop after you park.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Button(onClick = {
-                        save { getJSONObject("auto").put("enabled", true).put("carAddress", suggestion.second).put("carName", suggestion.first) }
-                        Prefs.answerAutoSuggestion(ctx, true)
-                        Prefs.setRecordMode(ctx, "auto")
-                        if (!bgLocationOk) bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                    }) { Text(if (autoOn) "Yes, start sooner" else "Yes, record automatically") }
-                    TextButton(onClick = { Prefs.answerAutoSuggestion(ctx, false); refresh++ }) { Text("No thanks") }
-                }
-            }
+            CarSuggestion(
+                suggestion.first, autoOn,
+                yes = {
+                    save { getJSONObject("auto").put("enabled", true).put("carAddress", suggestion.second).put("carName", suggestion.first) }
+                    Prefs.answerAutoSuggestion(ctx, true)
+                    Prefs.setRecordMode(ctx, "auto")
+                    if (!bgLocationOk) bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                },
+                no = { Prefs.answerAutoSuggestion(ctx, false); refresh++ },
+            )
         }
 
         if (!setupDone && !st.recording) IdleCard(locationOk, autoOn, carName, st.stopping, openSettings)
         if (st.recording) LiveDetails(st)
 
-        Section("Uploads") {
-            // Waiting covers chunks still to send and finished trips the server hasn't confirmed yet
-            // (final details or the completeness check), not just chunk files.
-            val waiting = up.waiting
-            val uploadsOn = cfg.upload.optBoolean("enabled", true)
-            val what = listOfNotNull(
-                if (up.pending > 0) "${up.pending} chunk${if (up.pending == 1) "" else "s"}" else null,
-                if (up.pending == 0 && up.unconfirmed > 0) "${up.unconfirmed} trip${if (up.unconfirmed == 1) "" else "s"} to finish" else null,
-            ).joinToString()
-            Text(
-                when {
-                    !waiting -> "Everything is on the server"
-                    !uploadsOn -> "$what recorded on this phone; uploads are turned off"
-                    ready.signInNeeded -> "$what will upload after you sign in again"
-                    !serverOk -> "$what will upload once the server is set up"
-                    up.running -> "Uploading $what…"
-                    onWifi || cfg.upload.optBoolean("mobileData", true) -> "$what waiting to upload"
-                    else -> "$what waiting for Wi-Fi"
-                },
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            if (up.attention.isNotEmpty()) {
-                Text(
-                    "The server is missing parts of ${up.attention.size} trip${if (up.attention.size == 1) "" else "s"} that this phone no longer has: " +
-                        up.attention.entries.joinToString("; ") { (id, seqs) -> "$id (part${if (seqs.size == 1) "" else "s"} ${seqs.joinToString(", ")})" } +
-                        ". Those parts can't be recovered; the rest of each trip stays on this phone.",
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-            if (serverOk) {
-                val target = remember(refresh) { Prefs.uploadTarget(ctx) }
-                Muted("Uploads as ${target.accountName ?: "this phone's signed-in account"}. Signing out of the Trips page doesn't change that; signing in as someone else does.")
-            }
-            if (up.held.isNotEmpty()) HeldTrips(up.held) { refresh++ }
-            if (up.lastResult.isNotEmpty()) {
-                Muted("Last upload: " + up.lastResult + " (" + DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(up.lastAtMs)) + ")")
-            }
-            Muted("On this phone: ${mb(storage)}." + if (cfg.upload.optBoolean("deleteAfterUpload", true)) " Deleted once the server confirms it has everything." else " Kept after upload (keep-local-copy is on).")
-            if (waiting && ready.signedIn && uploadsOn) {
-                Spacer(Modifier.height(4.dp))
-                OutlinedButton(onClick = { UploadWorker.enqueue(ctx, cellular = true) }) {
-                    Text(if (onWifi || cfg.upload.optBoolean("mobileData", true)) "Upload now" else "Upload now over mobile data")
-                }
-            }
-        }
+        UploadsSection(cfg, up, ready, serverOk, onWifi, storage, refresh) { refresh++ }
         Spacer(Modifier.height(24.dp))
     }
 }
+
+/** What's waiting to upload and why, who it uploads as, and how much is stored on the phone. */
+@Composable
+private fun UploadsSection(
+    cfg: app.fuelish.Config, up: app.fuelish.UploadStatus, ready: Readiness, serverOk: Boolean, onWifi: Boolean,
+    storage: Long, refresh: Int, changed: () -> Unit,
+) {
+    val ctx = LocalContext.current
+    Section("Uploads") {
+        // Waiting covers chunks still to send and finished trips the server hasn't confirmed yet
+        // (final details or the completeness check), not just chunk files.
+        val waiting = up.waiting
+        val uploadsOn = cfg.upload.optBoolean("enabled", true)
+        val what = listOfNotNull(
+            if (up.pending > 0) "${up.pending} chunk${if (up.pending == 1) "" else "s"}" else null,
+            if (up.pending == 0 && up.unconfirmed > 0) "${up.unconfirmed} trip${if (up.unconfirmed == 1) "" else "s"} to finish" else null,
+        ).joinToString()
+        Text(
+            when {
+                !waiting -> "Everything is on the server"
+                !uploadsOn -> "$what recorded on this phone; uploads are turned off"
+                ready.signInNeeded -> "$what will upload after you sign in again"
+                !serverOk -> "$what will upload once the server is set up"
+                up.running -> "Uploading $what…"
+                onWifi || cfg.upload.optBoolean("mobileData", true) -> "$what waiting to upload"
+                else -> "$what waiting for Wi-Fi"
+            },
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        if (up.attention.isNotEmpty()) {
+            Text(
+                "The server is missing parts of ${up.attention.size} trip${if (up.attention.size == 1) "" else "s"} that this phone no longer has: " +
+                    up.attention.entries.joinToString("; ") { (id, seqs) -> "$id (part${if (seqs.size == 1) "" else "s"} ${seqs.joinToString(", ")})" } +
+                    ". Those parts can't be recovered; the rest of each trip stays on this phone.",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        if (serverOk) {
+            val target = remember(refresh) { Prefs.uploadTarget(ctx) }
+            Muted("Uploads as ${target.accountName ?: "this phone's signed-in account"}. Signing out of the Trips page doesn't change that; signing in as someone else does.")
+        }
+        if (up.held.isNotEmpty()) HeldTrips(up.held, changed)
+        if (up.lastResult.isNotEmpty()) {
+            Muted("Last upload: " + up.lastResult + " (" + DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(up.lastAtMs)) + ")")
+        }
+        Muted("On this phone: ${mb(storage)}." + if (cfg.upload.optBoolean("deleteAfterUpload", true)) " Deleted once the server confirms it has everything." else " Kept after upload (keep-local-copy is on).")
+        if (waiting && ready.signedIn && uploadsOn) {
+            Spacer(Modifier.height(4.dp))
+            OutlinedButton(onClick = { UploadWorker.enqueue(ctx, cellular = true) }) {
+                Text(if (onWifi || cfg.upload.optBoolean("mobileData", true)) "Upload now" else "Upload now over mobile data")
+            }
+        }
+    }
+}
+
+/** After a drive with a car stereo connected: offer to start recording whenever the phone connects to it. */
+@Composable
+private fun CarSuggestion(car: String, autoOn: Boolean, yes: () -> Unit, no: () -> Unit) {
+    Section(if (autoOn) "Start recording sooner?" else "Record every drive automatically?") {
+        Text(
+            if (autoOn) "Your phone was connected to $car on that drive. Fuelish can start recording as soon as it connects, " +
+                "instead of a minute or two into the drive."
+            else "Your phone was connected to $car on that drive. Fuelish can start recording whenever it connects, and stop after you park.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Button(onClick = yes) { Text(if (autoOn) "Yes, start sooner" else "Yes, record automatically") }
+            TextButton(onClick = no) { Text("No thanks") }
+        }
+    }
+}
+
+/** Android stops showing a permission request once it's been turned down; the app's settings page always works. */
+@Composable
+private fun OpenAppSettings(label: String = "Open Fuelish's settings") {
+    val ctx = LocalContext.current
+    TextButton(onClick = {
+        ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName)))
+    }) { Text(label) }
+}
+
+// ---------- the setup steps, in order ----------
+
+private fun serverStep(openSettings: () -> Unit) = Step(false, "Upload server", "", "Where recordings are sent.", "Set up", openSettings)
+
+private fun signInStep(ready: Readiness, account: String?, signingIn: Boolean, error: String, signIn: () -> Unit) = Step(
+    ready.signedIn, if (ready.signInNeeded) "Sign in again" else "Sign in", account ?: "Signed in",
+    error.ifEmpty {
+        if (ready.signInNeeded) "The server stopped accepting this phone's uploads (it was signed out or removed on the Account page). " +
+            "Sign in again to resume. Recordings on this phone are kept and upload afterward."
+        else "Use the Google account you were invited with. Your drives upload as yours and show up on the Trips page."
+    },
+    if (signingIn) null else "Sign in with Google", signIn,
+)
+
+private fun permissionsStep(missing: List<String>, asked: Boolean, allow: () -> Unit) = Step(
+    missing.isEmpty(), "Permissions", "Location, nearby devices and notifications",
+    "Location maps each drive. Nearby devices lets Fuelish talk to the OBD adapter. Notifications show while a drive is recording." +
+        if (asked && missing.isNotEmpty()) " Still needed: ${missing.map(::permissionLabel).distinct().joinToString(", ")}." else "",
+    "Allow", allow,
+    extra = if (asked && missing.isNotEmpty()) {
+        { OpenAppSettings("Android stopped asking? Open Fuelish's settings") }
+    } else null,
+)
+
+/** No adapter chosen yet. It can be skipped: phone sensors alone make a trip. */
+private fun findAdapterStep(skipped: Boolean, pairProblem: String, find: () -> Unit, skip: () -> Unit) = Step(
+    skipped, "OBD adapter", "None: phone sensors only",
+    pairProblem.ifEmpty {
+        "Plug the adapter into the port under the steering wheel, turn the car on, and press the adapter's button. " +
+            "It reads the engine, for real fuel numbers."
+    },
+    "Find adapter", find,
+    skip = "I don't have one" to skip,
+)
+
+/** Choosing an adapter isn't proof it works: a parked test confirms the adapter and the car answer. */
+private fun testAdapterStep(
+    done: Boolean, name: String, tested: Boolean, testing: Boolean, result: AdapterCheck.Result?, pairProblem: String,
+    runTest: () -> Unit, testLater: () -> Unit, chooseOther: () -> Unit,
+) = Step(
+    done, "OBD adapter", if (tested) "$name · tested" else "$name · not tested yet",
+    "With the car on (engine running is best), test $name: Fuelish checks that the adapter and the car answer and which fuel readings the car gives.",
+    if (testing) null else if (result == null) "Test connection" else "Test again", runTest,
+    skip = if (testing) null else "Test on my first drive" to testLater,
+    extra = {
+        if (testing) Muted("Testing… this takes up to 20 seconds.", Modifier.padding(top = 8.dp))
+        result?.let { AdapterResult(it) }
+        if (!testing && result?.ok != true) {
+            TextButton(onClick = chooseOther) { Text("Choose a different adapter") }
+            if (pairProblem.isNotEmpty()) Muted(pairProblem)
+        }
+    },
+)
+
+private fun batteryStep(ok: Boolean, allow: () -> Unit) = Step(
+    ok, "Battery", "Unrestricted",
+    "So Android doesn't stop a recording or an upload while the screen is off.",
+    "Allow", allow,
+)
+
+/** Typed only without an adapter: with one, the first drive names the vehicle from its VIN. */
+private fun vehicleStep(vehicle: String, save: (String) -> Unit) = Step(
+    vehicle.isNotBlank(), "Vehicle", vehicle,
+    "Year, make and model. It sets the weight and the fuel rating your drives are compared with.",
+    null, {},
+    extra = {
+        var typed by remember { mutableStateOf("") }
+        OutlinedTextField(
+            typed, { typed = it }, Modifier.fillMaxWidth().padding(top = 8.dp), singleLine = true,
+            label = { Text("Like \"2019 Ram 1500\"") },
+        )
+        Button(onClick = { save(typed.trim()) }, enabled = typed.isNotBlank()) { Text("Save") }
+    },
+)
+
+/**
+ * Automatic or manual. With an adapter, automatic means noticing the drive; without one it means
+ * the car's Bluetooth, picked from [bonded] (name to address) while [pickingCar].
+ */
+private fun startModeStep(
+    done: Boolean, autoOn: Boolean, startsWhen: String, obdChosen: Boolean, pickingCar: Boolean, bonded: List<Pair<String, String>>,
+    automatic: () -> Unit, pickCar: (name: String, address: String) -> Unit, back: () -> Unit, manual: () -> Unit,
+) = Step(
+    done, "How recording starts",
+    if (autoOn) "By itself, $startsWhen" else "You tap Start and Stop",
+    if (pickingCar) "Which one is your car? Pick what your phone connects to in the car."
+    else if (obdChosen) "Fuelish can notice when you start driving, record from the adapter, and stop after you park. " +
+        "It takes a minute or two to notice. Or you can start and stop each drive yourself."
+    else "Fuelish can start recording by itself when your phone connects to the car's Bluetooth (for music or calls), and stop after you park. " +
+        "Or you can start and stop each drive yourself.",
+    if (pickingCar) null else "Automatically", automatic,
+    skip = if (pickingCar) "Back" to back else "I'll start and stop it myself" to manual,
+    extra = if (!pickingCar) null else {
+        {
+            val ctx = LocalContext.current
+            bonded.forEach { (name, addr) -> RadioRow(false, name, null) { pickCar(name, addr) } }
+            Muted((if (bonded.isEmpty()) "Your phone isn't paired with anything yet. " else "Not listed? ") +
+                "Pair the phone with the car in Bluetooth settings (the car's screen walks you through it), then come back.")
+            TextButton(onClick = { ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }) { Text("Bluetooth settings") }
+        }
+    },
+)
+
+private fun backgroundLocationStep(ok: Boolean, asked: Boolean, allow: () -> Unit) = Step(
+    ok, "Location all the time", "Allowed",
+    "Choose \"Allow all the time\" so recording can start by itself while the phone is in your pocket.",
+    "Allow", allow,
+    extra = if (asked && !ok) {
+        {
+            Muted("In Fuelish's settings, tap Permissions › Location › Allow all the time.", Modifier.padding(top = 8.dp))
+            OpenAppSettings()
+        }
+    } else null,
+)
+
+private fun activityStep(ok: Boolean, asked: Boolean, allow: () -> Unit) = Step(
+    ok, "Physical activity", "Allowed",
+    "Lets Fuelish notice when you start driving, so recording starts without a tap.",
+    "Allow", allow,
+    extra = if (asked && !ok) {
+        {
+            Muted("In Fuelish's settings, tap Permissions › Physical activity › Allow.", Modifier.padding(top = 8.dp))
+            OpenAppSettings()
+        }
+    } else null,
+)
 
 /**
  * Trips recorded under another account (or for another server), or refused by the server as
@@ -538,7 +595,11 @@ private fun RecordingCard(st: app.fuelish.RecorderStatus) {
         Text(
             elapsed((now - st.startedElapsedNs) / 1_000_000_000),
             style = MaterialTheme.typography.displayMedium.copy(fontFeatureSettings = "tnum"), // digits don't jitter
-            modifier = Modifier.padding(vertical = 8.dp),
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        Text(
+            app.fuelish.feedback.DriveTally.soFar(st.miles, st.gallons) + " so far",
+            style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(bottom = 8.dp),
         )
         val acc = st.sensorRates["s:acc"]?.let { "%.0f Hz".format(it) } ?: "–"
         val bad = MaterialTheme.colorScheme.error

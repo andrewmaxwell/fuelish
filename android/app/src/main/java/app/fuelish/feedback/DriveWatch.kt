@@ -17,10 +17,15 @@ import java.util.Locale
  * - Under [LOW_VOLTS] for 60 s with the engine running: the battery is discharging, so the car isn't
  *   charging it. Some cars let charging voltage dip to about 12.5 V to save fuel, so the line is lower.
  *
+ * - One tip, at most once a drive: the engine has idled at a standstill for [IDLE_NS] in one go (a
+ *   pick-up line, a train crossing; never a red light). Its value is the gallons that wait has burned,
+ *   so the words can say what it's costing. Nothing is ever said about how the car is being driven
+ *   while it's moving.
+ *
  * Engine values count only while the engine is answering; the last reading of a gone link isn't news.
  */
 class DriveWatch(private val expectAdapter: Boolean, milWasOn: Boolean) {
-    enum class Kind { ADAPTER_NOT_CONNECTING, ADAPTER_LOST, ADAPTER_BACK, CHECK_ENGINE, ENGINE_HOT, NOT_CHARGING }
+    enum class Kind { ADAPTER_NOT_CONNECTING, ADAPTER_LOST, ADAPTER_BACK, CHECK_ENGINE, ENGINE_HOT, NOT_CHARGING, LONG_IDLE }
     data class Cue(val kind: Kind, val value: Double? = null)
 
     /** The check-engine light as last read; persist it so the next drive compares with it. */
@@ -36,6 +41,10 @@ class DriveWatch(private val expectAdapter: Boolean, milWasOn: Boolean) {
     private var hotSaid = false
     private var lowSinceNs = UNSET
     private var lowSaid = false
+    private var idleSinceNs = UNSET
+    private var idleLastNs = 0L
+    private var idleGrams = 0.0
+    private var idleSaid = false
 
     /**
      * [values]: the engine ECU's latest numbers by field name. [adapterVolts]: the adapter's own
@@ -98,6 +107,18 @@ class DriveWatch(private val expectAdapter: Boolean, milWasOn: Boolean) {
                 out += Cue(Kind.NOT_CHARGING, volts)
             }
         } else lowSinceNs = UNSET
+
+        if (values["speed"] == 0.0 && !moving && rpm != null && rpm >= 400) {
+            if (idleSinceNs == UNSET) {
+                idleSinceNs = nowNs
+                idleGrams = 0.0
+            } else idleGrams += (DriveTally.fuelGs(values) ?: 0.0) * ((nowNs - idleLastNs) / 1e9).coerceAtMost(3.0)
+            idleLastNs = nowNs
+            if (!idleSaid && nowNs - idleSinceNs >= IDLE_NS) {
+                idleSaid = true
+                out += Cue(Kind.LONG_IDLE, idleGrams / DriveTally.FUEL_G_PER_L / DriveTally.L_PER_GAL)
+            }
+        } else idleSinceNs = UNSET
         return out
     }
 
@@ -112,12 +133,21 @@ class DriveWatch(private val expectAdapter: Boolean, milWasOn: Boolean) {
         const val HOT_NS = 30 * S
         const val LOW_VOLTS = 12.0
         const val LOW_NS = 60 * S
+        const val IDLE_NS = 180 * S
 
         /** The adapter's "ATRV" answer ("14.2V") as volts. */
         fun parseVolts(rv: String): Double? = Regex("""(\d+(?:\.\d+)?)""").find(rv)?.value?.toDoubleOrNull()
 
-        /** What to say for [cue], in a few words. */
-        fun words(cue: Cue): String = when (cue.kind) {
+        /** What to say for [cue], in a few words. [price]: $/gal when known, for the idling tip. */
+        fun words(cue: Cue, price: Double? = null): String = when (cue.kind) {
+            Kind.LONG_IDLE -> {
+                val gal = cue.value ?: 0.0
+                val cents = if (price != null) Math.round(gal * price * 100) else 0
+                "The engine has idled for ${IDLE_NS / S / 60} minutes" + when {
+                    cents >= 1 -> ", about $cents ${if (cents == 1L) "cent" else "cents"} of gas so far."
+                    else -> "."
+                } + " Switching off saves gas on a longer wait."
+            }
             Kind.ADAPTER_NOT_CONNECTING -> "Fuelish can't reach the O B D adapter. This drive is recording from the phone only."
             Kind.ADAPTER_LOST -> "The O B D adapter disconnected. Still recording from the phone."
             Kind.ADAPTER_BACK -> "Adapter reconnected."

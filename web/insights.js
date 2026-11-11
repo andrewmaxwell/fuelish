@@ -1,4 +1,5 @@
-// Insights across every drive with engine data: totals, fuel economy by speed and by engine
+// Insights across every drive with engine data: totals, how economy and gas spending change week by
+// week and month by month, the best and thirstiest trips, fuel economy by speed and by engine
 // temperature, and how each engine signal moves with the others (and when they part ways).
 // Input: [{ r: recording, rows: Engine rows (derived), gas: { price, ... } | null }].
 
@@ -333,14 +334,121 @@ const Insights = (() => {
     svg.addEventListener("click", () => near && onOpen(near[2]));
   }
 
+  // ---------- over time ----------
+
+  const WEEKS_SHOWN = 12, RANK_MIN_MILES = 3;
+  // Local calendar weeks (from Sunday) and months, as the trip list groups them.
+  const weekOf = (ms) => { const d = new Date(ms); return +new Date(d.getFullYear(), d.getMonth(), d.getDate() - d.getDay()); };
+  const monthOf = (ms) => { const d = new Date(ms); return +new Date(d.getFullYear(), d.getMonth(), 1); };
+  const nextWeek = (ms) => { const d = new Date(ms); return +new Date(d.getFullYear(), d.getMonth(), d.getDate() + 7); };
+
+  /**
+   * Trips with engine data, added up by week and by month, and ranked by economy.
+   * `per`: [{ r, e: Engine.summary, gas }]. Returns
+   *   weeks, months: [{ t (start, ms), ids, trips, miles, fuelMiles, gal, galTrip, cost, priced, mpg }]
+   *     oldest first; weeks are the last WEEKS_SHOWN up to the latest drive, empty ones included.
+   *     mpg is fuel-covered miles over the gallons measured on them; cost is null unless every trip
+   *     in it has a gas price.
+   *   ranked: [{ r, miles, mpg }] best mpg first: trips of RANK_MIN_MILES or more, mostly covered by
+   *     fuel readings (a half-measured trip's mpg is for whichever half was measured).
+   */
+  function trend(per) {
+    const blank = (t) => ({ t, ids: [], trips: 0, miles: 0, fuelMiles: 0, gal: 0, galTrip: 0, cost: 0, priced: true, mpg: null });
+    const weeks = new Map(), months = new Map(), ranked = [];
+    for (const { r, e, gas } of per) {
+      if (e.gal == null || !(e.gal > 0)) continue;
+      for (const [map, t] of [[weeks, weekOf(r.startedWallMs)], [months, monthOf(r.startedWallMs)]]) {
+        const b = map.get(t) || map.set(t, blank(t)).get(t);
+        const whole = e.galTrip ?? e.gal;
+        b.ids.push(r.id); b.trips++; b.miles += e.miles; b.fuelMiles += e.fuelMiles; b.gal += e.gal; b.galTrip += whole;
+        if (gas) b.cost += whole * gas.price; else b.priced = false;
+      }
+      if (e.mpg != null && e.miles >= RANK_MIN_MILES && e.coverage >= 0.8) ranked.push({ r, miles: e.miles, mpg: e.mpg });
+    }
+    const finish = (b) => { b.mpg = b.gal > 0 ? b.fuelMiles / b.gal : null; if (!b.priced || !b.trips) b.cost = null; return b; };
+    const out = { weeks: [], months: [...months.values()].sort((a, b) => a.t - b.t).map(finish), ranked: ranked.sort((a, b) => b.mpg - a.mpg) };
+    if (weeks.size) {
+      const last = Math.max(...weeks.keys());
+      let t = Math.max(Math.min(...weeks.keys()), weekOf(last - (WEEKS_SHOWN - 1) * 7 * 86400000 + 12 * 3600000));
+      for (; t <= last; t = nextWeek(t)) out.weeks.push(finish(weeks.get(t) || blank(t)));
+      out.weeks = out.weeks.slice(-WEEKS_SHOWN);
+    }
+    return out;
+  }
+
+  // The week columns: mpg as a bar with its number, the gas spent, and room for the week's driving
+  // score, which arrives later (fillScores).
+  function trendSection(tr) {
+    const weeks = tr.weeks, top = Math.max(1, ...weeks.map((w) => w.mpg ?? 0));
+    const md = (ms) => new Date(ms).toLocaleDateString([], { month: "numeric", day: "numeric" });
+    const long = (ms) => new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
+    const cols = weeks.map((w) => {
+      const said = w.trips ? `Week of ${long(w.t)}: ${w.mpg != null ? w.mpg.toFixed(1) + " mpg" : "no mpg"}, ${w.miles.toFixed(0)} miles in ${plural(w.trips, "trip")}${w.cost != null ? `, ${money(w.cost)} of gas` : ""}` : `Week of ${long(w.t)}: no drives with engine data`;
+      return `<a class="trend-col${w.trips ? "" : " empty"}" href="#/week/${ymdOf(w.t)}" title="${esc(said)}" aria-label="${esc(said)}">
+        <b>${w.mpg != null ? w.mpg.toFixed(0) : ""}</b>
+        <i style="height:${w.mpg != null ? Math.max(3, (w.mpg / top) * 100) : 0}%"></i>
+        <span class="trend-score" data-week="${w.t}"></span>
+        <small>${esc(md(w.t))}</small>
+        <small class="trend-cost">${w.cost != null ? esc(money(w.cost)) : w.trips ? "–" : ""}</small>
+      </a>`;
+    }).join("");
+    const months = tr.months.slice(-12).reverse();
+    const best = tr.ranked.slice(0, 3), worst = tr.ranked.length >= 6 ? tr.ranked.slice(-3).reverse() : [];
+    const tripLine = (x) => `<li><a href="#/r/${esc(x.r.id)}"><b>${x.mpg.toFixed(0)} mpg</b><span>${esc(new Date(x.r.startedWallMs).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }))} · ${x.miles.toFixed(x.miles < 10 ? 1 : 0)} mi${x.r.towing ? " · towing" : ""}</span></a></li>`;
+    return `
+      <section class="ins-sec">
+        <h2>Week by week</h2>
+        <p class="lede">Miles per gallon each week (bars), the week's driving score (ring) and what the gas cost. A week opens on its map.</p>
+        <div class="trend" style="--n:${weeks.length}">${cols}</div>
+        <p class="hint" id="trend-note" hidden></p>
+        ${months.length > 1 ? `<h3>Month by month</h3>
+        <div class="trend-table-wrap"><table class="trend-table">
+          <thead><tr><th>Month</th><th>Trips</th><th>Miles</th><th>mpg</th><th>Gallons</th><th>Gas</th><th>Per mile</th></tr></thead>
+          <tbody>${months.map((m) => `<tr><th>${esc(new Date(m.t).toLocaleDateString([], { month: "long", ...(new Date(m.t).getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) }))}</th><td>${m.trips}</td><td>${m.miles.toFixed(0)}</td><td>${m.mpg != null ? m.mpg.toFixed(1) : "–"}</td><td>${gallons(m.galTrip)}</td><td>${m.cost != null ? money(m.cost) : "–"}</td><td>${m.cost != null && m.miles > 0 ? ((m.cost / m.miles) * 100).toFixed(1) + "¢" : "–"}</td></tr>`).join("")}</tbody>
+        </table></div>` : ""}
+        ${best.length >= 3 ? `<div class="trend-rank">
+          <div><h3>Best trips <span>${RANK_MIN_MILES} miles or more</span></h3><ol class="legs">${best.map(tripLine).join("")}</ol></div>
+          ${worst.length ? `<div><h3>Thirstiest trips</h3><ol class="legs">${worst.map(tripLine).join("")}</ol></div>` : ""}
+        </div>` : ""}
+      </section>`;
+  }
+  const ymdOf = (ms) => { const d = new Date(ms), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+
+  /**
+   * A week's driving score: the gas the cheapest way to drive its trips would have taken over the
+   * gas they took, which is each trip's score weighted by its gallons. `figures`: Map of recording id
+   * -> { score, gal } (or null: no score for it). Null until one of the week's trips has a score.
+   */
+  function weekScore(ids, figures) {
+    let num = 0, den = 0;
+    for (const id of ids) { const f = figures.get(id); if (f?.score != null && f.gal > 0) { num += f.score * f.gal; den += f.gal; } }
+    return den > 0 ? Math.round(num / den) : null;
+  }
+
+  /** Fills the week columns' score rings from what's been scored so far (called again as more arrive). */
+  function fillScores(host, figures, pending = 0) {
+    const weeks = host._trend?.weeks || [];
+    for (const w of weeks) {
+      const el = host.querySelector(`.trend-score[data-week="${w.t}"]`), n = weekScore(w.ids, figures);
+      if (!el || n == null) continue;
+      el.textContent = n;
+      el.className = `trend-score ${scoreTone(n)}`;
+      el.title = `Driving score ${n}`;
+    }
+    const note = host.querySelector("#trend-note");
+    if (note) { note.hidden = !pending; note.textContent = pending ? `Scoring ${plural(pending, "more trip")}…` : ""; }
+  }
+
   // ---------- page ----------
 
-  function render(host, trips) {
+  function render(host, trips, { figures = null } = {}) {
     const secs = seconds(trips);
     // mpg counts only miles that have fuel readings (fuelMiles); gas and cost are whole-drive.
     let miles = 0, fuelMiles = 0, gal = 0, galTrip = 0, cost = 0, idle = 0, idleCost = 0, priced = true;
+    const per = [];
     for (const t of trips) {
       const e = Engine.summary(t.rows, { vehicle: t.r.meta.vehicle, towing: !!t.r.towing, ...t.scope });
+      per.push({ r: t.r, e, gas: t.gas });
       miles += e.miles;
       if (e.gal != null) {
         gal += e.gal;
@@ -354,6 +462,8 @@ const Insights = (() => {
       }
     }
     const fig = (value, label, unit = "") => `<div class="fig"><b>${value}<small>${unit}</small></b><span>${label}</span></div>`;
+    const tr = trend(per);
+    host._trend = tr;
 
     // Speed: 0.5 mph steps, smoothed over about 2 mph. Temperature: 1 °F steps over about 4 °F.
     const bySpeed = samples(trips, (b) => b.speed * MPH);
@@ -377,6 +487,7 @@ const Insights = (() => {
         ${fig(cost && priced ? money(cost) : "–", "spent on gas")}
         ${fig(gal ? Math.round((idle / gal) * 100) + "%" : "–", `burned idling${idleCost ? ` (${money(idleCost)})` : ""}`)}
       </div>
+      ${tr.weeks.length ? trendSection(tr) : ""}
 
       <section class="ins-sec">
         <h2>Fuel economy by speed</h2>
@@ -420,6 +531,8 @@ const Insights = (() => {
       xFmt: (v) => v.toFixed(0), yFmt: (v) => v.toFixed(2), xUnit: " °F", yUnit: " gal/h", aria: "Idle fuel flow by coolant temperature",
     });
 
+    if (figures) fillScores(host, figures);
+
     const pairHost = host.querySelector("#ins-pair");
     const pick = (p) => {
       pairDetail(pairHost, p, secs);
@@ -437,5 +550,5 @@ const Insights = (() => {
     if (first) pick(first);
   }
 
-  return { render };
+  return { render, trend, weekScore, fillScores, WEEKS_SHOWN };
 })();
