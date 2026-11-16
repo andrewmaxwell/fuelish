@@ -24,6 +24,7 @@ const Ribbon = (() => {
   const HALF_MS = 4000; // widths are averaged over the ±4 s around each fix: stretches, not single seconds
   const PX_PER_GPM = 400; // ribbon width in px per gallon per mile (40 mpg is 10 px)
   const MAX_W = 60; // px; wider (a hard start from a light) is capped, and the legend says so
+  const FIT_HALF = 2; // the fuel line is fitted on ±2 s averages (see decompose)
   const GAP = 3; // px between the route's center line and the ribbon
   const SPREAD_PX = 14; // widths are spread along ±14 px of on-screen road (see _band)
   const DIR_PX = 10; // the band's direction comes from ±10 px of road
@@ -94,7 +95,9 @@ const Ribbon = (() => {
       for (const key in w) w[key] *= f;
       return { ...w, net, saved: pos - net };
     };
-    const xs = [], ys = [], idle = [];
+    const idle = [];
+    // Each moving second with fuel flowing: the power asked of the engine and the fuel it burned.
+    const P = new Float64Array(n).fill(NaN), Fg = new Float64Array(n).fill(NaN);
     for (let i = 0; i < n; i++) {
       const p = pts[i], q = pts[i + 1];
       const dt = q && q.trip === p.trip ? (q.t - p.t) / 1000 : 0;
@@ -105,13 +108,22 @@ const Ribbon = (() => {
       const v = p.v ?? 0;
       if (v >= MOVING) {
         miles[i] = Route.haversine(p.lat, p.lon, q.lat, q.lon) / 1609.344;
-        if (f > 0 && !p.eng.cut) {
-          xs.push(power(v, p.a, p.grade).net);
-          ys.push(f);
-        }
+        if (f > 0 && !p.eng.cut) { P[i] = power(v, p.a, p.grade).net; Fg[i] = f; }
       } else if (v < 0.5 && f > 0 && (p.eng.rpm ?? 0) > 300) idle.push(f);
     }
     const idleGs = Math.min(0.6, Math.max(0.05, median(idle) ?? 0.15));
+    // Fitted on ±2 s averages of both, not single seconds: second by second, GPS acceleration is
+    // noisy and the engine's fuel reading lags the push by a second or so, and both flatten the
+    // fitted line (k too small, so an engine better than any real one, and running cost too high).
+    const xs = [], ys = [];
+    for (let i = 0; i < n; i++) {
+      if (!(P[i] >= 0)) continue;
+      let sp = 0, sf = 0, m = 0;
+      for (let j = Math.max(0, i - FIT_HALF); j <= Math.min(n - 1, i + FIT_HALF); j++) {
+        if (P[j] >= 0 && pts[j].trip === pts[i].trip && Math.abs(pts[j].t - pts[i].t) <= FIT_HALF * 1000 + 500) { sp += P[j]; sf += Fg[j]; m++; }
+      }
+      if (m >= 3) { xs.push(sp / m); ys.push(sf / m); }
+    }
     const { b, k } = fit(xs, ys, idleGs);
 
     // Grams of each cause in each fix's step.
@@ -420,7 +432,7 @@ const Ribbon = (() => {
     return head + body;
   }
   const howHtml = (d) => `Tap${globalThis.matchMedia?.("(hover: hover)").matches ? " or hover" : ""} a cause to see what it is; tap again to show everything.
-    <details class="rb-how"><summary>How is the gas split?</summary>Each second, speed, acceleration and grade give the power going to the tires, air, speeding up and climbing. A line, fuel = running cost + k × power, is fitted to this drive's own engine fuel readings (the engine turned about ${Math.round(d.fit.eta * 100)}% of its fuel into motion here), and each second's fuel is shared out by it.</details>`;
+    <details class="rb-how"><summary>How is the gas split?</summary>Each second, speed, acceleration and grade give the power going to the tires, air, speeding up and climbing. A line, fuel = running cost + k × power, is fitted to this drive's own engine fuel readings (each extra bit of push took fuel at about ${Math.round(d.fit.eta * 100)}% efficiency, on top of the running cost), and each second's fuel is shared out by it.</details>`;
 
   /** The legend: each cause with its share of the drive's gas; a button shows it alone and explains it. */
   function legendHtml(d, price, only = null) {
