@@ -19,7 +19,6 @@ const Ideal = (() => {
   const { CRR, AIR, body } = Engine.physics;
   const MOVING = 2; // m/s, as ribbon.js: slower is standing still
   const ROT = 1.05;
-  const ACCEL = 0.2 * G; // the ideal speeds up no harder than this
   const DECEL = 0.08 * G; // and slows no harder: about a coast-down in gear (coach.js's "gentle")
   const LONG_IDLE_S = 60, RESTART_S = 10, ABSORB_MAX_S = 180;
   const MIN_CRUISE = 55, MAX_CRUISE = 70; // mph: the ideal's cruising speed stays in what's normal and legal
@@ -141,10 +140,11 @@ const Ideal = (() => {
     const cruise = cruiseMph(fit, mass, cda, lean, price, timePerHour);
     const cap = cruise.mph * MPS_PER_MPH;
 
-    // The capped profile, then the same smoothed: speeding up and slowing down within ACCEL and DECEL.
+    // The capped profile, then the same with every slow-down no harder than DECEL. Speeding up is left
+    // as driven: a slower start only adds engine-running time, and what a hard start burns beyond the
+    // power it makes (running rich) is the "rich" line's.
     const capped = v.map((x) => (x == null ? 0 : Math.min(x, cap)));
-    const smooth = capped.slice();
-    for (const x of segs) if (x.ok) smooth[x.i + 1] = Math.min(smooth[x.i + 1], Math.sqrt(smooth[x.i] ** 2 + 2 * ACCEL * x.ds));
+    let smooth = capped.slice();
     for (let s = segs.length - 1; s >= 0; s--) {
       const x = segs[s];
       if (x.ok) smooth[x.i] = Math.min(smooth[x.i], Math.sqrt(smooth[x.i + 1] ** 2 + 2 * DECEL * x.ds));
@@ -156,9 +156,16 @@ const Ideal = (() => {
       // The fit on the actual profile reproduces moving0 − richG exactly (that's what `lean` is), so
       // this step changes only the standstills.
       { key: "idle", ...run(v.map((x) => x ?? 0), { engineOff: true }) },
-      { key: "speed", ...run(capped, { engineOff: true }) },
-      { key: "smooth", ...run(smooth, { engineOff: true }) },
     ];
+    // The ideal is the cheapest way: a change that would take more gas than the step before it (time
+    // lost before a stop it can't be taken off) isn't made, and its line is zero rather than negative.
+    const step = (key, profile) => {
+      const r = run(profile, { engineOff: true }), prev = steps.at(-1);
+      steps.push(r.g <= prev.g ? { key, ...r } : { ...prev, key });
+      return r.g <= prev.g;
+    };
+    const capOk = step("speed", capped);
+    if (!step("smooth", smooth)) smooth = capOk ? capped : v.map((x) => x ?? 0);
 
     // For the lines' explanations: time spent above the cruising speed, and the long idles.
     let aboveSecs = 0, top = 0;
@@ -184,5 +191,5 @@ const Ideal = (() => {
     };
   }
 
-  return { plan, cruiseMph, ACCEL, DECEL };
+  return { plan, cruiseMph, DECEL };
 })();

@@ -590,6 +590,21 @@ test("lost time comes off a short wait, but not off a long one or the arrival", 
   assert.ok(long.lines.find((l) => l.key === "idle").gal > short.lines.find((l) => l.key === "idle").gal);
 });
 
+test("a hard start doesn't make the ideal cost more: no line comes out negative", () => {
+  const { Ideal } = load("route.js", "engine.js", "ideal.js");
+  // Away from a light at 0.45 g to 45 mph, gentle braking, and a stop longer than a red light (so
+  // time lost can't come off it).
+  const sp = [], mps = 0.44704;
+  for (let i = 0; i < 5; i++) sp.push(0);
+  for (let x = 0; x < 45 * mps;) { x = Math.min(45 * mps, x + 0.45 * 9.80665); sp.push(x); }
+  for (let i = 0; i < 200; i++) sp.push(45 * mps);
+  for (let x = 45 * mps; x > 0;) { x = Math.max(0, x - 0.06 * 9.80665); sp.push(x); }
+  for (let i = 0; i < 200; i++) sp.push(0);
+  const r = Ideal.plan(idealDrive(sp, FIT), FIT, { vehicle: "Honda Civic", price: 3.2, timePerHour: 20 });
+  for (const l of r.lines) assert.ok(l.gal >= -1e-12, `${l.key} ${l.gal}`);
+  assert.ok(Math.abs(r.actual.gal - r.ideal.gal - r.lines.reduce((s, l) => s + l.gal, 0)) < 1e-9);
+});
+
 test("the ideal drive needs fuel readings over most of the drive", () => {
   const { Ideal } = load("route.js", "engine.js", "ideal.js");
   const pts = idealDrive(idealSpeeds(), FIT);
