@@ -114,7 +114,18 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
       if (!view.map.hasLayer(ribbonLayer)) ribbonLayer.addTo(view.map);
     } else if (ribbonLayer) ribbonLayer.remove();
   };
-  document.getElementById("rt-legend").addEventListener("click", (e) => {
+  // With a mouse, hovering a cause previews what it is; leaving puts back the tapped one's (or the overview).
+  const legendEl = document.getElementById("rt-legend");
+  const explain = (key) => {
+    const el = document.getElementById("rb-explain");
+    if (el && ribbon) el.innerHTML = key ? Ribbon.explainHtml(ribbon, key, price) : Ribbon.howHtml(ribbon);
+  };
+  legendEl.addEventListener("mouseover", (e) => {
+    const c = e.target.closest("[data-cause]");
+    if (c && matchMedia("(hover: hover)").matches) explain(c.dataset.cause);
+  });
+  legendEl.addEventListener("mouseleave", () => explain(ribbonOnly));
+  legendEl.addEventListener("click", (e) => {
     const c = e.target.closest("[data-cause]");
     if (c) {
       ribbonOnly = ribbonOnly === c.dataset.cause ? null : c.dataset.cause;

@@ -117,11 +117,13 @@ const Ribbon = (() => {
     // Grams of each cause in each fix's step.
     const parts = Object.fromEntries(ALL.map((c) => [c.key, new Float64Array(n)]));
     let downhill = 0; // grams the slope saved going downhill (not a lane: it wasn't burned)
+    let movingS = 0, stillS = 0; // seconds with fuel readings, moving and standing still
     for (let i = 0; i < n; i++) {
       const F = fuel[i];
       if (!(F >= 0)) continue;
       const p = pts[i], dt = dts[i];
-      if ((p.v ?? 0) < MOVING) { parts.idle[i] = F; continue; }
+      if ((p.v ?? 0) < MOVING) { parts.idle[i] = F; stillS += dt; continue; }
+      movingS += dt;
       const w = power(p.v, p.a, p.grade);
       const m = { base: b * dt, roll: k * w.roll * dt, air: k * w.air * dt, climb: k * w.climb * dt, accel: k * w.accel * dt };
       const M = m.base + m.roll + m.air + m.climb + m.accel;
@@ -188,7 +190,7 @@ const Ribbon = (() => {
     const totals = Object.fromEntries(ALL.map((c) => [c.key, parts[c.key].reduce((a, x) => a + x, 0)]));
     totals.downhill = downhill;
     const hasGrades = pts.some((p) => p.grade != null);
-    return { pts, parts, lanes, perMile, stops, totals, hasGrades, fit: { b, k, eta: 1 / (k * J_PER_G), idleGs } };
+    return { pts, parts, lanes, perMile, stops, totals, hasGrades, mass, cda, movingS, stillS, fit: { b, k, eta: 1 / (k * J_PER_G), idleGs } };
   }
 
   // ---------- drawing ----------
@@ -370,7 +372,57 @@ const Ribbon = (() => {
   const perMileText = (gpm, price) => (price != null ? `${(gpm * price * 100).toFixed(gpm * price * 100 < 10 ? 1 : 0)}¢/mi` : `${(gpm * 100).toFixed(1)} gal/100 mi`);
   const swatch = (c) => `<i class="rb-sw" style="background:${c.color}"></i>`;
 
-  /** The legend: each cause with its share of the drive's gas; a button shows it alone. */
+  // What each cause is, why it costs gas, and how it was worked out, with this drive's own numbers
+  // (the fitted engine and the car's assumed weight and shape). Shown under the legend for the cause
+  // tapped (or hovered with a mouse).
+  const MI = 1609.344, MPS_PER_MPH = 0.44704;
+  const lb = (kg) => `${Math.round((kg * 2.20462) / 50) * 50} lb`;
+    const perMi = (gpm, price) => perMileText(gal(gpm), price); // gpm: grams per mile
+  function explainHtml(d, key, price) {
+    const { b, k, eta, idleGs } = d.fit, total = ALL.reduce((a, c) => a + d.totals[c.key], 0);
+    const v = (mph) => mph * MPS_PER_MPH;
+    const share = (key) => (total > 0 ? Math.round((d.totals[key] / total) * 100) : 0);
+    const mins = (s) => (s >= 90 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`);
+    const c = ALL.find((x) => x.key === key);
+    const head = `<b>${swatch(c)} ${labelOf(c, d)}</b> · ${money(d.totals[key], price)}, ${share(key)}% of this drive's gas. `;
+    let body;
+    switch (key) {
+      case "base": {
+        const gph = gal(b * 3600);
+        body = `What the engine burns just to keep turning while you're moving: its own internal friction, pumps, the alternator, A/C. It's paid per minute, not per mile, so slow miles cost more of it: about ${perMi((b * MI) / v(25), price)} at 25 mph but ${perMi((b * MI) / v(60), price)} at 60. ` +
+          `Worked out from this drive's engine readings as the fuel it burns at zero load: about ${gph.toFixed(2)} gal/hour. ${d.movingS ? `${mins(d.movingS)} moving.` : ""}`;
+        break;
+      }
+      case "roll":
+        body = `Tires flatten a little where they meet the road and spring back as they roll, and that flexing turns some of the engine's work into heat. The force is about ${CRR} × the car's weight (${lb(d.mass)} assumed), whatever the speed, so it's a steady ${perMi(k * CRR * d.mass * G * MI, price)} on every mile. Underinflated tires flex more and raise it.`;
+        break;
+      case "air":
+        body = `Pushing air out of the way. The force grows with the square of speed (½ × air density × drag area ${d.cda.toFixed(2)} m² × speed²), so each mile costs ${perMi(k * 0.5 * AIR * d.cda * v(35) ** 2 * MI, price)} at 35 mph, ${perMi(k * 0.5 * AIR * d.cda * v(55) ** 2 * MI, price)} at 55 and ${perMi(k * 0.5 * AIR * d.cda * v(75) ** 2 * MI, price)} at 75. Small around town; the biggest lane on the highway.`;
+        break;
+      case "climb": {
+        const src = d.pts.gradeSource === "barometer" ? "the phone's barometer" : "USGS ground heights";
+        body = `Lifting the car uphill: weight × gravity × height gained. Climbing 100 ft costs about ${money(k * d.mass * G * 30.48, price)} in this car. Grades come from ${src}. ` +
+          (d.totals.downhill > 0 ? `Going back down, the slope pushes and every other lane shrinks there; downhills on this drive saved about ${money(d.totals.downhill, price)}.` : "");
+        break;
+      }
+      case "accel":
+        body = `Adding speed: the energy of the car's motion (½ × mass × speed², plus a little to spin up the wheels), worked out from how fast the GPS speed rose. Getting up to 45 mph once costs about ${money(k * ROT * 0.5 * d.mass * v(45) ** 2, price)}; braking turns that energy into heat, so every stop-and-go pays it again. A hard start puts about the same energy here (the extra gas it burns shows up in Other); what shrinks this lane is braking less, by coasting up to lights and keeping a steady speed.`;
+        break;
+      case "other":
+        body = `Whatever the engine's own fuel readings show beyond what the lanes above explain: a cold engine running rich while it warms up, the A/C or a heavy load, wind, rough roads, ${d.hasGrades ? "" : "climbs (this drive has no elevation data, so hills land here too), "}and the model's own roughness. It's measured, not guessed: the fuel actually burned minus what the physics accounts for. Seconds that burned less than predicted (coasting with the fuel cut off) shrink every lane alike instead, so the lanes add up to the gas burned.`;
+        break;
+      case "idle": {
+        const n = d.stops.length;
+        body = `Gas burned while crawling under 4.5 mph or stopped: lights, stop signs, traffic, warming up. There are no miles to spread it over, so it's drawn as circles at the stops, sized at the same scale as the band. Read straight from the engine's fuel rate${n ? `: ${n} stop${n === 1 ? "" : "s"}, ${mins(d.stillS)} in all, about ${gal(idleGs * 3600).toFixed(2)} gal/hour at idle` : ""}.`;
+        break;
+      }
+    }
+    return head + body;
+  }
+  const howHtml = (d) => `Tap${globalThis.matchMedia?.("(hover: hover)").matches ? " or hover" : ""} a cause to see what it is; tap again to show everything.
+    <details class="rb-how"><summary>How is the gas split?</summary>Each second, speed, acceleration and grade give the power going to the tires, air, speeding up and climbing. A line, fuel = running cost + k × power, is fitted to this drive's own engine fuel readings (the engine turned about ${Math.round(d.fit.eta * 100)}% of its fuel into motion here), and each second's fuel is shared out by it.</details>`;
+
+  /** The legend: each cause with its share of the drive's gas; a button shows it alone and explains it. */
   function legendHtml(d, price, only = null) {
     const total = ALL.reduce((a, c) => a + d.totals[c.key], 0);
     if (!(total > 0)) return `<p class="hint">No fuel readings on this drive to split.</p>`;
@@ -382,7 +434,8 @@ const Ribbon = (() => {
     const src = d.pts.gradeSource === "barometer" ? "the phone's barometer" : "USGS ground heights";
     const down = d.hasGrades ? ` Hills from ${src}${d.totals.downhill > 0.02 * total ? `; downhills saved about ${money(d.totals.downhill, price)}` : ""}.` : "";
     return `<div class="rb-legend">${rows}</div>
-      <p class="hint">Band width is gas per mile (<span class="rb-scale"></span> ${perMileText(ref, price)}); circles are gas burned standing still, at the same scale.${down} Tap a cause to show it alone.</p>`;
+      <div class="rb-explain" id="rb-explain">${only ? explainHtml(d, only, price) : howHtml(d)}</div>
+      <p class="hint">Band width is gas per mile (<span class="rb-scale"></span> ${perMileText(ref, price)}); circles are gas burned standing still, at the same scale.${down}</p>`;
   }
 
   /** Readout lines for fix i: gas per mile here and what it went to. */
@@ -400,5 +453,5 @@ const Ribbon = (() => {
       parts.map(([c, x]) => `<dt>${swatch(c)} ${labelOf(c, d)}</dt><dd>${Math.round((x / tot) * 100)}%</dd>`).join("");
   }
 
-  return { decompose, layer, legendHtml, readoutHtml, CAUSES, IDLE, PX_PER_GPM, pxPerMile };
+  return { decompose, layer, legendHtml, explainHtml, howHtml, readoutHtml, CAUSES, IDLE, PX_PER_GPM, pxPerMile };
 })();
