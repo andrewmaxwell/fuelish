@@ -28,6 +28,12 @@ data class ObdStatus(
  * supports, benchmark request shapes, then poll until stopped. Every exchange is recorded
  * raw (`obd_raw`) as well as decoded (`obd`). Disconnects and an unresponsive car (ignition
  * off) are retried forever with backoff; phone recording never depends on this.
+ *
+ * The MX+ link sometimes stalls mid-reply (a few drives in ten, often in the first minute): nothing
+ * more comes back, and in 39 recorded drives the same connection never answered again. So two
+ * timeouts in a row reconnect at once, and the new connection picks up with what this recording
+ * already found (protocol, PIDs, request size, addressing) instead of searching and benchmarking
+ * again, which took ~9 s of the ~35 s each stall cost.
  */
 class ObdRecorder(
     private val cfg: JSONObject,
@@ -54,6 +60,9 @@ class ObdRecorder(
     private var ecuPids = mapOf<String, Set<Int>>()
     /** True while requests go to the engine ECU alone (physical addressing) instead of every ECU. */
     private var engineOnly = false
+    /** What discovery and the benchmark settled on in this recording, to resume with after a reconnect. */
+    private data class Known(val protocol: Int, val engineOnly: Boolean)
+    private var known: Known? = null
 
     // Rolling stats for status and obd_stats records.
     private var statWindowStart = 0L
@@ -86,6 +95,9 @@ class ObdRecorder(
         var backoffMs = 2_000L
         var attempts = 0
         while (running) {
+            // A link lost mid-drive is retried at once: the car is still running, and every second
+            // waiting is a second of the drive without engine data. Failing to connect backs off.
+            var wait = backoffMs
             try {
                 setState("connecting")
                 attempts++
@@ -96,22 +108,32 @@ class ObdRecorder(
                 t.use { runConnected(it) }
             } catch (e: Exception) {
                 if (!running) break
+                if (status.state == "polling") wait = 500L
                 event("disconnected", e.toString())
-                setState("disconnected", "${e.message ?: e} — retrying in ${backoffMs / 1000}s")
+                setState("disconnected", "${e.message ?: e} — retrying in ${"%.1f".format(wait / 1000.0)}s")
                 summary.put("connectAttempts", attempts)
             } finally {
                 transport = null
             }
             if (!running) break
-            sleep(backoffMs)
-            backoffMs = minOf(backoffMs * 2, 30_000L)
+            sleep(wait)
+            if (wait == backoffMs) backoffMs = minOf(backoffMs * 2, 30_000L)
         }
     }
 
     /** Runs until [running] goes false or the link fails (throws). Visible for tests. */
     fun runConnected(t: ObdTransport) {
         val session = ElmSession(t, nanoTime) { r -> recordRaw(r) }
-        initAdapter(session)
+        val resume = known
+        initAdapter(session, resume?.protocol)
+        if (resume != null && running) {
+            if (resumeVehicle(session, resume)) poll(session)
+            else {
+                // Not the car it was (or not answering yet): start over, searching for the protocol.
+                known = null
+                session.cmd("ATSP" + cfg.optString("protocol", "0").uppercase())
+            }
+        }
         while (running) {
             if (!discoverVehicle(session)) {
                 setState("waiting_vehicle", "no response from car (ignition off?)")
@@ -119,8 +141,26 @@ class ObdRecorder(
                 continue
             }
             if (cfg.optBoolean("benchmark", true)) benchmark(session)
+            known = Known(protocol, engineOnly)
             poll(session)
         }
+    }
+
+    /**
+     * After a reconnect in the same recording: sets the addressing the benchmark chose and checks
+     * the car answers on the protocol already found. False sends it back to full discovery.
+     */
+    private fun resumeVehicle(s: ElmSession, k: Known): Boolean {
+        setState("discovering", "reconnected; resuming")
+        if (k.engineOnly) {
+            if (!engineOnlyAddress(s)) return false
+        } else allEcus(s)
+        engineOnly = k.engineOnly
+        val r = s.cmd("0100", 5_000)
+        if (r.status == ElmStatus.TIMEOUT) throw ObdDisconnected("adapter stopped answering")
+        if (r.status != ElmStatus.OK || ObdParser.parse(r.lines, protocol).isEmpty()) return false
+        event("resumed", "protocol ${Integer.toHexString(k.protocol).uppercase()}, ${maxBatch} PIDs per request, ${if (engineOnly) "engine ECU only" else "all ECUs"}")
+        return true
     }
 
     private fun recordRaw(r: ElmResponse) {
@@ -130,13 +170,14 @@ class ObdRecorder(
         )
     }
 
-    private fun initAdapter(s: ElmSession) {
+    /** [protocol]: the one this recording already found (ATSP n instead of the configured search). */
+    private fun initAdapter(s: ElmSession, protocol: Int? = null) {
         setState("initializing")
         val z = s.cmd("ATZ", 5_000)
         if (z.status == ElmStatus.TIMEOUT) throw ObdDisconnected("adapter did not answer ATZ")
         sleep(500)
         for (c in listOf("ATE0", "ATL0", "ATS0", "ATH1", "ATAT1")) s.cmd(c)
-        s.cmd("ATSP" + cfg.optString("protocol", "0").uppercase())
+        s.cmd("ATSP" + (protocol?.let { Integer.toHexString(it).uppercase() } ?: cfg.optString("protocol", "0").uppercase()))
         val info = JSONObject()
         for (c in listOf("ATI", "AT@1", "STI", "STDI", "ATRV")) {
             val r = s.cmd(c)
@@ -377,6 +418,9 @@ class ObdRecorder(
         // The Civic answers NO DATA to everything once the ignition is off (no ERROR), so a run of
         // requests with nothing answered at all is how switching off shows up.
         val lostAfterSilent = cfg.optInt("vehicleLostAfterSilent", 5)
+        // A stalled link never came back on the same connection in recorded drives: reconnect soon.
+        // The voltage check counts too, so it can't add another wait between them.
+        val maxTimeouts = cfg.optInt("timeoutsBeforeReconnect", 2)
         var silent = 0
         var lastRv = nanoTime()
         var timeouts = 0
@@ -391,6 +435,7 @@ class ObdRecorder(
             if (rvIntervalNs > 0 && now - lastRv >= rvIntervalNs) {
                 lastRv = now
                 val rv = s.cmd("ATRV")
+                if (rv.status == ElmStatus.TIMEOUT && ++timeouts >= maxTimeouts) throw ObdDisconnected("$timeouts consecutive timeouts")
                 rv.lines.firstOrNull()?.let { v ->
                     status = status.copy(adapterVolts = v)
                     sink.emit("obd:adapter_v", rv.doneNs, JsonLine("obd_adapter").n("rx", rv.doneNs).s("rv", v).build())
@@ -404,7 +449,7 @@ class ObdRecorder(
             val pids = batch.map { it.pid }
             val r = s.cmd("01" + pids.joinToString("") { Pids.hex(it) }, timeoutMs)
             when (r.status) {
-                ElmStatus.TIMEOUT -> if (++timeouts >= 3) throw ObdDisconnected("3 consecutive timeouts")
+                ElmStatus.TIMEOUT -> if (++timeouts >= maxTimeouts) throw ObdDisconnected("$timeouts consecutive timeouts")
                 ElmStatus.ERROR -> if (++errors >= 5) {
                     event("vehicle_lost", r.lines.joinToString(" / "))
                     return // back to discovery; car probably switched off

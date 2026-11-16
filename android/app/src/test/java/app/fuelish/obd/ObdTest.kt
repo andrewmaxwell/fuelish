@@ -308,10 +308,47 @@ class ObdTest {
         current.dropLink = true
         val deadline = System.currentTimeMillis() + 10_000
         while (connects < 2 && System.currentTimeMillis() < deadline) Thread.sleep(10)
-        while (sink.streams().count { it == "obd_discovery" } < 2 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        while ("resumed" !in events(sink) && System.currentTimeMillis() < deadline) Thread.sleep(10)
         rec.stop()
         assertTrue(connects >= 2)
-        assertTrue(sink.streams().contains("obd_event"))
-        assertEquals(2, sink.streams().count { it == "obd_discovery" })
+        // The second connection resumes with what the first found: no second discovery.
+        assertEquals(1, sink.streams().count { it == "obd_discovery" })
+        assertTrue("resumed" in events(sink))
+    }
+
+    private fun events(s: CollectSink) = synchronized(s.lines) { s.lines.filter { it.first == "obd_event" }.map { JSONObject(it.second).getString("ev") } }
+
+    @Test
+    fun stalledLinkReconnectsAfterTwoTimeoutsAndResumes() {
+        val fakes = mutableListOf<FakeElm>()
+        val cfg = Config.parse("""{"obd": {"requestTimeoutMs": 150}}""").obd
+        val sink = CollectSink()
+        val sleeps = Collections.synchronizedList(mutableListOf<Long>())
+        val rec = ObdRecorder(cfg, { FakeElm().also { synchronized(fakes) { fakes += it } } }, sink, System::nanoTime, sleep = {
+            sleeps += it
+            Thread.sleep(minOf(it, 20))
+        })
+        rec.start()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (sink.streams().count { it == "obd:rpm" } < 10 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        val first = synchronized(fakes) { fakes[0] }
+        val rpmBefore = sink.streams().count { it == "obd:rpm" }
+        first.stall = true
+        while (sink.streams().count { it == "obd:rpm" } < rpmBefore + 10 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        rec.stop()
+
+        val evs = sink.lines.filter { it.first == "obd_event" }.map { JSONObject(it.second) }
+        val disc = evs.first { it.getString("ev") == "disconnected" }
+        assertTrue(disc.getString("detail"), disc.getString("detail").contains("2 consecutive timeouts"))
+        assertTrue("resumed" in evs.map { it.getString("ev") })
+        // Retried at once (no 2 s backoff), and polled again without searching or benchmarking.
+        assertTrue("sleeps: $sleeps", 500L in sleeps && 2_000L !in sleeps)
+        assertTrue(sink.streams().count { it == "obd:rpm" } >= rpmBefore + 10)
+        assertEquals(1, sink.streams().count { it == "obd_discovery" })
+        assertEquals(1, sink.streams().count { it == "obd_bench" })
+        val second = synchronized(fakes) { fakes[1] }.received
+        assertTrue("sent: $second", "ATSP6" in second && "ATSP0" !in second)
+        assertTrue("sent: $second", second.none { it == "0900" || it == "03" })
+        second.forEach { ElmAllowlist.check(it) }
     }
 }

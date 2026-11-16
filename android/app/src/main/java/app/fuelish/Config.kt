@@ -81,6 +81,7 @@ class Config(val json: JSONObject) {
             "engineOnly": "auto",
             "demoteAfterMisses": 5,
             "vehicleLostAfterSilent": 5,
+            "timeoutsBeforeReconnect": 2,
             "demotedIntervalMs": 30000,
             "adapterVoltageIntervalMs": 5000,
             "readVehicleInfo": true,
@@ -186,6 +187,7 @@ class Config(val json: JSONObject) {
             num(obd, "maxPidsPerRequest", "obd.", 0.0, 6.0)
             num(obd, "demoteAfterMisses", "obd.", 1.0, 1000.0)
             num(obd, "vehicleLostAfterSilent", "obd.", 1.0, 1000.0)
+            num(obd, "timeoutsBeforeReconnect", "obd.", 1.0, 100.0)
             for (k in listOf("fast", "medium", "slow")) {
                 val a = obd.getJSONArray(k)
                 for (i in 0 until a.length()) {

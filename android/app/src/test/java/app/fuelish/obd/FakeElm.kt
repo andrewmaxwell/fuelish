@@ -21,6 +21,8 @@ class FakeElm(
     private val inBuf = StringBuilder()
     @Volatile var closed = false
     @Volatile var dropLink = false
+    /** The link stays up but nothing comes back (how the MX+ stalls mid-drive). */
+    @Volatile var stall = false
 
     override fun write(bytes: ByteArray) {
         if (closed || dropLink) throw IOException("link down")
@@ -30,7 +32,7 @@ class FakeElm(
                 val cmd = inBuf.toString().trim().uppercase()
                 inBuf.clear()
                 received += cmd
-                out.put((respond(cmd) + "\r\r>").toByteArray())
+                if (!stall) out.put((respond(cmd) + "\r\r>").toByteArray())
             } else inBuf.append(c)
         }
     }
