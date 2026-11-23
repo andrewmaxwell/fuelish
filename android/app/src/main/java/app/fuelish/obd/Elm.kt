@@ -9,6 +9,9 @@ interface ObdTransport : Closeable {
 
     /** Returns available bytes, or null if nothing arrived within [timeoutMs]. Throws on disconnect. */
     fun read(timeoutMs: Long): ByteArray?
+
+    /** How the link was opened (each attempt, its mode and how long it took), for the `connected` event. */
+    val connectInfo: String get() = ""
 }
 
 enum class ElmStatus { OK, NO_DATA, ERROR, TIMEOUT }

@@ -103,7 +103,7 @@ class ObdRecorder(
                 attempts++
                 val t = connect()
                 transport = t
-                event("connected")
+                event("connected", t.connectInfo)
                 backoffMs = 2_000L
                 t.use { runConnected(it) }
             } catch (e: Exception) {

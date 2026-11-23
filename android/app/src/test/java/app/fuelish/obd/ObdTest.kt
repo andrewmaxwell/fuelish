@@ -316,6 +316,31 @@ class ObdTest {
         assertTrue("resumed" in events(sink))
     }
 
+    @Test
+    fun connectTriesPreferredModeFirstAndTimesEachAttempt() {
+        var now = 0L
+        val tried = mutableListOf<String>()
+        val (s, info) = BluetoothSppTransport.connectInOrder(BluetoothSppTransport.SECURE, { now }) { mode ->
+            tried += mode
+            if (mode == BluetoothSppTransport.SECURE) { now += 18_200_000_000; throw java.io.IOException("read failed, socket might closed") }
+            now += 900_000_000
+            "sock"
+        }
+        assertEquals("sock", s)
+        assertEquals(listOf("secure", "insecure"), tried)
+        assertEquals("insecure", info.mode)
+        assertEquals("secure 18.2s failed (read failed, socket might closed); insecure 0.9s ok", info.log)
+
+        val first = mutableListOf<String>()
+        BluetoothSppTransport.connectInOrder(BluetoothSppTransport.INSECURE, { 0L }) { first += it; "ok" }
+        assertEquals(listOf("insecure"), first)
+
+        val e = assertThrows(java.io.IOException::class.java) {
+            BluetoothSppTransport.connectInOrder<String>(BluetoothSppTransport.SECURE, { 0L }) { throw java.io.IOException("no") }
+        }
+        assertEquals("secure 0.0s failed (no); insecure 0.0s failed (no)", e.message)
+    }
+
     private fun events(s: CollectSink) = synchronized(s.lines) { s.lines.filter { it.first == "obd_event" }.map { JSONObject(it.second).getString("ev") } }
 
     @Test
