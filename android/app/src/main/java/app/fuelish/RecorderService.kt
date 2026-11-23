@@ -260,6 +260,11 @@ class RecorderService : Service() {
             ticks++
             // A detected drive the engine hasn't confirmed yet: a paired car stereo says it's your car too.
             if (detected && !adapterProven && ticks % 10 == 1L && CarBluetooth.onPairedCar(ctx)) autoStop?.onPairedCar()
+            // Driving (by GPS) cancels a "left the vehicle" that arrived late or wrongly.
+            sensors.lastGps?.let { g ->
+                val now = SystemClock.elapsedRealtimeNanos()
+                if (g.speed >= 3f && now - g.elapsedRealtimeNanos < 5_000_000_000L && autoStop?.moving(g.elapsedRealtimeNanos) == true) event("left_vehicle_cancelled", "driving")
+            }
             val reason = autoStop?.check(SystemClock.elapsedRealtimeNanos(), obd?.status?.state ?: "off")
             if (detected && !adapterProven && !keptSaid && autoStop?.keptWithoutEngine == true) keepWithoutEngine()
             if (reason != null && !stopRequested) {

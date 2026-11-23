@@ -365,7 +365,7 @@ python3 tools/fuelish.py export recording.ndjson.gz out/
   signing in again after a session ends; share links, prefs, app updates, deleting; input checks on metadata and
   chunk tracks, trip summaries and route outlines; VIN lookups.
 - **Web** (58 tests, `node --test web/test/*.test.mjs`): the analysis math (route distance, fuel, costs, repeated trips).
-- **Android JVM tests** (106, `./gradlew testDebugUnitTest`): JSON escaping; chunk rotation with every record
+- **Android JVM tests** (108, `./gradlew testDebugUnitTest`): JSON escaping; chunk rotation with every record
   accounted for; crash recovery; ELM/CAN parsing (single + ISO-TP multi-frame); multi-PID splitting and SAE decoding;
   the read-only allowlist; scheduler fairness; auto-stop rules (disconnect grace period, brief drops, engine-off,
   adapter trouble never stops, a detected drive without the adapter or with a slow one, leaving the vehicle); what's said during a

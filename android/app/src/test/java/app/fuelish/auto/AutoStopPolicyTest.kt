@@ -132,4 +132,23 @@ class AutoStopPolicyTest {
         assertNull(p.check(101 * s, "polling"))
         assertNull(p.check(500 * s, "connecting"))
     }
+
+    @Test
+    fun drivingCancelsALateLeftVehicleOnADriveWithoutTheAdapter() {
+        val p = policy()
+        p.leftVehicle(4 * s) // reported seconds into the drive
+        assertTrue(p.moving(6 * s))
+        for (t in 7L..600L) assertNull(p.check(t * s, "disconnected"))
+        assertFalse(p.moving(601 * s)) // nothing left to cancel
+    }
+
+    @Test
+    fun leavingAfterParkingStillStops() {
+        val p = policy()
+        p.moving(100 * s)
+        p.leftVehicle(200 * s)
+        assertFalse(p.moving(150 * s)) // an older fix doesn't cancel a later walk
+        assertNull(p.check(205 * s, "disconnected"))
+        assertEquals("left_vehicle", p.check(210 * s, "disconnected"))
+    }
 }

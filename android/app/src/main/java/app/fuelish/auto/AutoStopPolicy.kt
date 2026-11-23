@@ -13,7 +13,10 @@ package app.fuelish.auto
  *   never stops a recording, so a flaky MX+ can't cut a drive short.
  * - Android said the person left the vehicle (they're walking: see [DriveDetect]), and the engine
  *   isn't answering, for [stopAfterDisconnectNs]. It covers a drive whose adapter dropped and never
- *   came back, which the engine-off rule can't see. The engine answering again cancels it.
+ *   came back, which the engine-off rule can't see. The engine answering again cancels it, and so
+ *   does the phone's GPS showing the car driving ([moving]): Android sometimes reports the walk to
+ *   the car late, seconds into the drive, and on a drive without the adapter nothing else would
+ *   cancel it, so it would end the recording minutes into the drive.
  * - [adapterWaitNs] after the first check the engine still hasn't answered once: the recording was
  *   started by detecting a drive, and this isn't a car with the adapter in it (a friend's car, a bus).
  *   Unless there's other evidence it's your car ([ownCarEvidence]): the adapter's Bluetooth link came
@@ -56,6 +59,16 @@ class AutoStopPolicy(
             carConnected = false
             disconnectedAtNs = nowNs
         }
+    }
+
+    /**
+     * GPS shows the car driving at [nowNs]: a "left the vehicle" before this was a false alarm (or a
+     * walk that ended in this car). Returns true when that cancelled one.
+     */
+    fun moving(nowNs: Long): Boolean {
+        if (leftVehicleAtNs == 0L || leftVehicleAtNs > nowNs) return false
+        leftVehicleAtNs = 0
+        return true
     }
 
     /** Android detected the person leaving the vehicle (walking) at [nowNs]. */
