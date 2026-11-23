@@ -157,6 +157,7 @@ class RecorderService : Service() {
         private val watch = DriveWatch(
             expectAdapter = !detected && cfg.obd.optBoolean("enabled") && cfg.obd.optString("deviceAddress").isNotBlank(),
             milWasOn = Prefs.milOn(ctx),
+            failedBefore = Prefs.adapterFailedDrives(ctx),
         )
         private val tally = DriveTally()
         private var lastGpsNs = 0L
@@ -416,6 +417,13 @@ class RecorderService : Service() {
             tick.removeCallbacksAndMessages(null)
             tickThread.quitSafely()
             event("stop", reason)
+            // A drive that went somewhere counts toward (or clears) the replug hint; a recording parked
+            // in place only clears it, if the adapter worked.
+            when (watch.adapterFailed) {
+                false -> Prefs.setAdapterFailedDrives(ctx, 0)
+                true -> if (tally.miles >= 0.3) Prefs.setAdapterFailedDrives(ctx, Prefs.adapterFailedDrives(ctx) + 1)
+                null -> {}
+            }
             sensors.stop()
             obd?.stop()
             power.sample()

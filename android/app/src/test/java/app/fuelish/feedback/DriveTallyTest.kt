@@ -33,12 +33,12 @@ class DriveTallyTest {
 
     @Test fun theSummarySaysWhatItKnows() {
         assertEquals(
-            "Drive saved. 14.2 miles in 23 minutes. 0.41 gallons, 35 miles per gallon, about $1.40 of gas.",
+            "Drive saved. 14.2 miles in 23 minutes. 0.41 gallons of gas, 35 miles per gallon, about $1.40.",
             DriveTally.summary(14.2, 23.2, 0.41, 3.41),
         )
         assertEquals("Drive saved. 3.0 miles in 1 hour 5 minutes.", DriveTally.summary(3.0, 65.0, null, 3.0))
         assertEquals(
-            "Drive saved. 2.0 miles in 6 minutes. 0.08 gallons, 25 miles per gallon, about 26 cents of gas.",
+            "Drive saved. 2.0 miles in 6 minutes. 10 ounces of gas, 25 miles per gallon, about 26 cents.",
             DriveTally.summary(2.0, 6.0, 0.08, 3.25),
         )
         assertNull(DriveTally.summary(0.1, 2.0, 0.01, 3.0))

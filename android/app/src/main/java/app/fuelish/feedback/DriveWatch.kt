@@ -9,7 +9,10 @@ import java.util.Locale
  * - The adapter never answered 90 s into a drive it should be in (and the phone is moving), or it
  *   answered and then the link dropped for 20 s while moving. A link that drops after the car stopped
  *   answering is the car being switched off (the adapter goes to sleep), not a problem. When it comes
- *   back after a drop, that's said too.
+ *   back after a drop, that's said too. When the drive before also ended without the adapter
+ *   ([failedBefore]), the not-connecting line says to unplug it and plug it back in: an MX+ that
+ *   stopped taking connections stayed that way for days, through car-off sleeps and a phone restart,
+ *   until it was replugged.
  * - The check-engine light came on (compared with the last reading on any earlier drive, so a light
  *   that stays on isn't announced every drive).
  * - Coolant at [HOT_C] or more for 30 s (normal is about 90–105 °C); said again only after it cools
@@ -24,13 +27,19 @@ import java.util.Locale
  *
  * Engine values count only while the engine is answering; the last reading of a gone link isn't news.
  */
-class DriveWatch(private val expectAdapter: Boolean, milWasOn: Boolean) {
+class DriveWatch(private val expectAdapter: Boolean, milWasOn: Boolean, private val failedBefore: Int = 0) {
     enum class Kind { ADAPTER_NOT_CONNECTING, ADAPTER_LOST, ADAPTER_BACK, CHECK_ENGINE, ENGINE_HOT, NOT_CHARGING, LONG_IDLE }
     data class Cue(val kind: Kind, val value: Double? = null)
 
     /** The check-engine light as last read; persist it so the next drive compares with it. */
     var milOn = milWasOn
         private set
+
+    /**
+     * Whether this drive ended without the adapter working: it never answered, or the link dropped
+     * while driving and never came back. Null when no adapter was expected (nothing to count).
+     */
+    val adapterFailed: Boolean? get() = if (!expectAdapter) null else !engineAnswered || lostSaid
     private var startNs = Long.MIN_VALUE
     private var engineAnswered = false
     private var lastAnswerNs = 0L
@@ -69,7 +78,7 @@ class DriveWatch(private val expectAdapter: Boolean, milWasOn: Boolean) {
 
         if (expectAdapter && !engineAnswered && !notConnectingSaid && linkDown && moving && nowNs - startNs >= NOT_CONNECTING_NS) {
             notConnectingSaid = true
-            out += Cue(Kind.ADAPTER_NOT_CONNECTING)
+            out += Cue(Kind.ADAPTER_NOT_CONNECTING, failedBefore.toDouble())
         }
         if (engineAnswered && !lostSaid && !engineOffSinceAnswer && linkDown && moving && nowNs - lastAnswerNs >= LOST_NS) {
             lostSaid = true
@@ -148,7 +157,9 @@ class DriveWatch(private val expectAdapter: Boolean, milWasOn: Boolean) {
                     else -> "."
                 } + " Switching off saves gas on a longer wait."
             }
-            Kind.ADAPTER_NOT_CONNECTING -> "Fuelish can't reach the O B D adapter. This drive is recording from the phone only."
+            Kind.ADAPTER_NOT_CONNECTING -> if ((cue.value ?: 0.0) >= 1) {
+                "Fuelish still can't reach the O B D adapter. Try unplugging it and plugging it back in. This drive is recording from the phone only."
+            } else "Fuelish can't reach the O B D adapter. This drive is recording from the phone only."
             Kind.ADAPTER_LOST -> "The O B D adapter disconnected. Still recording from the phone."
             Kind.ADAPTER_BACK -> "Adapter reconnected."
             Kind.CHECK_ENGINE -> "The check engine light just came on."

@@ -21,6 +21,39 @@ class DriveWatchTest {
         assertEquals(emptyList<Kind>(), kinds(w, 200, "connecting"))
     }
 
+    @Test fun afterADriveWithoutTheAdapterItSaysToReplugIt() {
+        val first = DriveWatch(expectAdapter = true, milWasOn = false)
+        first.tick(0, "connecting", none, null, true)
+        val once = first.tick(96 * s, "disconnected", none, null, true).single()
+        assertEquals("Fuelish can't reach the O B D adapter. This drive is recording from the phone only.", DriveWatch.words(once))
+        assertEquals(true, first.adapterFailed)
+
+        val again = DriveWatch(expectAdapter = true, milWasOn = false, failedBefore = 1)
+        again.tick(0, "connecting", none, null, true)
+        val cue = again.tick(96 * s, "disconnected", none, null, true).single()
+        assertEquals(
+            "Fuelish still can't reach the O B D adapter. Try unplugging it and plugging it back in. This drive is recording from the phone only.",
+            DriveWatch.words(cue),
+        )
+    }
+
+    @Test fun aDriveCountsAsAdapterFailedOnlyIfTheLinkNeverWorkedOrNeverCameBack() {
+        val ok = DriveWatch(expectAdapter = true, milWasOn = false)
+        kinds(ok, 0, "polling")
+        kinds(ok, 10, "waiting_vehicle", moving = false) // switched off: the adapter sleeps
+        kinds(ok, 40, "disconnected", moving = false)
+        assertEquals(false, ok.adapterFailed)
+
+        val lost = DriveWatch(expectAdapter = true, milWasOn = false)
+        kinds(lost, 0, "polling")
+        assertEquals(listOf(Kind.ADAPTER_LOST), kinds(lost, 25, "connecting"))
+        assertEquals(true, lost.adapterFailed)
+        assertEquals(listOf(Kind.ADAPTER_BACK), kinds(lost, 40, "polling"))
+        assertEquals(false, lost.adapterFailed)
+
+        assertEquals(null, DriveWatch(expectAdapter = false, milWasOn = false).adapterFailed)
+    }
+
     @Test fun aLongIdleIsMentionedOnceWithWhatItBurned() {
         val w = DriveWatch(expectAdapter = true, milWasOn = false)
         val idling = mapOf("speed" to 0.0, "rpm" to 700.0, "fuel_rate" to 1.0) // 1 L/h

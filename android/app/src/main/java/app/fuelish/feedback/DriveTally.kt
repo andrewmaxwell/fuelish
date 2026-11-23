@@ -84,8 +84,8 @@ class DriveTally {
             val parts = mutableListOf("Drive saved. ${fmt1(miles)} miles in ${duration(minutes)}.")
             if (gallons != null && gallons > 0) {
                 val mpg = (miles / gallons).roundToInt()
-                var s = "${fmtGal(gallons)} gallons, $mpg miles per gallon"
-                if (price != null) s += ", about ${money(gallons * price)} of gas"
+                var s = "${spokenGas(gallons)}, $mpg miles per gallon"
+                if (price != null) s += ", about ${money(gallons * price)}"
                 parts += "$s."
             }
             return parts.joinToString(" ")
@@ -98,7 +98,17 @@ class DriveTally {
         }
 
         private fun fmt1(x: Double) = String.format(Locale.US, "%.1f", x)
-        private fun fmtGal(g: Double) = String.format(Locale.US, if (g < 1) "%.2f" else "%.1f", g)
+        /**
+         * A gas amount to say aloud: ounces under a quarter gallon ("6 ounces of gas" reads better than
+         * "0.05 gallons"), else gallons. The web page uses the same quarter-gallon line (route.js gasAmount).
+         */
+        fun spokenGas(g: Double): String {
+            if (g < 0.25) {
+                val oz = (g * 128).roundToInt().coerceAtLeast(1)
+                return if (oz == 1) "1 ounce of gas" else "$oz ounces of gas"
+            }
+            return String.format(Locale.US, if (g < 1) "%.2f gallons of gas" else "%.1f gallons of gas", g)
+        }
 
         private fun duration(minutes: Double): String {
             val m = minutes.roundToInt().coerceAtLeast(1)

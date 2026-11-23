@@ -2,6 +2,20 @@
 // colored and sized by a chosen metric. Points come from chunk summaries (phone-computed,
 // trackFormat 2) or, for older recordings, are rebuilt in the browser from the raw chunks.
 
+// An amount of gas in words people picture: fluid ounces under a quarter gallon ("6.4 oz", "19 oz"),
+// gallons above it ("1.25 gal"). A trip's few hundredths of a gallon read as nothing; ounces don't.
+const OZ_PER_GAL = 128;
+function gasAmount(g) {
+  if (g == null || !Number.isFinite(g)) return "–";
+  const a = Math.abs(g);
+  if (a < 0.25) {
+    const oz = g * OZ_PER_GAL;
+    if (oz !== 0 && Math.abs(oz) < 0.05) return "<0.1 oz";
+    return `${Math.abs(oz) < 9.95 ? +oz.toFixed(1) : Math.round(oz)} oz`;
+  }
+  return `${a < 10 ? g.toFixed(2) : g.toFixed(1)} gal`;
+}
+
 // Extremes of a long list without spreading it into arguments (engines cap argument counts, and a
 // long history of one-second rows passes that).
 function extent(list, f = (x) => x) {
@@ -334,7 +348,8 @@ const Route = (() => {
     let total = 0;
     for (let i = 1; i < pts.length; i++) if (pts[i].trip === pts[i - 1].trip) total += amount(pts[i - 1], pts[i]);
     if (!(total > 0)) return null;
-    const steps = price != null ? [0.05, 0.1, 0.25, 0.5, 1] : [0.01, 0.025, 0.05, 0.1, 0.25];
+    // Without a price the steps are whole ounces (1–16 oz), then quarter gallons.
+    const steps = price != null ? [0.05, 0.1, 0.25, 0.5, 1] : [1, 2, 4, 8, 16, 32, 64].map((oz) => oz / OZ_PER_GAL);
     const step = steps.find((s) => total / s <= 60) ?? steps[steps.length - 1];
     return { marks: marksAlong(pts, step, amount), step, unit: price != null ? "$" : "gal" };
   }

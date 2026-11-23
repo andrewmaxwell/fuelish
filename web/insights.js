@@ -403,8 +403,8 @@ const Insights = (() => {
         <p class="hint" id="trend-note" hidden></p>
         ${months.length > 1 ? `<h3>Month by month</h3>
         <div class="trend-table-wrap"><table class="trend-table">
-          <thead><tr><th>Month</th><th>Trips</th><th>Miles</th><th>mpg</th><th>Gallons</th><th>Gas</th><th>Per mile</th></tr></thead>
-          <tbody>${months.map((m) => `<tr><th>${esc(new Date(m.t).toLocaleDateString([], { month: "long", ...(new Date(m.t).getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) }))}</th><td>${m.trips}</td><td>${m.miles.toFixed(0)}</td><td>${m.mpg != null ? m.mpg.toFixed(1) : "–"}</td><td>${gallons(m.galTrip)}</td><td>${m.cost != null ? money(m.cost) : "–"}</td><td>${m.cost != null && m.miles > 0 ? ((m.cost / m.miles) * 100).toFixed(1) + "¢" : "–"}</td></tr>`).join("")}</tbody>
+          <thead><tr><th>Month</th><th>Trips</th><th>Miles</th><th>mpg</th><th>Gas used</th><th>Gas</th><th>Per mile</th></tr></thead>
+          <tbody>${months.map((m) => `<tr><th>${esc(new Date(m.t).toLocaleDateString([], { month: "long", ...(new Date(m.t).getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) }))}</th><td>${m.trips}</td><td>${m.miles.toFixed(0)}</td><td>${m.mpg != null ? m.mpg.toFixed(1) : "–"}</td><td>${gasAmount(m.galTrip)}</td><td>${m.cost != null ? money(m.cost) : "–"}</td><td>${m.cost != null && m.miles > 0 ? ((m.cost / m.miles) * 100).toFixed(1) + "¢" : "–"}</td></tr>`).join("")}</tbody>
         </table></div>` : ""}
         ${best.length >= 3 ? `<div class="trend-rank">
           <div><h3>Best trips <span>${RANK_MIN_MILES} miles or more</span></h3><ol class="legs">${best.map(tripLine).join("")}</ol></div>
@@ -483,7 +483,7 @@ const Insights = (() => {
       <div class="figs">
         ${fig(miles.toFixed(miles < 10 ? 1 : 0), "miles", "")}
         ${fig(gal ? (fuelMiles / gal).toFixed(0) : "–", "miles per gallon")}
-        ${fig(gallons(galTrip), "gallons")}
+        ${fig(gasAmount(galTrip), "of gas")}
         ${fig(cost && priced ? money(cost) : "–", "spent on gas")}
         ${fig(gal ? Math.round((idle / gal) * 100) + "%" : "–", `burned idling${idleCost ? ` (${money(idleCost)})` : ""}`)}
       </div>

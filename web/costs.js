@@ -74,7 +74,7 @@ const Costs = (() => {
     if (fuelGal == null && mpgGuess > 0) { fuelGal = miles / mpgGuess; guessed = true; }
     const how = guessed ? "guessed at this trip's usual mpg" : `${fuelSource === "car" ? "car-reported" : "airflow estimate"}${extrapolated ? ", partly extrapolated" : ""}`;
     const items = [
-      { key: "fuel", label: "Gas", amount: fuelGal != null && price != null ? fuelGal * price : null, note: fuelGal != null ? `${fmtGal(fuelGal)} gal (${how})${price != null ? ` at ${money(price)}, regional average` : ""}` : "no engine data" },
+      { key: "fuel", label: "Gas", amount: fuelGal != null && price != null ? fuelGal * price : null, note: fuelGal != null ? `${gasAmount(fuelGal)} (${how})${price != null ? ` at ${money(price)}, regional average` : ""}` : "no engine data" },
       { key: "time", label: "Your time", amount: (minutes / 60) * s.timePerHour, note: `${fmtMin(minutes)} at ${money(s.timePerHour)}/h` },
       { key: "wear", label: "Wear and repairs", amount: miles * s.wearPerMile, note: `${miles.toFixed(1)} mi at ${cents(s.wearPerMile)}/mi` },
       { key: "value", label: "Lost resale value", amount: miles * s.valuePerMile, note: `${cents(s.valuePerMile)}/mi` },
@@ -106,7 +106,6 @@ const Costs = (() => {
 
   const money = (d) => (d == null ? "–" : Math.abs(d) < 10 ? "$" + d.toFixed(2) : "$" + Math.round(d).toLocaleString());
   const cents = (d) => (d < 1 ? `${+(d * 100).toFixed(1)}¢` : money(d));
-  const fmtGal = (g) => (g < 0.1 ? g.toFixed(3) : g < 10 ? g.toFixed(2) : g.toFixed(1));
   const fmtMin = (m) => (m < 60 ? `${Math.round(m)} min` : `${Math.floor(m / 60)} h ${Math.round(m % 60)} min`);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
@@ -350,7 +349,7 @@ const Costs = (() => {
         const extra = median(cold.map((x) => x.extraGal)), warm = median(cold.map((x) => x.warmMs));
         const each = extra * (price ?? 0);
         c.innerHTML = `<h2>Cold starts</h2>
-          <p class="lede">From a cold engine, warming up takes about ${fmtMin(warm / 60000)} and burns roughly ${extra.toFixed(3)} gal more than driving at the same speeds warm${price != null ? `: about ${cents(each)} each time` : ""} (median of ${cold.length} cold start${cold.length === 1 ? "" : "s"}).
+          <p class="lede">From a cold engine, warming up takes about ${fmtMin(warm / 60000)} and burns roughly ${gasAmount(extra)} more than driving at the same speeds warm${price != null ? `: about ${cents(each)} each time` : ""} (median of ${cold.length} cold start${cold.length === 1 ? "" : "s"}).
           Errands chained into one outing pay this once; separate trips hours apart pay it each time.</p>
           <p class="hint">A rough comparison: warm driving is matched by speed and whether you were speeding up or slowing, not by road, hill or load.${cold.unmatched ? ` ${cold.unmatched} cold start${cold.unmatched === 1 ? "" : "s"} had too little comparable warm driving and ${cold.unmatched === 1 ? "isn't" : "aren't"} counted.` : ""}</p>`;
       } else c.innerHTML = `<h2>Cold starts</h2><p class="lede">${cold.unmatched ? `${plural(cold.unmatched, "cold start")} recorded, but not enough warm driving at the same speeds to compare against yet.` : "No cold starts with coolant readings yet."}</p>`;

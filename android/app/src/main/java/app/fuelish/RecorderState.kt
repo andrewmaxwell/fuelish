@@ -197,6 +197,9 @@ object Prefs {
     /** The check-engine light as last read on a drive, so a light that stays on isn't announced every drive. */
     fun milOn(c: Context) = sp(c).getBoolean("milOn", false)
     fun setMilOn(c: Context, on: Boolean) = sp(c).edit().putBoolean("milOn", on).apply()
+    /** Drives in a row that ended without the OBD adapter working (see DriveWatch.adapterFailed). */
+    fun adapterFailedDrives(c: Context) = sp(c).getInt("adapterFailedDrives", 0)
+    fun setAdapterFailedDrives(c: Context, n: Int) = sp(c).edit().putInt("adapterFailedDrives", n).apply()
     /** Latest regional gas prices for the spoken summary: {"fetchedMs", "prices": {region: $/gal}} (see GasPrice). */
     fun gasPrices(c: Context): String? = sp(c).getString("gasPrices", null)
     fun setGasPrices(c: Context, json: String) = sp(c).edit().putString("gasPrices", json).apply()

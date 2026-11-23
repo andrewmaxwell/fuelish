@@ -2,7 +2,6 @@
 // and week pages; and how small amounts of fuel and money are written.
 
 // Small amounts of fuel and money need more digits than big ones.
-const gallons = (g) => (g < 0.1 ? g.toFixed(3) : g < 10 ? g.toFixed(2) : g.toFixed(1));
 const money = (d) => (d < 10 ? "$" + d.toFixed(2) : "$" + Math.round(d).toLocaleString());
 // Amounts compared with each other on a short trip: under a dollar, cents with a decimal ("23.6¢"),
 // so "23.6¢ against 22.1¢" doesn't read as "$0.24 against $0.22, 7% more".
@@ -91,11 +90,11 @@ function drawRoute(pts, sm, { withDay = false } = {}) {
     } else if (shownState.marks === "gas") {
       const g = Route.gasMarks(pts, price);
       gasStep = g && { step: g.step, unit: g.unit };
-      const lab = (v) => (g.unit === "$" ? (v < 1 ? `${Math.round(v * 100)}¢` : `$${Number.isInteger(+v.toFixed(2)) ? Math.round(v) : v.toFixed(2)}`) : `${+v.toFixed(3)} gal`);
+      const lab = (v) => (g.unit === "$" ? (v < 1 ? `${Math.round(v * 100)}¢` : `$${Number.isInteger(+v.toFixed(2)) ? Math.round(v) : v.toFixed(2)}`) : g.step < 0.25 ? `${Math.round(v * OZ_PER_GAL)} oz` : gasAmount(v));
       view.ticks(g ? g.marks.map((m) => ({ ...m, major: m.n % 5 === 0, label: lab(m.n * g.step) })) : []);
     } else view.ticks([]);
   };
-  const stepName = (g) => (g.unit === "$" ? (g.step < 1 ? `${Math.round(g.step * 100)}¢` : "$1") : `${g.step} gal`);
+  const stepName = (g) => (g.unit === "$" ? (g.step < 1 ? `${Math.round(g.step * 100)}¢` : "$1") : gasAmount(g.step));
   const marksSwitch = () => {
     const every = shownState.marks === "min" ? "Every minute" : gasStep ? `Every ${stepName(gasStep)} of gas` : "";
     const opts = [["min", "Minutes"], ...(hasEngine ? [["gas", "Gas"]] : []), ["off", "Off"]];

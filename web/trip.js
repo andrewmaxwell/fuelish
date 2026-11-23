@@ -245,7 +245,7 @@ function coachCard(el, { pts, e, vehicle, towing = false, price, timePerHour = 0
   // Amounts are shown on the headline's gallons (which fill in the few miles without fuel readings),
   // so "what it took" here is the gas figure at the top of the page, and the lines still add up.
   const k = coachScale(e.galTrip ?? e.gal, r.actual.gal);
-  const amount = (gal) => (price != null ? smallMoney(gal * k * price) : `${gallons(gal * k)} gal`);
+  const amount = (gal) => (price != null ? smallMoney(gal * k * price) : gasAmount(gal * k));
   const dur = (s) => (Math.abs(s) < 60 ? `${Math.max(1, Math.round(Math.abs(s)))} s` : `${(Math.abs(s) / 60).toFixed(Math.abs(s) < 600 ? 1 : 0)} min`);
   const worth = (l) => (price != null ? Math.abs(l.gal) * k * price >= 0.005 : Math.abs(l.gal) >= 0.0015);
   const lines = r.lines.filter(worth).sort((a, b) => b.gal - a.gal);
@@ -316,7 +316,7 @@ function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle =
   const epa = Engine.epa(vehicle);
   figs.innerHTML = fig(mi, "miles") + timeFig(sm) +
     fig(e.mpg != null ? (thin ? "≈" : "") + e.mpg.toFixed(0) : "–", epa ? `mpg · EPA ${epa.comb}` : "mpg") +
-    fig(galShown != null && gas ? (thin ? "≈" : "") + cost(galShown) : "–", galShown != null ? `for ${gallons(galShown)} gal` : "gas");
+    fig(galShown != null && gas ? (thin ? "≈" : "") + cost(galShown) : "–", galShown != null ? `for ${gasAmount(galShown)}` : "gas");
   // Where the numbers come from, folded away behind one short line; warnings about missing data stay out.
   const note = document.getElementById("gas-note");
   const aboutFuel = [e.fromCar ? "Fuel as reported by the car." : "Fuel is estimated from airflow, the air-fuel target and the engine's fuel trims (this car doesn't report fuel use), not a pump reading."];
@@ -340,7 +340,7 @@ function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle =
         <div class="split-row">
           <div class="split-name"><b>${name}</b><span>${note}</span>${rated ? `<span>EPA ${rated}</span>` : ""}</div>
           <div class="split-bar"><i style="width:${((g.mpg ?? 0) / max) * 100}%"></i></div>
-          <div class="split-val"><b>${g.mpg != null ? g.mpg.toFixed(0) : "–"}<small>mpg</small></b><span>${g.miles.toFixed(g.miles < 10 ? 1 : 0)} mi · ${gallons(g.gal)} gal</span></div>
+          <div class="split-val"><b>${g.mpg != null ? g.mpg.toFixed(0) : "–"}<small>mpg</small></b><span>${g.miles.toFixed(g.miles < 10 ? 1 : 0)} mi · ${gasAmount(g.gal)}</span></div>
         </div>`).join("")}</div>`);
   }
 
@@ -356,10 +356,10 @@ function sideEngine(sm, e, { gas = null, partial = false, trip = null, vehicle =
     const pct = (g) => Math.min(100, Math.max(0, (g / e.gal) * 100));
     const top2 = kinds.filter(([, , g]) => pct(g) >= 1).sort((x, y) => y[2] - x[2]).slice(0, 2);
     setFold("waste", "Where the fuel went", top2.map(([, label, g]) => `${Math.round(pct(g))}% ${label.toLowerCase()}`).join(" · "), `
-      <p class="sec-meta">${gallons(e.gal)} gal · ${esc(Engine.fuelLabel(e))}</p>
+      <p class="sec-meta">${gasAmount(e.gal)} · ${esc(Engine.fuelLabel(e))}</p>
       <div class="waste-bar" role="img" aria-label="${esc(kinds.map(([, label, g]) => `${label} ${Math.round(pct(g))}%`).join(", "))}">${kinds.map(([k, , g]) => `<i class="w-${k}" style="flex-grow:${g}"></i>`).join("")}</div>
       <dl class="waste-list">${kinds.map(([k, label, g, why]) => `
-        <div><dt><i class="sw w-${k}"></i>${label}<small>${why}</small></dt><dd>${gallons(g)} gal${cost(g) ? ` · ${cost(g)}` : ""} · ${Math.round(pct(g))}%</dd></div>`).join("")}
+        <div><dt><i class="sw w-${k}"></i>${label}<small>${why}</small></dt><dd>${gasAmount(g)}${cost(g) ? ` · ${cost(g)}` : ""} · ${Math.round(pct(g))}%</dd></div>`).join("")}
         ${e.cutMs >= 30000 ? `<div><dt><i class="sw w-cut"></i>Coasting, fuel off<small>the engine cut fuel entirely while you coasted</small></dt><dd>${fmtDur(e.cutMs)} · 0 gal</dd></div>` : ""}</dl>`);
     about("waste", "Where the fuel went", `
         <p>${e.fromCar ? "Fuel use is as reported by the car." : `This car doesn't report fuel use, so it's estimated from the air flowing into the engine and the air-fuel ratio the engine asks for${e.perSample ? ", reading by reading" : ""}, corrected by the engine's fuel trims (how much fuel it adds or removes beyond what the airflow sensor implies).`}

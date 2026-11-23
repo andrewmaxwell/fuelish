@@ -10,7 +10,7 @@ export function load(...files) {
   const ctx = vm.createContext({ console, fetch: async () => ({ ok: false }), setTimeout, Promise, Map, Set, Math, Date, JSON });
   for (const f of files) vm.runInContext(readFileSync(new URL(f, dir), "utf8") + "\n;globalThis.__last = 1;", ctx, { filename: f });
   // Top-level const declarations aren't properties of the context; expose them.
-  return vm.runInContext("({ Route, Engine, extent, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}), ...(typeof Ribbon !== 'undefined' ? { Ribbon } : {}), ...(typeof Terrain !== 'undefined' ? { Terrain } : {}), ...(typeof Stops !== 'undefined' ? { Stops } : {}), ...(typeof Ideal !== 'undefined' ? { Ideal } : {}), ...(typeof Outings !== 'undefined' ? { Outings } : {}), ...(typeof Insights !== 'undefined' ? { Insights } : {}), ...(typeof Gas !== 'undefined' ? { Gas } : {}) })", ctx);
+  return vm.runInContext("({ Route, Engine, extent, gasAmount, ...(typeof Costs !== 'undefined' ? { Costs } : {}), ...(typeof Repeats !== 'undefined' ? { Repeats } : {}), ...(typeof Cvt !== 'undefined' ? { Cvt } : {}), ...(typeof Coach !== 'undefined' ? { Coach } : {}), ...(typeof Towing !== 'undefined' ? { Towing } : {}), ...(typeof Ribbon !== 'undefined' ? { Ribbon } : {}), ...(typeof Terrain !== 'undefined' ? { Terrain } : {}), ...(typeof Stops !== 'undefined' ? { Stops } : {}), ...(typeof Ideal !== 'undefined' ? { Ideal } : {}), ...(typeof Outings !== 'undefined' ? { Outings } : {}), ...(typeof Insights !== 'undefined' ? { Insights } : {}), ...(typeof Gas !== 'undefined' ? { Gas } : {}) })", ctx);
 }
 const { Engine, Route, extent } = load("route.js", "engine.js");
 
@@ -717,4 +717,18 @@ test("the rules the phone and the server have copies of give the shared answers"
     const got = Engine.derive([row])[0].fuelGs;
     if (gs == null) assert.equal(got, null); else assert.ok(Math.abs(got - gs) < 1e-6, JSON.stringify(v));
   }
+});
+
+test("small amounts of gas read in ounces, larger ones in gallons", () => {
+  const { gasAmount } = load("route.js", "engine.js");
+  assert.equal(gasAmount(0.05), "6.4 oz");
+  assert.equal(gasAmount(0.15), "19 oz");
+  assert.equal(gasAmount(0.001), "0.1 oz");
+  assert.equal(gasAmount(0.0002), "<0.1 oz");
+  assert.equal(gasAmount(0), "0 oz");
+  assert.equal(gasAmount(0.25), "0.25 gal");
+  assert.equal(gasAmount(1.234), "1.23 gal");
+  assert.equal(gasAmount(12.34), "12.3 gal");
+  assert.equal(gasAmount(-0.02), "-2.6 oz");
+  assert.equal(gasAmount(null), "–");
 });

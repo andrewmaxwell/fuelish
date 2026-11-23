@@ -159,7 +159,7 @@ function showScore(el, f) {
   const cost = card?.querySelector(".card-cost"), mpg = card?.querySelector(".card-mpg");
   if (cost && f?.cost != null) {
     cost.hidden = false;
-    cost.title = `${f.approx ? "About " : ""}${gallons(f.gal)} gal of gas at ${money(f.price)}/gal, the regional average that week`;
+    cost.title = `${f.approx ? "About " : ""}${gasAmount(f.gal)} of gas at ${money(f.price)}/gal, the regional average that week`;
     cost.innerHTML = `<b>${f.approx ? "≈" : ""}${money(f.cost)}</b> gas`;
   }
   if (mpg && f?.mpg != null) {
